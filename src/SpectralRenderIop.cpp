@@ -1,5 +1,9 @@
 #include "SpectralRenderIop.h"
 
+#ifdef SPECTRAL_HAS_OSD
+#include "SpectralSubdiv.h"
+#endif
+
 // PXR — USD stage traversal
 #include <pxr/usd/usd/stage.h>
 #include <pxr/usd/usd/prim.h>
@@ -244,6 +248,87 @@ void SpectralRenderIop::_LoadStage()
         VtVec3fArray normals;
         mesh.GetNormalsAttr().Get(&normals, timeCode);
         TfToken normalsInterp = mesh.GetNormalsInterpolation();
+
+        // ----------------------------------------------------------
+        // Subdivision (Phase 2)
+        //   If the mesh has a subdivision scheme other than "none",
+        //   refine it using OpenSubdiv before triangulating.
+        // ----------------------------------------------------------
+#ifdef SPECTRAL_HAS_OSD
+        {
+            TfToken subdivScheme;
+            mesh.GetSubdivisionSchemeAttr().Get(&subdivScheme, timeCode);
+            std::string schemeStr = subdivScheme.GetString();
+
+            SpectralSubdiv::Scheme scheme = SpectralSubdiv::SchemeFromToken(schemeStr);
+            if (scheme != SpectralSubdiv::Scheme::None) {
+                SpectralSubdiv::Input subIn;
+                subIn.points            = points;
+                subIn.faceVertexCounts  = faceVertexCounts;
+                subIn.faceVertexIndices = faceVertexIndices;
+                subIn.scheme            = scheme;
+                subIn.level             = 2;
+
+                // Only pass normals if they're per-vertex (matching point count)
+                if (normalsInterp == UsdGeomTokens->vertex &&
+                    static_cast<int>(normals.size()) == static_cast<int>(points.size())) {
+                    subIn.normals = normals;
+                }
+
+                SpectralSubdiv::Output subOut;
+                if (SpectralSubdiv::Refine(subIn, subOut)) {
+                    // Replace coarse data with refined data
+                    points = subOut.points;
+
+                    // If subdivision produced normals, use them.
+                    // Otherwise compute smooth normals from the refined mesh.
+                    if (!subOut.normals.empty()) {
+                        normals = subOut.normals;
+                        normalsInterp = UsdGeomTokens->vertex;
+                    } else {
+                        // Accumulate area-weighted face normals per vertex
+                        const int nPts = static_cast<int>(points.size());
+                        const int nIdx = static_cast<int>(subOut.triangleIndices.size());
+                        normals.resize(nPts);
+                        for (int i = 0; i < nPts; ++i)
+                            normals[i] = GfVec3f(0.f);
+
+                        for (int i = 0; i + 2 < nIdx; i += 3) {
+                            int i0 = subOut.triangleIndices[i];
+                            int i1 = subOut.triangleIndices[i + 1];
+                            int i2 = subOut.triangleIndices[i + 2];
+                            if (i0 >= nPts || i1 >= nPts || i2 >= nPts) continue;
+                            GfVec3f e0 = points[i1] - points[i0];
+                            GfVec3f e1 = points[i2] - points[i0];
+                            GfVec3f fn = GfCross(e0, e1); // area-weighted
+                            normals[i0] += fn;
+                            normals[i1] += fn;
+                            normals[i2] += fn;
+                        }
+                        for (int i = 0; i < nPts; ++i) {
+                            float len = normals[i].GetLength();
+                            normals[i] = (len > 1e-8f)
+                                ? normals[i] / len
+                                : GfVec3f(0.f, 1.f, 0.f);
+                        }
+                        normalsInterp = UsdGeomTokens->vertex;
+                        fprintf(stderr, "SpectralRender: computed %d smooth normals\n", nPts);
+                    }
+
+                    // Rebuild topology from refined triangle indices
+                    const int numTris = static_cast<int>(subOut.triangleIndices.size()) / 3;
+                    faceVertexCounts.resize(numTris);
+                    for (int i = 0; i < numTris; ++i) faceVertexCounts[i] = 3;
+                    faceVertexIndices.resize(subOut.triangleIndices.size());
+                    for (size_t i = 0; i < subOut.triangleIndices.size(); ++i)
+                        faceVertexIndices[i] = subOut.triangleIndices[i];
+
+                    fprintf(stderr, "SpectralRender: mesh %s subdivided (%s level 2)\n",
+                            prim.GetPath().GetText(), schemeStr.c_str());
+                }
+            }
+        }
+#endif // SPECTRAL_HAS_OSD
 
         // World transform
         GfMatrix4d worldXf = xfCache.GetLocalToWorldTransform(prim);

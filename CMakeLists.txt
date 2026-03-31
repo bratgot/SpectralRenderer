@@ -83,13 +83,30 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
+# OpenSubdiv — subdivision surface tessellation (Phase 2)
+# ---------------------------------------------------------------------------
+set(OSD_ROOT "C:/dev/opensubdiv-3.6.0" CACHE PATH "OpenSubdiv source root")
+set(OSD_LIB_DIR "${OSD_ROOT}/build/lib/Release" CACHE PATH "OpenSubdiv lib dir")
+
+find_library(LIB_OSD_CPU osdCPU PATHS "${OSD_LIB_DIR}" NO_DEFAULT_PATH)
+if(LIB_OSD_CPU)
+    message(STATUS "OpenSubdiv found: ${LIB_OSD_CPU}")
+    set(OSD_INCLUDE_DIR "${OSD_ROOT}")
+    set(HAS_OSD TRUE)
+else()
+    message(WARNING "OpenSubdiv NOT found — no subdivision tessellation")
+    set(HAS_OSD FALSE)
+endif()
+
+# ---------------------------------------------------------------------------
 # SpectralCore — static lib shared by both DLLs
-#   Contains: SpectralIntegrator (ray tracer), SpectralScene (geometry),
-#             SpectralBVH (Embree wrapper, Phase 2)
 # ---------------------------------------------------------------------------
 set(SPECTRAL_CORE_SOURCES src/SpectralIntegrator.cpp)
 if(HAS_EMBREE)
     list(APPEND SPECTRAL_CORE_SOURCES src/SpectralBVH.cpp)
+endif()
+if(HAS_OSD)
+    list(APPEND SPECTRAL_CORE_SOURCES src/SpectralSubdiv.cpp)
 endif()
 
 add_library(SpectralCore STATIC ${SPECTRAL_CORE_SOURCES})
@@ -102,6 +119,12 @@ if(HAS_EMBREE)
     target_include_directories(SpectralCore PUBLIC "${EMBREE_INCLUDE_DIR}")
     target_link_libraries(SpectralCore PUBLIC "${LIB_EMBREE}")
     target_compile_definitions(SpectralCore PUBLIC SPECTRAL_HAS_EMBREE=1)
+endif()
+
+if(HAS_OSD)
+    target_include_directories(SpectralCore PUBLIC "${OSD_INCLUDE_DIR}")
+    target_link_libraries(SpectralCore PUBLIC "${LIB_OSD_CPU}")
+    target_compile_definitions(SpectralCore PUBLIC SPECTRAL_HAS_OSD=1)
 endif()
 
 # ---------------------------------------------------------------------------
