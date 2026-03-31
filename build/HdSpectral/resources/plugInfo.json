@@ -1,0 +1,20 @@
+{
+    "Plugins": [
+        {
+            "Type": "library",
+            "Name": "HdSpectral",
+            "LibraryPath": "../HdSpectral.dll",
+            "ResourcePath": "resources",
+            "Root": ".",
+            "Info": {
+                "Types": {
+                    "HdSpectralRendererPlugin": {
+                        "bases": ["HdRendererPlugin"],
+                        "displayName": "Spectral (CPU)",
+                        "priority": 0
+                    }
+                }
+            }
+        }
+    ]
+}

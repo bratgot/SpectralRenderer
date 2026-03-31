@@ -1,0 +1,4 @@
+C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build/CMakeFiles/HdSpectral.dir
+C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build/CMakeFiles/INSTALL.dir
+C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build/CMakeFiles/ALL_BUILD.dir
+C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build/CMakeFiles/ZERO_CHECK.dir
