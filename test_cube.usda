@@ -1,0 +1,54 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Mesh "Cube"
+    {
+        float3[] extent = [(-0.5, -0.5, -0.5), (0.5, 0.5, 0.5)]
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [
+            0, 1, 3, 2,
+            2, 3, 5, 4,
+            4, 5, 7, 6,
+            6, 7, 1, 0,
+            1, 7, 5, 3,
+            6, 0, 2, 4
+        ]
+        normal3f[] normals = [
+            (0, 0, -1), (0, 0, -1), (0, 0, -1), (0, 0, -1),
+            (0, 1, 0),  (0, 1, 0),  (0, 1, 0),  (0, 1, 0),
+            (0, 0, 1),  (0, 0, 1),  (0, 0, 1),  (0, 0, 1),
+            (0, -1, 0), (0, -1, 0), (0, -1, 0), (0, -1, 0),
+            (1, 0, 0),  (1, 0, 0),  (1, 0, 0),  (1, 0, 0),
+            (-1, 0, 0), (-1, 0, 0), (-1, 0, 0), (-1, 0, 0)
+        ] (
+            interpolation = "faceVarying"
+        )
+        point3f[] points = [
+            (-0.5, -0.5, -0.5),
+            ( 0.5, -0.5, -0.5),
+            (-0.5,  0.5, -0.5),
+            ( 0.5,  0.5, -0.5),
+            (-0.5,  0.5,  0.5),
+            ( 0.5,  0.5,  0.5),
+            (-0.5, -0.5,  0.5),
+            ( 0.5, -0.5,  0.5)
+        ]
+        uniform token subdivisionScheme = "none"
+    }
+
+    def Camera "Camera"
+    {
+        float focalLength = 20
+        float horizontalAperture = 36
+        float verticalAperture = 24
+        float2 clippingRange = (0.1, 10000)
+        double3 xformOp:translate = (0, 0, 5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}

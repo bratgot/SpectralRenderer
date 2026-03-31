@@ -2,7 +2,7 @@
 
 #include "HdSpectralApi.h"
 
-// Pull in PXR types we need
+// PXR types
 #include "SpectralScene.h"
 #include "SpectralIntegrator.h"
 
@@ -10,8 +10,6 @@ PXR_NAMESPACE_USING_DIRECTIVE
 
 // NDK headers
 #include <DDImage/Iop.h>
-#include <DDImage/GeoOp.h>
-#include <DDImage/CameraOp.h>
 #include <DDImage/Knobs.h>
 #include <DDImage/Row.h>
 #include <DDImage/Format.h>
@@ -20,17 +18,16 @@ PXR_NAMESPACE_USING_DIRECTIVE
 #include <memory>
 #include <atomic>
 #include <mutex>
+#include <string>
 
 // ---------------------------------------------------------------------------
 // SpectralRenderIop
 //
-//   IMPORTANT: This class is defined at GLOBAL scope (not inside
-//   namespace DD::Image) to match the Nuke 17 NDK plugin convention.
-//   The SimpleBlur example and all other Foundry NDK samples use this
-//   pattern: `using namespace DD::Image;` then class at file scope.
+//   USD file-based render node for Nuke's 2D node graph / farm rendering.
+//   Reads a .usd/.usda/.usdc file via PXR UsdStage API, traverses
+//   UsdGeomMesh prims, and renders through SpectralIntegrator.
 //
-//   The Op::Description static member registers the node with Nuke's
-//   plugin system when the DLL is loaded via NUKE_PATH.
+//   Global scope + Op::Description pattern required by Nuke 17 NDK.
 // ---------------------------------------------------------------------------
 using namespace DD::Image;
 
@@ -43,13 +40,9 @@ public:
     explicit SpectralRenderIop(Node* node);
     ~SpectralRenderIop() override;
 
-    // Inputs
-    int  minimum_inputs()               const override { return 1; }
-    int  maximum_inputs()               const override { return 2; }
-    const char* input_label(int idx, char*) const override;
-    bool test_input(int idx, Op* op)    const override;
+    int  minimum_inputs()               const override { return 0; }
+    int  maximum_inputs()               const override { return 0; }
 
-    // NDK pipeline
     void _validate(bool forReal)        override;
     void _request(int x, int y, int r, int t,
                   ChannelMask channels, int count) override;
@@ -60,29 +53,33 @@ public:
 
     unsigned node_color() const override { return 0xFF8C1AFF; }
 
-    // Registration — Op::Description (NOT Iop::Description) with 2-arg ctor
     static const Op::Description description;
 
 private:
     static const char* const CLASS;
 
-    void            _SyncScene();
-    SpectralCamera  _BuildCamera() const;
-    void            _EnsureFrameRendered();
+    // Opens stage, loads meshes AND camera in one pass
+    void _LoadStage();
+    void _EnsureFrameRendered();
 
     // Knobs
+    const char* _usdFilePath = "";
+    int   _frame      = 1;
     int   _samples    = 1;
     int   _maxBounces = 4;
     int   _tileSize   = 64;
+    const char* _cameraPath = "";
 
-    // Output format — FormatPair is what Format_knob expects in Nuke 17
     FormatPair _outputFormat;
 
-    // Render state
+    // Scene + camera built together during _LoadStage
     std::unique_ptr<pxr::SpectralScene> _scene;
-    std::vector<float>                  _frameBuffer;
-    unsigned int                        _fbWidth  = 0;
-    unsigned int                        _fbHeight = 0;
-    std::atomic<bool>                   _frameReady { false };
-    std::mutex                          _renderMutex;
+    SpectralCamera                      _camera;
+
+    // Frame buffer
+    std::vector<float>  _frameBuffer;
+    unsigned int        _fbWidth  = 0;
+    unsigned int        _fbHeight = 0;
+    std::atomic<bool>   _frameReady { false };
+    std::mutex          _renderMutex;
 };
