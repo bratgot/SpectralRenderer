@@ -1,69 +1,90 @@
 cmake_minimum_required(VERSION 3.22)
 project(HdSpectral VERSION 0.1.0 LANGUAGES CXX)
 
-# ---------------------------------------------------------------------------
-# Toolchain — Nuke 17.0v1 Windows requires MSVC 14.3x (VS2022 / v143)
-# ---------------------------------------------------------------------------
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# ---------------------------------------------------------------------------
-# NUKE_ROOT — only thing you ever need to change
-# ---------------------------------------------------------------------------
 set(NUKE_ROOT "C:/Program Files/Nuke17.0v1" CACHE PATH
     "Root directory of the Nuke 17.0v1 installation")
 
 if(NOT EXISTS "${NUKE_ROOT}/DDImage.lib")
-    message(FATAL_ERROR
-        "NUKE_ROOT does not look like a Nuke install (DDImage.lib missing):\n"
-        "  ${NUKE_ROOT}\n"
-        "Pass the correct path with -D NUKE_ROOT=<path>")
+    message(FATAL_ERROR "DDImage.lib not found in NUKE_ROOT: ${NUKE_ROOT}")
 endif()
 
 message(STATUS "NUKE_ROOT = ${NUKE_ROOT}")
 
 # ---------------------------------------------------------------------------
-# Confirmed directory layout for Nuke 17.0v1
+# Confirmed paths for Nuke 17.0v1
 #
-#   Headers
-#     NDK / DDImage / fdk / usg:    ${NUKE_ROOT}/include/
-#       subdirs: DDImage  ndk  fdk  usg  Blink  GL  ...
-#     PXR / Hydra / USD:            ${NUKE_ROOT}/FnUSD/include/
-#       subdirs: pxr/base  pxr/usd  pxr/imaging  ...
+#   NDK / DDImage / fdk / usg headers:  ${NUKE_ROOT}/include/
+#   PXR / Hydra headers:                ${NUKE_ROOT}/FnUSD/include/
+#   Python headers (pyconfig.h):        ${NUKE_ROOT}/include/include/
 #
-#   Libraries (all in ${NUKE_ROOT}/)
-#     DDImage.lib          — Nuke image/op API
-#     FdkBase.2.1.lib      — Foundry base math (note versioned name)
-#     Ndk.lib              — NDK C++ plugin API
-#     FnUsdAbstraction.lib — Hydra + all PXR symbols re-exported here
-#     FnUsdEngine.lib      — USD stage/engine API
-#     tbb.lib              — Intel TBB (for std::execution::par_unseq)
+#   Nuke libs:  ${NUKE_ROOT}/*.lib
+#   PXR libs:   ${NUKE_ROOT}/FnUSD/lib/usd_*.lib
 # ---------------------------------------------------------------------------
 set(NUKE_NDK_INCLUDE_DIR "${NUKE_ROOT}/include")
+set(NUKE_PY_INCLUDE_DIR  "${NUKE_ROOT}/include/include")
 set(NUKE_PXR_INCLUDE_DIR "${NUKE_ROOT}/FnUSD/include")
 set(NUKE_LIB_DIR         "${NUKE_ROOT}")
+set(NUKE_USD_LIB_DIR     "${NUKE_ROOT}/FnUSD/lib")
 
 # ---------------------------------------------------------------------------
-# Find libraries — using exact names confirmed by dir listing
+# Nuke / NDK libs  (in NUKE_ROOT)
 # ---------------------------------------------------------------------------
-find_library(LIB_DDIMAGE    DDImage            PATHS "${NUKE_LIB_DIR}" NO_DEFAULT_PATH REQUIRED)
-find_library(LIB_FDKBASE    "FdkBase.2.1"      PATHS "${NUKE_LIB_DIR}" NO_DEFAULT_PATH REQUIRED)
-find_library(LIB_NDK        Ndk                PATHS "${NUKE_LIB_DIR}" NO_DEFAULT_PATH REQUIRED)
-find_library(LIB_USDABS     FnUsdAbstraction   PATHS "${NUKE_LIB_DIR}" NO_DEFAULT_PATH REQUIRED)
-find_library(LIB_USDENGINE  FnUsdEngine        PATHS "${NUKE_LIB_DIR}" NO_DEFAULT_PATH REQUIRED)
-find_library(LIB_TBB        tbb                PATHS "${NUKE_LIB_DIR}" NO_DEFAULT_PATH REQUIRED)
-find_library(LIB_USDSHIM    "FnUsdShim.0.8"    PATHS "${NUKE_LIB_DIR}" NO_DEFAULT_PATH)
+find_library(LIB_DDIMAGE   DDImage          PATHS "${NUKE_LIB_DIR}" NO_DEFAULT_PATH REQUIRED)
+find_library(LIB_FDKBASE   "FdkBase.2.1"   PATHS "${NUKE_LIB_DIR}" NO_DEFAULT_PATH REQUIRED)
+find_library(LIB_NDK       Ndk              PATHS "${NUKE_LIB_DIR}" NO_DEFAULT_PATH REQUIRED)
+find_library(LIB_USDABS    FnUsdAbstraction PATHS "${NUKE_LIB_DIR}" NO_DEFAULT_PATH REQUIRED)
+find_library(LIB_USDENGINE FnUsdEngine      PATHS "${NUKE_LIB_DIR}" NO_DEFAULT_PATH REQUIRED)
+find_library(LIB_TBB       tbb              PATHS "${NUKE_LIB_DIR}" NO_DEFAULT_PATH REQUIRED)
 
-message(STATUS "DDImage.lib      = ${LIB_DDIMAGE}")
-message(STATUS "FdkBase.2.1.lib  = ${LIB_FDKBASE}")
-message(STATUS "Ndk.lib          = ${LIB_NDK}")
-message(STATUS "FnUsdAbstraction = ${LIB_USDABS}")
-message(STATUS "FnUsdEngine      = ${LIB_USDENGINE}")
-message(STATUS "tbb.lib          = ${LIB_TBB}")
+message(STATUS "DDImage   = ${LIB_DDIMAGE}")
+message(STATUS "FdkBase   = ${LIB_FDKBASE}")
+message(STATUS "Ndk       = ${LIB_NDK}")
+message(STATUS "UsdAbs    = ${LIB_USDABS}")
+message(STATUS "UsdEngine = ${LIB_USDENGINE}")
+message(STATUS "tbb       = ${LIB_TBB}")
 
 # ---------------------------------------------------------------------------
-# The plugin shared library
+# PXR libs  (in FnUSD/lib, all prefixed usd_)
+#
+#   Naming: usd_hd.lib, usd_tf.lib, usd_sdf.lib, etc.
+# ---------------------------------------------------------------------------
+set(USD_LIB_NAMES
+    # Foundation
+    usd_tf usd_gf usd_vt usd_arch usd_js usd_trace usd_work usd_plug
+    # SDF / PCP / AR
+    usd_sdf usd_pcp usd_ar usd_kind
+    # USD core
+    usd_usd usd_usdGeom usd_usdShade usd_usdLux usd_usdSkel usd_usdRender
+    # Hydra core
+    usd_hf usd_hd usd_hdx usd_hgi usd_hgiGL usd_hgiInterop
+    usd_hdsi usd_hdSt usd_hdar
+    # USD imaging / Hydra delegates
+    usd_usdImaging usd_usdImagingGL usd_usdHydra
+    # Utilities
+    usd_cameraUtil usd_pxOsd usd_geomUtil usd_sdr
+    # Python / boost.python (provides __imp__Py_* symbols via usd_python.lib)
+    usd_python
+    # Garch (GPU arch abstraction — needed by hdSt)
+    usd_garch usd_glf
+)
+
+foreach(_lib ${USD_LIB_NAMES})
+    find_library(_found_${_lib} ${_lib}
+        PATHS "${NUKE_USD_LIB_DIR}" NO_DEFAULT_PATH)
+    if(_found_${_lib})
+        list(APPEND USD_LIBS ${_found_${_lib}})
+        message(STATUS "  Found: ${_lib}.lib")
+    else()
+        message(WARNING "  NOT FOUND: ${_lib}.lib — linker may fail")
+    endif()
+endforeach()
+
+# ---------------------------------------------------------------------------
+# The plugin
 # ---------------------------------------------------------------------------
 add_library(HdSpectral SHARED
     src/HdSpectralRendererPlugin.cpp
@@ -75,11 +96,9 @@ add_library(HdSpectral SHARED
 
 target_include_directories(HdSpectral
     PRIVATE
-        # PXR/Hydra headers FIRST — must win over any system pxr if installed
-        "${NUKE_PXR_INCLUDE_DIR}"
-        # NDK, DDImage, fdk, usg
-        "${NUKE_NDK_INCLUDE_DIR}"
-        # Our source headers
+        "${NUKE_PXR_INCLUDE_DIR}"      # pxr/imaging/hd/... — MUST be first
+        "${NUKE_NDK_INCLUDE_DIR}"      # DDImage, ndk, fdk, usg, Blink, GL
+        "${NUKE_PY_INCLUDE_DIR}"       # pyconfig.h (nested include/include/)
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
 
@@ -88,17 +107,13 @@ target_compile_definitions(HdSpectral
         NOMINMAX
         _USE_MATH_DEFINES
         WIN32_LEAN_AND_MEAN
-        PXR_BUILDING_FOR_EXTERNAL=1
         HDSPECTRAL_EXPORTS
 )
 
 target_compile_options(HdSpectral
     PRIVATE
         /W3
-        /wd4251   # dll-interface for STL members in PXR headers
-        /wd4275   # dll-interface base class in PXR headers
-        /wd4267   # size_t->int narrowing in PXR headers
-        /wd4244   # double->float narrowing in PXR math
+        /wd4251 /wd4275 /wd4267 /wd4244 /wd4305
         /MP
         /Zc:__cplusplus
         /utf-8
@@ -106,25 +121,20 @@ target_compile_options(HdSpectral
 
 target_link_libraries(HdSpectral
     PRIVATE
+        # Nuke
         "${LIB_DDIMAGE}"
         "${LIB_FDKBASE}"
         "${LIB_NDK}"
         "${LIB_USDABS}"
         "${LIB_USDENGINE}"
         "${LIB_TBB}"
+        # PXR (all usd_*.lib from FnUSD/lib)
+        ${USD_LIBS}
+        "C:/dev/SpectralRenderer/python311.lib"
 )
 
-if(LIB_USDSHIM)
-    target_link_libraries(HdSpectral PRIVATE "${LIB_USDSHIM}")
-endif()
-
 # ---------------------------------------------------------------------------
-# Output layout
-#   build/HdSpectral/HdSpectral.dll
-#   build/HdSpectral/resources/plugInfo.json
-#
-#   PXR_PLUGINPATH_NAME  →  build/          (parent of HdSpectral/)
-#   PATH                 →  build/HdSpectral/
+# Output
 # ---------------------------------------------------------------------------
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/plugInfo.json.in"
@@ -132,15 +142,19 @@ configure_file(
     @ONLY
 )
 
+# Root plugInfo.json — tells PXR where to find the plugin within this directory tree
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/plugInfo.json"
+    "{ \"Includes\": [ \"HdSpectral/resources/\" ] }\n")
+
 set_target_properties(HdSpectral PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY                "${CMAKE_CURRENT_BINARY_DIR}/HdSpectral"
-    RUNTIME_OUTPUT_DIRECTORY_RELEASE        "${CMAKE_CURRENT_BINARY_DIR}/HdSpectral"
-    RUNTIME_OUTPUT_DIRECTORY_DEBUG          "${CMAKE_CURRENT_BINARY_DIR}/HdSpectral"
-    LIBRARY_OUTPUT_DIRECTORY                "${CMAKE_CURRENT_BINARY_DIR}/HdSpectral"
-    PDB_OUTPUT_DIRECTORY                    "${CMAKE_CURRENT_BINARY_DIR}/HdSpectral"
-    PDB_OUTPUT_DIRECTORY_RELEASE            "${CMAKE_CURRENT_BINARY_DIR}/HdSpectral"
+    RUNTIME_OUTPUT_DIRECTORY         "${CMAKE_CURRENT_BINARY_DIR}/HdSpectral"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_BINARY_DIR}/HdSpectral"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG   "${CMAKE_CURRENT_BINARY_DIR}/HdSpectral"
+    LIBRARY_OUTPUT_DIRECTORY         "${CMAKE_CURRENT_BINARY_DIR}/HdSpectral"
+    PDB_OUTPUT_DIRECTORY             "${CMAKE_CURRENT_BINARY_DIR}/HdSpectral"
+    PDB_OUTPUT_DIRECTORY_RELEASE     "${CMAKE_CURRENT_BINARY_DIR}/HdSpectral"
 )
 
-install(TARGETS HdSpectral RUNTIME DESTINATION HdSpectral LIBRARY DESTINATION HdSpectral)
+install(TARGETS HdSpectral RUNTIME DESTINATION HdSpectral)
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/HdSpectral/resources/plugInfo.json"
     DESTINATION HdSpectral/resources)

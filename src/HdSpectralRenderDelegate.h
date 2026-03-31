@@ -5,6 +5,8 @@
 
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/renderThread.h>
+#include <pxr/imaging/hd/aov.h>
+#include <pxr/base/vt/dictionary.h>
 
 #include <memory>
 #include <mutex>
@@ -78,6 +80,12 @@ public:
                          SdfPath const& sprimId) override;
     HdSprim* CreateFallbackSprim(TfToken const& typeId) override;
     void     DestroySprim(HdSprim* sPrim) override;
+    
+    // Instancer factory — required pure virtual in PXR 0.25.8
+    // Phase 1: returns nullptr (no point instancing support yet)
+    HdInstancer* CreateInstancer(HdSceneDelegate* delegate,
+                                 SdfPath const&   id) override;
+    void         DestroyInstancer(HdInstancer* instancer) override;
 
     // -----------------------------------------------------------------------
     // HdRenderDelegate — bprim factory  (buffers: renderBuffer)
@@ -95,6 +103,20 @@ public:
     //   Phase 1: no-op.  Phase 3: optixAccelBuild goes here.
     // -----------------------------------------------------------------------
     void CommitResources(HdChangeTracker* tracker) override;
+
+    // -----------------------------------------------------------------------
+    // HdRenderDelegate — pure virtuals added in PXR 0.25.x
+    //
+    //   GetDefaultAovDescriptor: tells Hydra what format/clearValue to use
+    //   for each AOV token when no explicit RenderVar prim is present.
+    //
+    //   GetRenderStats: exposes per-frame statistics to the host (Nuke's
+    //   render panel can display these as diagnostics).
+    // -----------------------------------------------------------------------
+    HdAovDescriptor GetDefaultAovDescriptor(
+        TfToken const& aovName) const override;
+
+    VtDictionary GetRenderStats() const override;
 
     // -----------------------------------------------------------------------
     // Render parameters — passed to rprims during Sync so they can

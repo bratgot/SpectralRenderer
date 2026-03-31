@@ -4,27 +4,24 @@
 #include "HdSpectralRenderBuffer.h"
 
 #include <pxr/imaging/hd/camera.h>
-#include <pxr/imaging/hd/light.h>
 #include <pxr/imaging/hd/resourceRegistry.h>
 #include <pxr/imaging/hd/tokens.h>
-#include <pxr/imaging/glf/simpleLight.h>
-
+#include <pxr/imaging/hd/aov.h>
+#include <pxr/base/vt/dictionary.h>
 #include <pxr/base/tf/staticTokens.h>
+#include <pxr/imaging/hd/instancer.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
 // ---------------------------------------------------------------------------
-// Render setting token definitions
+// Render setting tokens
 // ---------------------------------------------------------------------------
 const TfToken HdSpectralRenderDelegate::kSettingSPP        ("spectral:samplesPerPixel");
 const TfToken HdSpectralRenderDelegate::kSettingMaxBounces ("spectral:maxBounces");
 const TfToken HdSpectralRenderDelegate::kSettingDevice     ("spectral:device");
 
 // ---------------------------------------------------------------------------
-// Supported prim type lists
-//
-//   Phase 1:  mesh rprims, camera/simpleLight sprims, renderBuffer bprims.
-//   Phase 2+: add more light types (rectLight, diskLight, domeLight, etc.)
+// Supported prim types
 // ---------------------------------------------------------------------------
 const TfTokenVector HdSpectralRenderDelegate::_supportedRprimTypes = {
     HdPrimTypeTokens->mesh,
@@ -32,13 +29,8 @@ const TfTokenVector HdSpectralRenderDelegate::_supportedRprimTypes = {
 
 const TfTokenVector HdSpectralRenderDelegate::_supportedSprimTypes = {
     HdPrimTypeTokens->camera,
-    HdPrimTypeTokens->simpleLight,
-    HdPrimTypeTokens->rectLight,
-    HdPrimTypeTokens->diskLight,
-    HdPrimTypeTokens->cylinderLight,
-    HdPrimTypeTokens->sphereLight,
-    HdPrimTypeTokens->distantLight,
-    HdPrimTypeTokens->domeLight,
+    // Lights deferred to Phase 4 — HdLight is abstract in PXR 0.25.8
+    // and requires a concrete subclass implementing all pure virtuals.
 };
 
 const TfTokenVector HdSpectralRenderDelegate::_supportedBprimTypes = {
@@ -46,9 +38,8 @@ const TfTokenVector HdSpectralRenderDelegate::_supportedBprimTypes = {
 };
 
 // ---------------------------------------------------------------------------
-// Construction / destruction
+// Construction
 // ---------------------------------------------------------------------------
-
 HdSpectralRenderDelegate::HdSpectralRenderDelegate()
 {
     _Initialize({});
@@ -65,12 +56,9 @@ HdSpectralRenderDelegate::~HdSpectralRenderDelegate() = default;
 void
 HdSpectralRenderDelegate::_Initialize(HdRenderSettingsMap const& settingsMap)
 {
-    // Apply any settings passed from the host (Nuke render panel)
-    for (auto const& kv : settingsMap) {
+    for (auto const& kv : settingsMap)
         _settingsMap[kv.first] = kv.second;
-    }
 
-    // Set defaults for any unspecified settings
     if (_settingsMap.find(kSettingSPP)        == _settingsMap.end())
         _settingsMap[kSettingSPP]        = VtValue(16);
     if (_settingsMap.find(kSettingMaxBounces) == _settingsMap.end())
@@ -78,155 +66,139 @@ HdSpectralRenderDelegate::_Initialize(HdRenderSettingsMap const& settingsMap)
     if (_settingsMap.find(kSettingDevice)     == _settingsMap.end())
         _settingsMap[kSettingDevice]     = VtValue(std::string("cpu"));
 
-    // Build setting descriptors (shown as knobs in Nuke's render panel)
     _settingDescriptors = {
-        { "Samples per pixel",  kSettingSPP,        VtValue(16)                    },
-        { "Max bounces",        kSettingMaxBounces, VtValue(4)                     },
-        { "Device",             kSettingDevice,     VtValue(std::string("cpu"))    },
+        { "Samples per pixel", kSettingSPP,        VtValue(16)                 },
+        { "Max bounces",       kSettingMaxBounces, VtValue(4)                  },
+        { "Device",            kSettingDevice,     VtValue(std::string("cpu")) },
     };
 
-    // Allocate the shared scene and render param
     _scene       = std::make_unique<SpectralScene>();
-    _renderParam = std::make_unique<HdRenderParam>();   // plain base class for Phase 1
-
-    // Stub resource registry (textures etc. added in later phases)
+    _renderParam = std::make_unique<HdRenderParam>();
     _resourceRegistry = std::make_shared<HdResourceRegistry>();
 
-    TF_STATUS("HdSpectral: delegate initialised (Phase 1 — CPU normal-shading)");
+    TF_STATUS("HdSpectral: delegate initialised (Phase 1 — CPU normal shading)");
 }
 
 // ---------------------------------------------------------------------------
-// HdRenderDelegate interface — supported types
+// Supported types
 // ---------------------------------------------------------------------------
-
-const TfTokenVector&
-HdSpectralRenderDelegate::GetSupportedRprimTypes() const
-{
-    return _supportedRprimTypes;
-}
-
-const TfTokenVector&
-HdSpectralRenderDelegate::GetSupportedSprimTypes() const
-{
-    return _supportedSprimTypes;
-}
-
-const TfTokenVector&
-HdSpectralRenderDelegate::GetSupportedBprimTypes() const
-{
-    return _supportedBprimTypes;
-}
+const TfTokenVector& HdSpectralRenderDelegate::GetSupportedRprimTypes() const { return _supportedRprimTypes; }
+const TfTokenVector& HdSpectralRenderDelegate::GetSupportedSprimTypes() const { return _supportedSprimTypes; }
+const TfTokenVector& HdSpectralRenderDelegate::GetSupportedBprimTypes() const { return _supportedBprimTypes; }
 
 // ---------------------------------------------------------------------------
 // Resources & settings
 // ---------------------------------------------------------------------------
-
 HdResourceRegistrySharedPtr
-HdSpectralRenderDelegate::GetResourceRegistry() const
-{
-    return _resourceRegistry;
-}
+HdSpectralRenderDelegate::GetResourceRegistry() const { return _resourceRegistry; }
 
 HdRenderSettingDescriptorList
-HdSpectralRenderDelegate::GetRenderSettingDescriptors() const
-{
-    return _settingDescriptors;
-}
+HdSpectralRenderDelegate::GetRenderSettingDescriptors() const { return _settingDescriptors; }
 
 HdRenderParam*
-HdSpectralRenderDelegate::GetRenderParam() const
+HdSpectralRenderDelegate::GetRenderParam() const { return _renderParam.get(); }
+
+// ---------------------------------------------------------------------------
+// GetDefaultAovDescriptor
+//   Tells Hydra what pixel format and clear value to use for each AOV when
+//   no explicit RenderVar prim is present.  We only handle "color" for now.
+// ---------------------------------------------------------------------------
+HdAovDescriptor
+HdSpectralRenderDelegate::GetDefaultAovDescriptor(TfToken const& aovName) const
 {
-    return _renderParam.get();
+    if (aovName == HdAovTokens->color) {
+        return HdAovDescriptor(
+            HdFormatFloat32Vec4,  // RGBA float
+            false,                // not multisampled
+            VtValue(GfVec4f(0.0f, 0.0f, 0.0f, 1.0f))  // clear to opaque black
+        );
+    }
+    if (aovName == HdAovTokens->depth) {
+        return HdAovDescriptor(
+            HdFormatFloat32,
+            false,
+            VtValue(1.0f)
+        );
+    }
+    if (aovName == HdAovTokens->normal) {
+        return HdAovDescriptor(
+            HdFormatFloat32Vec3,
+            false,
+            VtValue(GfVec3f(0.0f))
+        );
+    }
+    // Unknown AOV — return an empty descriptor (Hydra will skip it)
+    return HdAovDescriptor();
+}
+
+// ---------------------------------------------------------------------------
+// GetRenderStats
+//   Returns per-frame diagnostics displayed in Nuke's render panel.
+// ---------------------------------------------------------------------------
+VtDictionary
+HdSpectralRenderDelegate::GetRenderStats() const
+{
+    VtDictionary stats;
+    stats["renderedTriangles"] = VtValue((int)_scene->TotalTriangles());
+    stats["renderer"]          = VtValue(std::string("Spectral CPU Phase 1"));
+    return stats;
 }
 
 // ---------------------------------------------------------------------------
 // Render pass factory
 // ---------------------------------------------------------------------------
-
 HdRenderPassSharedPtr
-HdSpectralRenderDelegate::CreateRenderPass(
-    HdRenderIndex*           index,
-    HdRprimCollection const& collection)
+HdSpectralRenderDelegate::CreateRenderPass(HdRenderIndex*           index,
+                                            HdRprimCollection const& collection)
 {
     return std::make_shared<HdSpectralRenderPass>(index, collection, _scene.get());
 }
 
 // ---------------------------------------------------------------------------
-// Rprim factory — geometry
+// Rprim factory
 // ---------------------------------------------------------------------------
-
 HdRprim*
-HdSpectralRenderDelegate::CreateRprim(TfToken const& typeId,
-                                      SdfPath const& rprimId)
+HdSpectralRenderDelegate::CreateRprim(TfToken const& typeId, SdfPath const& rprimId)
 {
-    if (typeId == HdPrimTypeTokens->mesh) {
+    if (typeId == HdPrimTypeTokens->mesh)
         return new HdSpectralMesh(rprimId, _scene.get());
-    }
-    TF_CODING_ERROR("HdSpectral: unsupported rprim type '%s'", typeId.GetText());
+    TF_CODING_ERROR("HdSpectral: unsupported rprim '%s'", typeId.GetText());
     return nullptr;
 }
 
-void
-HdSpectralRenderDelegate::DestroyRprim(HdRprim* rPrim)
-{
-    delete rPrim;
-}
+void HdSpectralRenderDelegate::DestroyRprim(HdRprim* rPrim) { delete rPrim; }
 
 // ---------------------------------------------------------------------------
-// Sprim factory — state objects (camera, lights)
-//
-//   For Phase 1 we use Hydra's built-in HdCamera and HdLight stubs.
-//   These Sync themselves and expose accessor methods our render pass uses.
+// Sprim factory — camera only for Phase 1
 // ---------------------------------------------------------------------------
-
 HdSprim*
-HdSpectralRenderDelegate::CreateSprim(TfToken const& typeId,
-                                      SdfPath const& sprimId)
+HdSpectralRenderDelegate::CreateSprim(TfToken const& typeId, SdfPath const& sprimId)
 {
-    if (typeId == HdPrimTypeTokens->camera) {
+    if (typeId == HdPrimTypeTokens->camera)
         return new HdCamera(sprimId);
-    }
-    // For all light types return a simple light stub
-    if (typeId == HdPrimTypeTokens->simpleLight  ||
-        typeId == HdPrimTypeTokens->rectLight     ||
-        typeId == HdPrimTypeTokens->diskLight     ||
-        typeId == HdPrimTypeTokens->cylinderLight ||
-        typeId == HdPrimTypeTokens->sphereLight   ||
-        typeId == HdPrimTypeTokens->distantLight  ||
-        typeId == HdPrimTypeTokens->domeLight)
-    {
-        return new HdLight(sprimId, typeId);
-    }
-    TF_CODING_ERROR("HdSpectral: unsupported sprim type '%s'", typeId.GetText());
+    // All light types deferred to Phase 4
     return nullptr;
 }
 
 HdSprim*
 HdSpectralRenderDelegate::CreateFallbackSprim(TfToken const& typeId)
 {
-    // Fallback sprims are created for prim paths that exist in the scene
-    // index but haven't been populated yet.  Same factory as normal.
-    return CreateSprim(typeId, SdfPath::EmptyPath());
+    if (typeId == HdPrimTypeTokens->camera)
+        return new HdCamera(SdfPath::EmptyPath());
+    return nullptr;
 }
 
-void
-HdSpectralRenderDelegate::DestroySprim(HdSprim* sPrim)
-{
-    delete sPrim;
-}
+void HdSpectralRenderDelegate::DestroySprim(HdSprim* sPrim) { delete sPrim; }
 
 // ---------------------------------------------------------------------------
-// Bprim factory — buffers (render targets / AOVs)
+// Bprim factory
 // ---------------------------------------------------------------------------
-
 HdBprim*
-HdSpectralRenderDelegate::CreateBprim(TfToken const& typeId,
-                                      SdfPath const& bprimId)
+HdSpectralRenderDelegate::CreateBprim(TfToken const& typeId, SdfPath const& bprimId)
 {
-    if (typeId == HdPrimTypeTokens->renderBuffer) {
+    if (typeId == HdPrimTypeTokens->renderBuffer)
         return new HdSpectralRenderBuffer(bprimId);
-    }
-    TF_CODING_ERROR("HdSpectral: unsupported bprim type '%s'", typeId.GetText());
+    TF_CODING_ERROR("HdSpectral: unsupported bprim '%s'", typeId.GetText());
     return nullptr;
 }
 
@@ -236,26 +208,29 @@ HdSpectralRenderDelegate::CreateFallbackBprim(TfToken const& typeId)
     return CreateBprim(typeId, SdfPath::EmptyPath());
 }
 
-void
-HdSpectralRenderDelegate::DestroyBprim(HdBprim* bPrim)
+void HdSpectralRenderDelegate::DestroyBprim(HdBprim* bPrim) { delete bPrim; }
+
+// ---------------------------------------------------------------------------
+// CommitResources — Phase 1 no-op
+// ---------------------------------------------------------------------------
+void HdSpectralRenderDelegate::CommitResources(HdChangeTracker* /*tracker*/) {}
+
+// ---------------------------------------------------------------------------
+// Instancer factory — pure virtual in PXR 0.25.8, deferred to Phase 2
+// ---------------------------------------------------------------------------
+HdInstancer*
+HdSpectralRenderDelegate::CreateInstancer(HdSceneDelegate* /*delegate*/,
+                                           SdfPath const&   /*id*/)
 {
-    delete bPrim;
+    // Point instancing (USD PointInstancer prim) not yet supported.
+    // Returning nullptr is valid — Hydra skips instanced prims gracefully.
+    return nullptr;
 }
 
-// ---------------------------------------------------------------------------
-// CommitResources
-//
-//   Called by HdEngine::Execute() after all Sync() calls for the frame.
-//   Phase 1: nothing to do — the triangle soup in SpectralScene is ready.
-//   Phase 3: kick off optixAccelBuild() on the committed geometry here.
-// ---------------------------------------------------------------------------
-
 void
-HdSpectralRenderDelegate::CommitResources(HdChangeTracker* /*tracker*/)
+HdSpectralRenderDelegate::DestroyInstancer(HdInstancer* instancer)
 {
-    // Phase 1 no-op.
-    // TF_DEBUG(HD_SPECTRAL).Msg("CommitResources: %zu triangles in scene\n",
-    //     _scene->TotalTriangles());
+    delete instancer;
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

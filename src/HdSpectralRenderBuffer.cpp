@@ -1,5 +1,6 @@
 #include "HdSpectralRenderBuffer.h"
 #include <pxr/base/tf/diagnostic.h>
+#include <pxr/base/gf/vec3i.h>  
 #include <cstring>  // memset
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -21,12 +22,14 @@ HdSpectralRenderBuffer::Allocate(GfVec3i const& dimensions,
 {
     _Deallocate();
 
-    if (dimensions[0] == 0 || dimensions[1] == 0) {
+    // GfVec3i::operator[] is not available in PXR 0.25.8 — use GetArray()
+    const int* dims = dimensions.GetArray();
+    if (dims[0] == 0 || dims[1] == 0) {
         return false;
     }
 
-    _width     = static_cast<unsigned int>(dimensions[0]);
-    _height    = static_cast<unsigned int>(dimensions[1]);
+    _width     = static_cast<unsigned int>(dims[0]);
+    _height    = static_cast<unsigned int>(dims[1]);
     _format    = format;
     _converged = false;
 
