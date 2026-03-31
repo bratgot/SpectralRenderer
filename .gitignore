@@ -1,0 +1,9 @@
+(
+echo build/
+echo *.user
+echo .vs/
+echo *.suo
+echo CMakeCache.txt
+echo CMakeFiles/
+echo *.vcxproj.user
+) > .gitignore
