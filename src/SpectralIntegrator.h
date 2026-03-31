@@ -17,6 +17,7 @@
 // ---------------------------------------------------------------------------
 
 #include "SpectralScene.h"
+#include "SpectralSpectrum.h"
 
 #ifdef SPECTRAL_HAS_EMBREE
 #include "SpectralBVH.h"
@@ -84,7 +85,8 @@ public:
     static void RenderFrame(
         const SpectralScene& scene,
         const SpectralCamera& camera,
-        float* pixels);
+        float* pixels,
+        int spp = 1);
 
 private:
     // Ray generation
@@ -111,6 +113,14 @@ private:
     static GfVec3f _ShadeSmoothNormal(const SpectralTriangle& tri,
                                        double u, double v);
     static GfVec3f _SkyColor(const GfVec3f& dir);
+
+    // Spectral shading — returns spectral radiance at a single wavelength
+    static float _ShadeSpectral(const SpectralTriangle& tri,
+                                 double u, double v, float lambda);
+    static float _SkySpectral(const GfVec3f& dir, float lambda);
+
+    // Simple hash-based RNG for per-pixel, per-sample jitter
+    static float _Hash(unsigned int seed);
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

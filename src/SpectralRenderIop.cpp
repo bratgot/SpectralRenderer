@@ -545,10 +545,11 @@ void SpectralRenderIop::_EnsureFrameRendered()
     cam.imageWidth  = W;
     cam.imageHeight = H;
 
-    fprintf(stderr, "SpectralRender: rendering %dx%d, %zu triangles in scene\n",
-            W, H, _scene->TotalTriangles());
+    fprintf(stderr, "SpectralRender: rendering %dx%d, %zu triangles, %d spp%s\n",
+            W, H, _scene->TotalTriangles(), _samples,
+            _samples > 1 ? " (spectral)" : " (normal-as-colour)");
 
-    SpectralIntegrator::RenderFrame(*_scene, cam, _frameBuffer.data());
+    SpectralIntegrator::RenderFrame(*_scene, cam, _frameBuffer.data(), _samples);
     _frameReady.store(true);
 
     fprintf(stderr, "SpectralRender: render complete\n");
