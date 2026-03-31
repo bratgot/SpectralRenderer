@@ -105,25 +105,37 @@ int SpectralRenderIop::knob_changed(Knob* k)
 
 // ---------------------------------------------------------------------------
 // _validate
+//
+//   SpectralRenderIop is an Iop whose input 0 is a GeoOp (not an Iop).
+//   We CANNOT call input_format(), copy_info(), or rely on Iop::_validate()
+//   to handle our inputs — those all assume Iop-typed inputs.
+//   We must set up info_ entirely ourselves.
 // ---------------------------------------------------------------------------
 void SpectralRenderIop::_validate(bool forReal)
 {
+    // Determine output format — use the knob value, or a safe default
+    const Format* fmtPtr = _outputFormat.format();
+
+    // FormatPair is always initialised by Nuke's knob system to the
+    // project root format, so this null check is just a safety net.
+    if (!fmtPtr) {
+        info_.channels(Mask_RGBA);
+        return;
+    }
+
+    info_.format(*fmtPtr);
+    info_.full_size_format(*fmtPtr);
+    info_.set(*fmtPtr);
+    info_.channels(Mask_RGBA);
+    info_.black_outside(true);
+
     if (forReal) {
         _SyncScene();
         _frameReady.store(false);
     }
 
-    const Format* fmtPtr = _outputFormat.format();
-    if (!fmtPtr) {
-        // No format selected yet — fall back to root format
-        fmtPtr = &input_format();
-    }
-    const Format& fmt = *fmtPtr;
-    info_.format(fmt);
-    info_.set(fmt);
-    info_.channels(Mask_RGBA);
-
-    Iop::_validate(forReal);
+    // Do NOT call Iop::_validate — it would try to validate input(0)
+    // as an Iop, but input(0) is a GeoOp. Setting info_ above is sufficient.
 }
 
 void SpectralRenderIop::_request(int, int, int, int, ChannelMask, int) {}
@@ -167,18 +179,29 @@ void SpectralRenderIop::_SyncScene()
 {
     _scene = std::make_unique<pxr::SpectralScene>();
 
-    GeoOp* geoIn = dynamic_cast<GeoOp*>(input(0));
+    // input(0) can be nullptr if nothing is connected and Nuke can't
+    // provide a compatible default (our test_input requires a GeoOp).
+    Op* in0 = input(0);
+    if (!in0) return;
+    GeoOp* geoIn = dynamic_cast<GeoOp*>(in0);
     if (!geoIn) return;
 
-    geoIn->validate(true);
+    try {
+        geoIn->validate(true);
+    } catch (...) {
+        return;  // GeoOp validation failed — render empty scene
+    }
 
     // Build the 3-D scene from the GeoOp.
-    // build_scene populates the Scene's object list.
     Scene scene3d;
-    geoIn->build_scene(scene3d);
+    try {
+        geoIn->build_scene(scene3d);
+    } catch (...) {
+        return;  // build_scene failed — render empty scene
+    }
 
     GeometryList* geoListPtr = scene3d.object_list();
-    if (!geoListPtr) return;                       // <-- was crashing here
+    if (!geoListPtr) return;
     GeometryList& geoList = *geoListPtr;
     if (geoList.size() == 0) return;
 
@@ -331,9 +354,21 @@ SpectralCamera SpectralRenderIop::_BuildCamera() const
     if (cam.imageWidth  == 0) cam.imageWidth  = 1920;
     if (cam.imageHeight == 0) cam.imageHeight = 1080;
 
-    CameraOp* camIn = dynamic_cast<CameraOp*>(input(1));
+    CameraOp* camIn = nullptr;
+    try {
+        Op* in1 = input(1);
+        camIn = in1 ? dynamic_cast<CameraOp*>(in1) : nullptr;
+    } catch (...) {
+        camIn = nullptr;
+    }
     if (camIn) {
-        camIn->validate(true);
+        try {
+            camIn->validate(true);
+        } catch (...) {
+            camIn = nullptr;  // fall through to default camera
+        }
+    }
+    if (camIn) {
         const DD::Image::Matrix4& cw = camIn->matrix();
         cam.viewToWorld = GfMatrix4d(
             cw[0][0], cw[0][1], cw[0][2], cw[0][3],
@@ -375,7 +410,7 @@ void SpectralRenderIop::_EnsureFrameRendered()
     if (_frameReady.load()) return;
 
     const Format* fmtPtr = _outputFormat.format();
-    if (!fmtPtr) { _frameReady.store(true); return; }
+    if (!fmtPtr) { _frameReady.store(true); return; }  // no format yet
     const unsigned int W = static_cast<unsigned int>(fmtPtr->width());
     const unsigned int H = static_cast<unsigned int>(fmtPtr->height());
     if (W == 0 || H == 0) { _frameReady.store(true); return; }
