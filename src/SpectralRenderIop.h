@@ -6,6 +6,12 @@
 #include "SpectralScene.h"
 #include "SpectralIntegrator.h"
 
+#include <pxr/usd/usd/stage.h>
+
+#ifdef SPECTRAL_HAS_OSD
+#include "SpectralSubdiv.h"
+#endif
+
 PXR_NAMESPACE_USING_DIRECTIVE
 
 // NDK headers
@@ -13,6 +19,8 @@ PXR_NAMESPACE_USING_DIRECTIVE
 #include <DDImage/Knobs.h>
 #include <DDImage/Row.h>
 #include <DDImage/Format.h>
+#include <DDImage/GeometryProviderI.h>
+#include <DDImage/OpState.h>
 
 #include <vector>
 #include <memory>
@@ -23,9 +31,15 @@ PXR_NAMESPACE_USING_DIRECTIVE
 // ---------------------------------------------------------------------------
 // SpectralRenderIop
 //
-//   USD file-based render node for Nuke's 2D node graph / farm rendering.
-//   Reads a .usd/.usda/.usdc file via PXR UsdStage API, traverses
-//   UsdGeomMesh prims, and renders through SpectralIntegrator.
+//   Phase 1.5: Dual input mode
+//     - Input 0 (optional): GeomOp from Nuke's USD node graph
+//       (GeoCube, GeoImport, transforms, etc.)
+//     - File knob fallback: .usd/.usda/.usdc path for farm/standalone
+//
+//   If input 0 is connected to a GeometryProviderI, we use
+//   GeometryProviderI::BuildStage() to get a usg::Stage, then
+//   extract the PXR UsdStageRefPtr to traverse meshes.
+//   If not connected, we fall back to UsdStage::Open() on the file path.
 //
 //   Global scope + Op::Description pattern required by Nuke 17 NDK.
 // ---------------------------------------------------------------------------
@@ -40,8 +54,11 @@ public:
     explicit SpectralRenderIop(Node* node);
     ~SpectralRenderIop() override;
 
+    // Input 0: optional GeomOp (USD scene)
     int  minimum_inputs()               const override { return 0; }
-    int  maximum_inputs()               const override { return 0; }
+    int  maximum_inputs()               const override { return 1; }
+    const char* input_label(int idx, char*) const override;
+    bool test_input(int idx, Op* op)    const override;
 
     void _validate(bool forReal)        override;
     void _request(int x, int y, int r, int t,
@@ -58,8 +75,12 @@ public:
 private:
     static const char* const CLASS;
 
-    // Opens stage, loads meshes AND camera in one pass
+    // Opens stage from input GeomOp or file, loads meshes + camera
     void _LoadStage();
+
+    // Load from a PXR UsdStageRefPtr (shared by both input paths)
+    void _LoadFromPxrStage(const UsdStageRefPtr& stage);
+
     void _EnsureFrameRendered();
 
     // Knobs

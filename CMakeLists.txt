@@ -172,8 +172,8 @@ set_target_properties(HdSpectral PROPERTIES
 
 # ---------------------------------------------------------------------------
 # SpectralRender.dll — NDK RenderIop (Nuke plugin)
-#   Loaded by NUKE_PATH — completely separate from HdSpectral.dll.
-#   No PXR/Hydra code — pure DDImage/NDK.
+#   Loaded by NUKE_PATH — separate from HdSpectral.dll.
+#   Now uses PXR/USD + usg APIs to read from node graph or file.
 # ---------------------------------------------------------------------------
 add_library(SpectralRender SHARED
     src/SpectralRenderIop.cpp
@@ -184,8 +184,10 @@ target_compile_options(SpectralRender PRIVATE ${SPECTRAL_OPTIONS})
 target_link_libraries(SpectralRender PRIVATE
     SpectralCore
     "${LIB_DDIMAGE}"
+    "${LIB_FDKBASE}"
     "${LIB_TBB}"
     "${LIB_USDABS}"
+    "${LIB_USDENGINE}"
     "C:/dev/SpectralRenderer/python311.lib"
     ${USD_LIBS}
 )

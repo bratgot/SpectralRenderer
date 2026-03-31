@@ -23,6 +23,11 @@
 #include <pxr/base/tf/token.h>
 #include <pxr/base/tf/diagnostic.h>
 
+// USG — Nuke's USD abstraction layer
+#include <usg/api.h>
+#include <usg/geom/Stage.h>
+
+// DDImage
 #include <DDImage/Channel.h>
 
 #include <cmath>
@@ -57,11 +62,31 @@ const char* SpectralRenderIop::node_help() const
 {
     return
         "SpectralRender — physically-based spectral path tracer.\n\n"
-        "Point the 'USD file' knob at a .usd/.usda/.usdc file.\n"
-        "Optionally specify a camera prim path, or leave blank\n"
-        "to auto-find the first camera (default 50mm if none).\n\n"
-        "For interactive viewport, use the Hydra delegate instead\n"
+        "Input 0 (optional): Connect any USD GeomOp\n"
+        "(GeoCube, GeoSphere, GeoImport, etc.)\n\n"
+        "If no input is connected, set the 'USD file' knob\n"
+        "to a .usd/.usda/.usdc file path instead.\n\n"
+        "For interactive viewport, use the Hydra delegate\n"
         "(\"Spectral (CPU)\" in the renderer dropdown).";
+}
+
+// ---------------------------------------------------------------------------
+// Input handling
+// ---------------------------------------------------------------------------
+const char* SpectralRenderIop::input_label(int idx, char*) const
+{
+    if (idx == 0) return "Scene";
+    return "";
+}
+
+bool SpectralRenderIop::test_input(int idx, Op* op) const
+{
+    if (idx != 0) return false;
+    if (!op) return true;  // allow disconnection
+
+    // Accept any Op that implements GeometryProviderI
+    GeometryProviderI* geoProvider = dynamic_cast<GeometryProviderI*>(op);
+    return (geoProvider != nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -70,7 +95,8 @@ const char* SpectralRenderIop::node_help() const
 void SpectralRenderIop::knobs(Knob_Callback f)
 {
     File_knob(f, &_usdFilePath, "usd_file", "USD file");
-    Tooltip(f, "Path to a .usd, .usda, or .usdc file.");
+    Tooltip(f, "Path to a .usd/.usda/.usdc file.\n"
+               "Only used when input 0 is not connected.");
 
     String_knob(f, &_cameraPath, "camera_path", "camera prim");
     Tooltip(f, "USD prim path e.g. /World/Camera. Leave blank to auto-find.");
@@ -149,25 +175,79 @@ void SpectralRenderIop::engine(
 }
 
 // ---------------------------------------------------------------------------
-// _LoadStage — single stage open, loads meshes AND camera
+// _LoadStage — try GeomOp input first, then file knob fallback
 // ---------------------------------------------------------------------------
 void SpectralRenderIop::_LoadStage()
 {
     _scene = std::make_unique<pxr::SpectralScene>();
-
-    // Reset camera to default
     _camera = SpectralCamera();
 
+    // ------------------------------------------------------------------
+    // Path 1: GeomOp input connected — use Nuke's USD scene graph
+    // ------------------------------------------------------------------
+    Op* in0 = (maximum_inputs() > 0 && inputs() > 0) ? input(0) : nullptr;
+    GeometryProviderI* geoProvider = in0 ? dynamic_cast<GeometryProviderI*>(in0) : nullptr;
+
+    if (geoProvider) {
+        fprintf(stderr, "SpectralRender: reading from node graph input\n");
+
+        try {
+            // Validate the upstream op
+            in0->validate(true);
+
+            // Build a usg::Stage from the upstream GeomOp
+            usg::StageRef usgStage = usg::Stage::CreateInMemory();
+            if (!usgStage) {
+                fprintf(stderr, "SpectralRender: failed to create in-memory stage\n");
+                return;
+            }
+
+            // Use the current frame time
+            fdk::TimeValue sampleTime(static_cast<double>(_frame));
+            OpGraphLocation location(in0);
+            GeometryProviderI::BuildStage(usgStage, location, sampleTime);
+
+            if (!usgStage || !usgStage->isValid()) {
+                fprintf(stderr, "SpectralRender: BuildStage produced invalid stage\n");
+                return;
+            }
+
+            // Extract the PXR UsdStageRefPtr from the usg::Stage
+            int usdVer = usg::usdAPIVersion();
+            usg::Stage::Handle* handle = usgStage->getUsdStageRefPtr(usdVer);
+            if (!handle) {
+                fprintf(stderr, "SpectralRender: getUsdStageRefPtr failed (version mismatch?)\n");
+                return;
+            }
+
+            // Cast to PXR UsdStageRefPtr
+            UsdStageRefPtr* pxrStagePtr = reinterpret_cast<UsdStageRefPtr*>(handle);
+            if (!pxrStagePtr || !(*pxrStagePtr)) {
+                fprintf(stderr, "SpectralRender: PXR stage pointer is null\n");
+                return;
+            }
+
+            fprintf(stderr, "SpectralRender: got PXR stage from node graph\n");
+            _LoadFromPxrStage(*pxrStagePtr);
+            return;
+
+        } catch (const std::exception& e) {
+            fprintf(stderr, "SpectralRender: node graph input error: %s\n", e.what());
+        } catch (...) {
+            fprintf(stderr, "SpectralRender: node graph input unknown error\n");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Path 2: File knob fallback
+    // ------------------------------------------------------------------
     if (!_usdFilePath || _usdFilePath[0] == '\0') {
-        fprintf(stderr, "SpectralRender: no USD file set\n");
+        fprintf(stderr, "SpectralRender: no input connected and no USD file set\n");
         return;
     }
 
-    fprintf(stderr, "SpectralRender: opening %s\n", _usdFilePath);
+    fprintf(stderr, "SpectralRender: opening file %s\n", _usdFilePath);
 
-    // ------------------------------------------------------------------
-    // Open stage
-    // ------------------------------------------------------------------
     UsdStageRefPtr stage;
     try {
         stage = UsdStage::Open(std::string(_usdFilePath));
@@ -179,18 +259,22 @@ void SpectralRenderIop::_LoadStage()
         return;
     }
     if (!stage) {
-        fprintf(stderr, "SpectralRender: UsdStage::Open returned null for %s\n", _usdFilePath);
+        fprintf(stderr, "SpectralRender: UsdStage::Open returned null\n");
         return;
     }
 
-    fprintf(stderr, "SpectralRender: stage opened OK\n");
+    fprintf(stderr, "SpectralRender: stage opened OK from file\n");
+    _LoadFromPxrStage(stage);
+}
 
+// ---------------------------------------------------------------------------
+// _LoadFromPxrStage — shared mesh/camera loading from a PXR UsdStageRefPtr
+// ---------------------------------------------------------------------------
+void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
+{
     const UsdTimeCode timeCode(_frame);
     UsdGeomXformCache xfCache(timeCode);
 
-    // ------------------------------------------------------------------
-    // Traverse stage — collect meshes and find camera
-    // ------------------------------------------------------------------
     int meshCount = 0;
     int totalTris = 0;
     UsdPrim cameraPrim;
@@ -207,52 +291,35 @@ void SpectralRenderIop::_LoadStage()
     }
 
     for (const UsdPrim& prim : stage->Traverse()) {
-        // ----------------------------------------------------------
-        // Auto-find first camera if not specified
-        // ----------------------------------------------------------
+        // Auto-find first camera
         if (!cameraPrim.IsValid() && prim.IsA<UsdGeomCamera>()) {
             cameraPrim = prim;
             fprintf(stderr, "SpectralRender: auto-found camera: %s\n",
                     prim.GetPath().GetText());
         }
 
-        // ----------------------------------------------------------
         // Process meshes
-        // ----------------------------------------------------------
         if (!prim.IsA<UsdGeomMesh>()) continue;
 
         UsdGeomMesh mesh(prim);
         if (!mesh) continue;
 
-        // Points
         VtVec3fArray points;
         mesh.GetPointsAttr().Get(&points, timeCode);
-        if (points.empty()) {
-            fprintf(stderr, "SpectralRender: mesh %s has no points, skipping\n",
-                    prim.GetPath().GetText());
-            continue;
-        }
+        if (points.empty()) continue;
 
-        // Topology
         VtIntArray faceVertexCounts;
         VtIntArray faceVertexIndices;
         mesh.GetFaceVertexCountsAttr().Get(&faceVertexCounts, timeCode);
         mesh.GetFaceVertexIndicesAttr().Get(&faceVertexIndices, timeCode);
-        if (faceVertexCounts.empty() || faceVertexIndices.empty()) {
-            fprintf(stderr, "SpectralRender: mesh %s has no topology, skipping\n",
-                    prim.GetPath().GetText());
-            continue;
-        }
+        if (faceVertexCounts.empty() || faceVertexIndices.empty()) continue;
 
-        // Normals (optional)
         VtVec3fArray normals;
         mesh.GetNormalsAttr().Get(&normals, timeCode);
         TfToken normalsInterp = mesh.GetNormalsInterpolation();
 
         // ----------------------------------------------------------
         // Subdivision (Phase 2)
-        //   If the mesh has a subdivision scheme other than "none",
-        //   refine it using OpenSubdiv before triangulating.
         // ----------------------------------------------------------
 #ifdef SPECTRAL_HAS_OSD
         {
@@ -269,7 +336,6 @@ void SpectralRenderIop::_LoadStage()
                 subIn.scheme            = scheme;
                 subIn.level             = 2;
 
-                // Only pass normals if they're per-vertex (matching point count)
                 if (normalsInterp == UsdGeomTokens->vertex &&
                     static_cast<int>(normals.size()) == static_cast<int>(points.size())) {
                     subIn.normals = normals;
@@ -277,16 +343,13 @@ void SpectralRenderIop::_LoadStage()
 
                 SpectralSubdiv::Output subOut;
                 if (SpectralSubdiv::Refine(subIn, subOut)) {
-                    // Replace coarse data with refined data
                     points = subOut.points;
 
-                    // If subdivision produced normals, use them.
-                    // Otherwise compute smooth normals from the refined mesh.
                     if (!subOut.normals.empty()) {
                         normals = subOut.normals;
                         normalsInterp = UsdGeomTokens->vertex;
                     } else {
-                        // Accumulate area-weighted face normals per vertex
+                        // Compute smooth normals from refined mesh
                         const int nPts = static_cast<int>(points.size());
                         const int nIdx = static_cast<int>(subOut.triangleIndices.size());
                         normals.resize(nPts);
@@ -300,7 +363,7 @@ void SpectralRenderIop::_LoadStage()
                             if (i0 >= nPts || i1 >= nPts || i2 >= nPts) continue;
                             GfVec3f e0 = points[i1] - points[i0];
                             GfVec3f e1 = points[i2] - points[i0];
-                            GfVec3f fn = GfCross(e0, e1); // area-weighted
+                            GfVec3f fn = GfCross(e0, e1);
                             normals[i0] += fn;
                             normals[i1] += fn;
                             normals[i2] += fn;
@@ -312,10 +375,8 @@ void SpectralRenderIop::_LoadStage()
                                 : GfVec3f(0.f, 1.f, 0.f);
                         }
                         normalsInterp = UsdGeomTokens->vertex;
-                        fprintf(stderr, "SpectralRender: computed %d smooth normals\n", nPts);
                     }
 
-                    // Rebuild topology from refined triangle indices
                     const int numTris = static_cast<int>(subOut.triangleIndices.size()) / 3;
                     faceVertexCounts.resize(numTris);
                     for (int i = 0; i < numTris; ++i) faceVertexCounts[i] = 3;
@@ -337,13 +398,11 @@ void SpectralRenderIop::_LoadStage()
         const int numPoints = static_cast<int>(points.size());
 
         fprintf(stderr, "SpectralRender: mesh %s — %d points, %d faces, %d normals (%s)\n",
-                prim.GetPath().GetText(),
-                numPoints,
+                prim.GetPath().GetText(), numPoints,
                 static_cast<int>(faceVertexCounts.size()),
                 static_cast<int>(normals.size()),
                 normalsInterp.GetText());
 
-        // Helpers
         auto xfPoint = [&](const GfVec3f& p) -> GfVec3f {
             return GfVec3f(worldXf.Transform(GfVec3d(p)));
         };
@@ -386,14 +445,12 @@ void SpectralRenderIop::_LoadStage()
                 tri.v1 = xfPoint(points[pi1]);
                 tri.v2 = xfPoint(points[pi2]);
 
-                // Face normal
                 GfVec3f e0 = tri.v1 - tri.v0;
                 GfVec3f e1 = tri.v2 - tri.v0;
                 GfVec3f fn = GfCross(e0, e1);
                 float fl = fn.GetLength();
                 tri.faceNormal = (fl > 1e-8f) ? fn / fl : GfVec3f(0.f, 1.f, 0.f);
 
-                // Authored normals
                 bool gotNormals = false;
                 if (!normals.empty()) {
                     if (normalsInterp == UsdGeomTokens->faceVarying) {
@@ -442,7 +499,7 @@ void SpectralRenderIop::_LoadStage()
             meshCount, totalTris);
 
     // ------------------------------------------------------------------
-    // Build camera from the stage (or default)
+    // Build camera
     // ------------------------------------------------------------------
     const Format* fmtPtr = _outputFormat.format();
     unsigned int W = 1920, H = 1080;
@@ -462,33 +519,18 @@ void SpectralRenderIop::_LoadStage()
         try {
             UsdGeomCamera geomCam(cameraPrim);
             GfCamera gfCam = geomCam.GetCamera(timeCode);
-
-            // Camera-to-world from xform cache
             GfMatrix4d camToWorld = xfCache.GetLocalToWorldTransform(cameraPrim);
             _camera.viewToWorld = camToWorld;
-
-            // Projection from GfCamera frustum
             GfFrustum frustum = gfCam.GetFrustum();
             GfMatrix4d projMatrix = frustum.ComputeProjectionMatrix();
             _camera.projInverse = projMatrix.GetInverse();
-
             foundCamera = true;
 
-            // Debug: print camera transform
             GfVec3d camPos = camToWorld.ExtractTranslation();
             fprintf(stderr, "SpectralRender: camera at (%.2f, %.2f, %.2f)\n",
                     camPos[0], camPos[1], camPos[2]);
-
-            fprintf(stderr, "SpectralRender: projection matrix:\n");
-            for (int row = 0; row < 4; row++) {
-                fprintf(stderr, "  [%.4f, %.4f, %.4f, %.4f]\n",
-                        projMatrix[row][0], projMatrix[row][1],
-                        projMatrix[row][2], projMatrix[row][3]);
-            }
-        } catch (const std::exception& e) {
-            fprintf(stderr, "SpectralRender: camera exception: %s\n", e.what());
         } catch (...) {
-            fprintf(stderr, "SpectralRender: camera unknown exception\n");
+            fprintf(stderr, "SpectralRender: camera extraction failed\n");
         }
     }
 
@@ -505,19 +547,6 @@ void SpectralRenderIop::_LoadStage()
         proj[2][3] = -1.0;
         proj[3][2] = (2.0 * far_ * near_) / (near_ - far_);
         _camera.projInverse = proj.GetInverse();
-    }
-
-    // Debug: print first triangle if any
-    if (totalTris > 0) {
-        for (auto& kv : _scene->GetMeshes()) {
-            if (kv.second.triangles.empty()) continue;
-            auto& t = kv.second.triangles[0];
-            fprintf(stderr, "SpectralRender: first triangle:\n");
-            fprintf(stderr, "  v0=(%.3f, %.3f, %.3f)\n", t.v0[0], t.v0[1], t.v0[2]);
-            fprintf(stderr, "  v1=(%.3f, %.3f, %.3f)\n", t.v1[0], t.v1[1], t.v1[2]);
-            fprintf(stderr, "  v2=(%.3f, %.3f, %.3f)\n", t.v2[0], t.v2[1], t.v2[2]);
-            break;
-        }
     }
 }
 
@@ -540,7 +569,6 @@ void SpectralRenderIop::_EnsureFrameRendered()
     _fbHeight = H;
     _frameBuffer.assign(size_t(W) * H * 4, 0.f);
 
-    // Use the camera built during _LoadStage — no second stage open
     SpectralCamera cam = _camera;
     cam.imageWidth  = W;
     cam.imageHeight = H;
