@@ -244,6 +244,7 @@ set_target_properties(HdSpectral PROPERTIES
 # ---------------------------------------------------------------------------
 add_library(SpectralRender SHARED
     src/SpectralRenderIop.cpp
+    src/SpectralSurfaceOp.cpp
 )
 target_include_directories(SpectralRender PRIVATE ${SPECTRAL_INCLUDES})
 target_compile_definitions(SpectralRender PRIVATE ${SPECTRAL_DEFINES})
