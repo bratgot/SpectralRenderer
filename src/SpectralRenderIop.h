@@ -104,6 +104,7 @@ private:
     int   _deviceMode = 0;         // 0=cpu, 1=gpu, 2=auto
     float _shutterOpen  = -0.5f;   // shutter open  (relative to frame)
     float _shutterClose =  0.5f;   // shutter close (relative to frame)
+    float _lightIntensity = 1.0f;  // global light intensity multiplier
     const char* _cameraPath = "";
 
     FormatPair _outputFormat;

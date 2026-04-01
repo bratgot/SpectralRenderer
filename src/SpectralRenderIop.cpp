@@ -162,6 +162,14 @@ void SpectralRenderIop::knobs(Knob_Callback f)
     Int_knob(f, &_maxBounces, "max_bounces", "max bounces");       SetRange(f, 1, 16);
     Int_knob(f, &_tileSize,   "tile_size",   "tile size");         SetRange(f, 16, 256);
 
+    Divider(f, "Lighting");
+    Float_knob(f, &_lightIntensity, "light_intensity", "light intensity");
+    SetRange(f, 0.01f, 10.f);
+    Tooltip(f, "Global light intensity multiplier.\n"
+               "Nuke's USD pipeline uses physical light units which\n"
+               "can produce very large values. Adjust this to\n"
+               "compensate. Default 1.0.");
+
     Divider(f, "Motion blur");
     Float_knob(f, &_shutterOpen,  "shutter_open",  "shutter open");  SetRange(f, -1.f, 0.f);
     Float_knob(f, &_shutterClose, "shutter_close", "shutter close"); SetRange(f, 0.f, 1.f);
@@ -554,10 +562,16 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                     light.illuminant = SpectralLight::Illuminant::RGB;
             }
 
+            // Apply global light intensity multiplier
+            light.intensity *= _lightIntensity;
+
             _scene->AddLight(light);
-            fprintf(stderr, "SpectralRender: light '%s' — type=%d color=(%.2f,%.2f,%.2f) intensity=%.2f\n",
+            fprintf(stderr, "SpectralRender: light '%s' — type=%d color=(%.2f,%.2f,%.2f) "
+                    "intensity=%.2f exposure=%.2f effective=%.2f (multiplier=%.2f)\n",
                     light.name.c_str(), static_cast<int>(light.type),
-                    light.color[0], light.color[1], light.color[2], light.EffectiveIntensity());
+                    light.color[0], light.color[1], light.color[2],
+                    light.intensity, light.exposure, light.EffectiveIntensity(),
+                    _lightIntensity);
         }
 
         // Process meshes
