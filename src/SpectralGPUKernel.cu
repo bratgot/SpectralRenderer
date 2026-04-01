@@ -208,7 +208,29 @@ static __forceinline__ __device__ float lightAttenuation(const GPULight& light, 
 }
 
 // ---------------------------------------------------------------------------
-// Disney BSDF
+// Dispersion + thin-film
+// ---------------------------------------------------------------------------
+static __forceinline__ __device__ float dispersedIOR(float ior_d, float abbe, float lambda)
+{
+    if (abbe <= 0.f) return ior_d;
+    float disp = (ior_d - 1.f) / abbe;
+    float dL = (587.6f - lambda) / (656.3f - 486.1f);
+    return ior_d + disp * dL;
+}
+
+static __forceinline__ __device__ float thinFilmFresnel(float F, float ior, float thick, float lambda, float cosT)
+{
+    const float nf = 1.5f;
+    float sinT = sqrtf(fmaxf(0.f, 1.f - cosT*cosT));
+    float sinTt = sinT / nf;
+    float cosTt = sqrtf(fmaxf(0.f, 1.f - sinTt*sinTt));
+    float delta = 4.f * 3.14159f * nf * thick * cosTt / lambda;
+    float mod = 0.5f * cosf(delta);
+    return fmaxf(0.f, fminf(1.f, F * (1.f + mod)));
+}
+
+// ---------------------------------------------------------------------------
+// Disney BSDF with dispersion + thin-film
 // ---------------------------------------------------------------------------
 static __forceinline__ __device__ float schlickW(float c)
 { float t=1.f-c; float t2=t*t; return t2*t2*t; }
@@ -229,41 +251,141 @@ static __forceinline__ __device__ float evalBSDF(
     if (NdH<=0.f) return 0.f;
     float rough=fmaxf(0.01f,mat.roughness); float alpha=rough*rough;
     float baseR=spectralReflectance(mat,lambda);
-    float iorR=(mat.ior-1.f)/(mat.ior+1.f); float iorF0=iorR*iorR;
+
+    // Dispersion
+    float ior = mat.ior;
+    if (mat.abbeNumber > 0.f) ior = dispersedIOR(mat.ior, mat.abbeNumber, lambda);
+
+    float iorR=(ior-1.f)/(ior+1.f); float iorF0=iorR*iorR;
     float F0=iorF0+(baseR-iorF0)*mat.metallic;
     float F=F0+(1.f-F0)*schlickW(VdH);
+
+    // Thin-film
+    if (mat.thinFilmThickness > 0.f)
+        F = thinFilmFresnel(F, ior, mat.thinFilmThickness, lambda, VdH);
+
     float D=ggxD(alpha,NdH); float G=smithG1(alpha,NdV)*smithG1(alpha,NdL);
     float spec=(D*G*F)/(4.f*NdV*NdL+1e-7f);
     float FD90=0.5f+2.f*VdH*VdH*rough;
-    float diff=(1.f-mat.metallic)*baseR*(1.f+(FD90-1.f)*schlickW(NdL))*(1.f+(FD90-1.f)*schlickW(NdV))/3.14159f;
+    float diff=(1.f-mat.metallic)*mat.opacity*baseR*(1.f+(FD90-1.f)*schlickW(NdL))*(1.f+(FD90-1.f)*schlickW(NdV))/3.14159f;
     return (diff+spec)*NdL;
 }
 
-static __forceinline__ __device__ float evalSkyQuad(
-    const GPUMaterial& mat, float3 N, float3 V, float lambda)
+
+
+// ---------------------------------------------------------------------------
+// Fresnel + Reflect + Refract for transmission
+// ---------------------------------------------------------------------------
+static __forceinline__ __device__ float3 reflect3(float3 V, float3 N)
 {
-    const float3 dirs[6]={{0,1,0},{0,-1,0},{1,0,0},{-1,0,0},{0,0,1},{0,0,-1}};
-    const float wts[6]={0.30f,0.10f,0.15f,0.15f,0.15f,0.15f};
-    float r=0.f;
-    for (int i=0;i<6;++i) r+=evalBSDF(mat,N,V,dirs[i],lambda)*skySpectral(dirs[i],lambda)*wts[i];
-    return r;
+    float VdN = V.x*N.x + V.y*N.y + V.z*N.z;
+    return normalize3(make_float3(N.x*2.f*VdN-V.x, N.y*2.f*VdN-V.y, N.z*2.f*VdN-V.z));
+}
+
+static __forceinline__ __device__ float fresnelDielectric(float cosI, float ior)
+{
+    cosI = fmaxf(0.f, fminf(1.f, cosI));
+    float sinT2 = (1.f - cosI*cosI) / (ior*ior);
+    if (sinT2 > 1.f) return 1.f;
+    float cosT = sqrtf(fmaxf(0.f, 1.f - sinT2));
+    float rS = (cosI - ior*cosT) / (cosI + ior*cosT);
+    float rP = (ior*cosI - cosT) / (ior*cosI + cosT);
+    return 0.5f * (rS*rS + rP*rP);
 }
 
 // ---------------------------------------------------------------------------
-// Tangent frame for cosine sampling
+// Tangent frame + GGX importance sampling
 // ---------------------------------------------------------------------------
 static __forceinline__ __device__ float3 cross3(float3 a, float3 b)
 { return make_float3(a.y*b.z-a.z*b.y, a.z*b.x-a.x*b.z, a.x*b.y-a.y*b.x); }
 
-static __forceinline__ __device__ float3 cosineSampleHemisphere(
-    float3 N, float u1, float u2)
+static __forceinline__ __device__ void makeBasis(float3 N, float3& T, float3& B)
 {
     float3 up = (fabsf(N.y)<0.999f) ? make_float3(0,1,0) : make_float3(1,0,0);
-    float3 T = normalize3(cross3(up, N));
-    float3 B = cross3(N, T);
-    float r = sqrtf(u1); float phi = 6.28318f*u2;
-    float x = r*cosf(phi); float y = r*sinf(phi); float z = sqrtf(fmaxf(0.f,1.f-u1));
-    return normalize3(make_float3(T.x*x+B.x*y+N.x*z, T.y*x+B.y*y+N.y*z, T.z*x+B.z*y+N.z*z));
+    T = normalize3(cross3(up, N));
+    B = cross3(N, T);
+}
+
+// Sample bounce: reflection, refraction, or GGX/cosine importance sampling
+static __forceinline__ __device__ float3 sampleBounce(
+    const GPUMaterial& mat, float3 N, float3 V, float lambda,
+    float u1, float u2, float& throughput, bool& transmitted, bool entering)
+{
+    transmitted = false;
+
+    // Transparent dielectric: Fresnel-weighted reflect vs refract
+    if (mat.opacity < 0.99f && mat.metallic < 0.5f) {
+        float ior = mat.ior;
+        if (mat.abbeNumber > 0.f) ior = dispersedIOR(mat.ior, mat.abbeNumber, lambda);
+
+        float eta = entering ? (1.f / ior) : ior;
+        float3 geoN = entering ? N : neg3(N);
+        float cosI = fabsf(geoN.x*V.x + geoN.y*V.y + geoN.z*V.z);
+        float F = fresnelDielectric(cosI, entering ? ior : 1.f/ior);
+
+        if (u1 < F) {
+            throughput = 1.f;
+            return reflect3(V, N);
+        } else {
+            float sinT2 = eta*eta*(1.f - cosI*cosI);
+            if (sinT2 > 1.f) { throughput = 1.f; return reflect3(V, N); }
+            float cosT = sqrtf(1.f - sinT2);
+            float3 refr = normalize3(make_float3(
+                -V.x*eta + geoN.x*(eta*cosI - cosT),
+                -V.y*eta + geoN.y*(eta*cosI - cosT),
+                -V.z*eta + geoN.z*(eta*cosI - cosT)));
+            transmitted = true;
+            throughput = 1.f;
+            return refr;
+        }
+    }
+
+    // Opaque: GGX + cosine importance sampling
+    float rough = fmaxf(0.01f, mat.roughness);
+    float alpha = rough * rough;
+    float specProb = fmaxf(0.25f, 0.5f*(1.f-rough) + 0.5f*mat.metallic);
+
+    float3 T, B;
+    makeBasis(N, T, B);
+    float3 L;
+    float pdf;
+
+    if (u1 < specProb) {
+        float xi1 = u1 / specProb;
+        float theta = atanf(alpha * sqrtf(xi1) / sqrtf(fmaxf(1e-8f, 1.f-xi1)));
+        float phi = 6.28318f * u2;
+        float sinT = sinf(theta), cosT = cosf(theta);
+        float3 H = normalize3(make_float3(
+            T.x*sinT*cosf(phi) + B.x*sinT*sinf(phi) + N.x*cosT,
+            T.y*sinT*cosf(phi) + B.y*sinT*sinf(phi) + N.y*cosT,
+            T.z*sinT*cosf(phi) + B.z*sinT*sinf(phi) + N.z*cosT));
+        float VdH = dot3(V, H);
+        if (VdH <= 0.f) { throughput = 0.f; return N; }
+        L = normalize3(make_float3(H.x*2.f*VdH-V.x, H.y*2.f*VdH-V.y, H.z*2.f*VdH-V.z));
+        float NdH = dot3(N, H); float NdL = dot3(N, L);
+        if (NdL <= 0.f) { throughput = 0.f; return L; }
+        float D = ggxD(alpha, NdH);
+        float pdfGGX = D * NdH / (4.f * VdH + 1e-7f);
+        pdf = specProb * pdfGGX + (1.f - specProb) * NdL / 3.14159f;
+    } else {
+        float xi1 = (u1 - specProb) / (1.f - specProb);
+        float r = sqrtf(xi1); float phi = 6.28318f * u2;
+        float x=r*cosf(phi), y=r*sinf(phi), z=sqrtf(fmaxf(0.f,1.f-xi1));
+        L = normalize3(make_float3(T.x*x+B.x*y+N.x*z, T.y*x+B.y*y+N.y*z, T.z*x+B.z*y+N.z*z));
+        float NdL = dot3(N, L);
+        if (NdL <= 0.f) { throughput = 0.f; return L; }
+        float pdfCos = NdL / 3.14159f;
+        float3 H = normalize3(make_float3(V.x+L.x, V.y+L.y, V.z+L.z));
+        float NdH = dot3(N, H); float VdH = dot3(V, H);
+        float D = ggxD(alpha, NdH);
+        float pdfGGX = (VdH > 1e-7f) ? D * NdH / (4.f * VdH) : 0.f;
+        pdf = specProb * pdfGGX + (1.f - specProb) * pdfCos;
+    }
+
+    float NdL = dot3(N, L);
+    if (NdL <= 0.f || pdf < 1e-7f) { throughput = 0.f; return L; }
+    throughput = evalBSDF(mat, N, V, L, lambda) / pdf;
+    return L;
 }
 
 // ---------------------------------------------------------------------------
@@ -322,10 +444,6 @@ static __forceinline__ __device__ float shadeHit(
                 radiance += bsdf * lightEmission(light, lambda) * lightAttenuation(light, hitPos);
             }
         }
-        // Sky fill
-        radiance += evalSkyQuad(mat, N, V, lambda) * 0.05f;
-    } else {
-        radiance = evalSkyQuad(mat, N, V, lambda);
     }
 
     return radiance;
@@ -394,61 +512,56 @@ extern "C" __global__ void __raygen__spectral()
                 // Direct lighting at primary hit
                 radiance = shadeHit(mat, N, V, hitPos, lambda);
 
-                // Bounce rays
+                // Bounce rays with refraction support
                 float throughput = 1.f;
                 float3 bN=N, bV=V, bOrigin=hitPos;
                 const GPUMaterial* bMat = &mat;
                 unsigned int bSeed = seed + 100u;
+                bool isEntering = true;
 
                 for (int bounce = 0; bounce < maxBounces; ++bounce) {
-                    // Russian roulette after bounce 1
                     if (bounce >= 1) {
                         float rrProb = fminf(0.95f, throughput);
                         if (hashRNG(bSeed++) > rrProb) break;
                         throughput /= rrProb;
                     }
 
-                    // Sample bounce direction
-                    float3 bounceDir = cosineSampleHemisphere(bN, hashRNG(bSeed++), hashRNG(bSeed++));
-                    float bNdL = dot3(bN, bounceDir);
-                    if (bNdL <= 0.f) break;
+                    float bounceThroughput;
+                    bool bTransmitted = false;
+                    float3 bounceDir = sampleBounce(*bMat, bN, bV, lambda,
+                        hashRNG(bSeed++), hashRNG(bSeed++), bounceThroughput, bTransmitted, isEntering);
+                    if (bounceThroughput <= 0.f) break;
+                    throughput *= bounceThroughput;
 
-                    // BSDF / pdf for cosine sampling: pdf = cos/pi, so throughput = bsdf*cos/pdf = bsdf*pi
-                    float bsdfVal = evalBSDF(*bMat, bN, bV, bounceDir, lambda);
-                    float pdf = bNdL / 3.14159f;
-                    float sampleThru = (pdf > 1e-7f) ? bsdfVal / pdf : 0.f;
-                    if (sampleThru <= 0.f) break;
-                    throughput *= sampleThru;
-
-                    // Trace bounce
-                    float3 bOrig = make_float3(bOrigin.x+bN.x*0.01f, bOrigin.y+bN.y*0.01f, bOrigin.z+bN.z*0.01f);
+                    // Offset: along -N for transmission, +N for reflection
+                    float bOff = bTransmitted ? -0.1f : 0.01f;
+                    float3 bOrig = make_float3(bOrigin.x+bN.x*bOff, bOrigin.y+bN.y*bOff, bOrigin.z+bN.z*bOff);
                     unsigned int bp0=0,bp1=0,bp2=0,bp3=__float_as_uint(1e30f),bp4=0;
                     optixTrace(params.traversable, bOrig, bounceDir, 1e-4f,1e30f,0.f,
                                OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0, bp0,bp1,bp2,bp3,bp4);
 
-                    if (bp4 == 0u) {
-                        // Hit sky
-                        radiance += throughput * skySpectral(bounceDir, lambda);
-                        break;
-                    }
+                    if (bp4 == 0u) break;  // miss — no sky
 
-                    // Hit surface
                     float bDepth = __uint_as_float(bp3);
                     int bMatId = int(bp4)-1;
                     if (bMatId<0||bMatId>=int(params.materialCount)) bMatId=0;
                     bMat = &params.materials[bMatId];
 
-                    bN = normalize3(make_float3(
+                    float3 rawN = normalize3(make_float3(
                         __uint_as_float(bp0),__uint_as_float(bp1),__uint_as_float(bp2)));
                     bV = normalize3(neg3(bounceDir));
-                    if (dot3raw(bN,bV)<0.f) bN=neg3(bN);
+                    float bNdV = dot3raw(rawN, bV);
+                    isEntering = (bNdV > 0.f);
+                    bN = (bNdV < 0.f) ? neg3(rawN) : rawN;
                     bOrigin = make_float3(bOrig.x+bounceDir.x*bDepth, bOrig.y+bounceDir.y*bDepth, bOrig.z+bounceDir.z*bDepth);
 
-                    // Direct lighting at bounce hit
-                    radiance += throughput * shadeHit(*bMat, bN, bV, bOrigin, lambda);
+                    // Skip direct lighting inside transparent objects
+                    bool insideGlass = (!isEntering && bMat->opacity < 0.99f);
+                    if (!insideGlass)
+                        radiance += throughput * shadeHit(*bMat, bN, bV, bOrigin, lambda);
                 }
             } else {
-                radiance = skySpectral(dir, lambda);
+                radiance = 0.f;
             }
 
             float cx,cy,cz; cieXYZ(lambda,cx,cy,cz);
@@ -493,15 +606,8 @@ extern "C" __global__ void __closesthit__spectral()
 // ---------------------------------------------------------------------------
 extern "C" __global__ void __miss__spectral()
 {
-    if (params.spp <= 1) {
-        float3 dir = optixGetWorldRayDirection();
-        float3 c = skyColor(dir);
-        optixSetPayload_0(__float_as_uint(c.x));
-        optixSetPayload_1(__float_as_uint(c.y));
-        optixSetPayload_2(__float_as_uint(c.z));
-    } else {
-        optixSetPayload_0(0u); optixSetPayload_1(0u); optixSetPayload_2(0u);
-    }
+    // No sky — return black for all modes
+    optixSetPayload_0(0u); optixSetPayload_1(0u); optixSetPayload_2(0u);
     optixSetPayload_3(__float_as_uint(1e30f));
     optixSetPayload_4(0u);
 }

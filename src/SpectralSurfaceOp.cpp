@@ -135,13 +135,17 @@ void SpectralSurfaceOp::_ApplyPreset(int preset)
 
     // Force knob UI update
     if (Op* op = getOp()) {
-        if (Knob* k = op->knob("diffuse_color"))  k->changed();
-        if (Knob* k = op->knob("metallic"))        k->changed();
-        if (Knob* k = op->knob("roughness"))       k->changed();
-        if (Knob* k = op->knob("ior"))             k->changed();
-        if (Knob* k = op->knob("opacity"))         k->changed();
-        if (Knob* k = op->knob("abbe_number"))     k->changed();
-        if (Knob* k = op->knob("thin_film"))       k->changed();
+        if (Knob* k = op->knob("diffuse_color")) {
+            k->set_value(_diffuseColor[0], 0);
+            k->set_value(_diffuseColor[1], 1);
+            k->set_value(_diffuseColor[2], 2);
+        }
+        if (Knob* k = op->knob("metallic"))    k->set_value(_metallic);
+        if (Knob* k = op->knob("roughness"))   k->set_value(_roughness);
+        if (Knob* k = op->knob("ior"))         k->set_value(_ior);
+        if (Knob* k = op->knob("opacity"))     k->set_value(_opacity);
+        if (Knob* k = op->knob("abbe_number")) k->set_value(_abbeNumber);
+        if (Knob* k = op->knob("thin_film"))   k->set_value(_thinFilmThickness);
     }
 }
 
@@ -162,6 +166,21 @@ void SpectralSurfaceOp::_SetShaderProperties(usg::ShaderDesc& desc,
     desc.overrideInput("clearcoatRoughness", usg::Value(_clearcoatRoughness));
 }
 
+std::unordered_map<std::string, SpectralSurfaceOp::SpectralParams>&
+SpectralSurfaceOp::GetRegistry()
+{
+    static std::unordered_map<std::string, SpectralParams> s_registry;
+    return s_registry;
+}
+
+void SpectralSurfaceOp::RegisterParams()
+{
+    SpectralParams p;
+    p.abbeNumber        = _abbeNumber;
+    p.thinFilmThickness = _thinFilmThickness;
+    GetRegistry()[node_name()] = p;
+}
+
 // ---------------------------------------------------------------------------
 usg::ShaderDesc* SpectralSurfaceOp::createShaderGraph(
     int32_t                outputType,
@@ -170,11 +189,9 @@ usg::ShaderDesc* SpectralSurfaceOp::createShaderGraph(
 {
     std::string shaderName = getShaderNodeName(rtx.shaderFamily);
 
-    // Check if already created
     usg::ShaderDesc* existing = shaderGroup.getShaderNode(shaderName);
     if (existing) return existing;
 
-    // Create a UsdPreviewSurface shader desc from the schema registry
     usg::ShaderDesc* desc = usg::ShaderDesc::createFromSchema("UsdPreviewSurface", shaderName);
     if (!desc) {
         fprintf(stderr, "SpectralSurface: failed to create UsdPreviewSurface schema\n");
@@ -182,8 +199,10 @@ usg::ShaderDesc* SpectralSurfaceOp::createShaderGraph(
     }
 
     _SetShaderProperties(*desc, rtx);
-
     shaderGroup.addShaderDesc(desc);
+
+    // Register spectral params so the renderer can find them
+    RegisterParams();
 
     return desc;
 }
@@ -198,5 +217,6 @@ void SpectralSurfaceOp::updateShaderGraphOverrides(
     usg::ShaderDesc* desc = shaderGroup.getShaderNode(shaderName);
     if (desc) {
         _SetShaderProperties(*desc, rtx);
+        RegisterParams();
     }
 }

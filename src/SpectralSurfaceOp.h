@@ -15,6 +15,9 @@
 #include <DDImage/ShaderOp.h>
 #include <DDImage/Knobs.h>
 
+#include <unordered_map>
+#include <string>
+
 #include "HdSpectralApi.h"
 
 using namespace DD::Image;
@@ -66,4 +69,14 @@ private:
 
     void _ApplyPreset(int preset);
     void _SetShaderProperties(usg::ShaderDesc& desc, const MaterialContext& rtx);
+
+public:
+    // Spectral parameter registry — shared between SpectralSurfaceOp and the renderer.
+    // Key = Nuke node name (e.g. "SpectralSurface1"), accessed by the material reader.
+    struct SpectralParams {
+        float abbeNumber       = 0.f;
+        float thinFilmThickness = 0.f;
+    };
+    static std::unordered_map<std::string, SpectralParams>& GetRegistry();
+    void RegisterParams();
 };

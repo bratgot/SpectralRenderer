@@ -70,10 +70,7 @@ void SpectralIntegrator::RenderFrame(
                         hitObjectId = hit.tri->objectId;
                         hitMaterialId = hit.tri->materialId;
                     } else {
-                        GfVec3f dir = GfVec3f(ray.GetDirection());
-                        float len = dir.GetLength();
-                        if (len > 1e-6f) dir /= len;
-                        color = _SkyColor(dir);
+                        color = GfVec3f(0.f);
                     }
 
                     float* px = pixels + pixIdx * 4;
@@ -132,10 +129,7 @@ void SpectralIntegrator::RenderFrame(
                                 gotFirstHit = true;
                             }
                         } else {
-                            GfVec3f dir = GfVec3f(ray.GetDirection());
-                            float len = dir.GetLength();
-                            if (len > 1e-6f) dir /= len;
-                            radiance = _SkySpectral(dir, lambda);
+                            radiance = 0.f;
                         }
 
                         GfVec3f xyz = SpectralSpectrum::RadianceToXYZ(radiance, lambda);
@@ -212,10 +206,7 @@ void SpectralIntegrator::RenderTile(
                 if (hit.valid()) {
                     color = _ShadeSmoothNormal(*hit.tri, hit.u, hit.v);
                 } else {
-                    GfVec3f dir = GfVec3f(ray.GetDirection());
-                    float len = dir.GetLength();
-                    if (len > 1e-6f) dir /= len;
-                    color = _SkyColor(dir);
+                    color = GfVec3f(0.f);
                 }
 
                 float* px = pixels + (localY * tileW + localX) * 4;
@@ -464,18 +455,9 @@ float SpectralIntegrator::_ShadeSpectral(
                 radiance += bsdf * lightRad * atten;
             }
         }
-        // Sky fill
-        auto skyFn = [](const GfVec3f& dir, float lam) -> float {
-            return _SkySpectral(dir, lam);
-        };
-        radiance += SpectralBSDF::EvaluateSkylighting(resolvedMat, N, V, lambda, skyFn) * 0.05f;
-    } else {
-        // No explicit lights — full sky lighting
-        auto skyFn = [](const GfVec3f& dir, float lam) -> float {
-            return _SkySpectral(dir, lam);
-        };
-        radiance = SpectralBSDF::EvaluateSkylighting(resolvedMat, N, V, lambda, skyFn);
+        // No ambient fill — pure direct lighting
     }
+    // No sky fill — pure direct + bounce lighting only
 
     radiance += resolvedMat.SpectralEmission(lambda);
 
@@ -488,6 +470,7 @@ float SpectralIntegrator::_ShadeSpectral(
     GfVec3f bounceV = V;
     SpectralMaterial resolvedBounceMat = resolvedMat;
     const SpectralMaterial* bounceMat = &resolvedBounceMat;
+    bool isEntering = true;  // start outside any material
 
     for (int bounce = 0; bounce < maxBounces; ++bounce) {
         // Russian roulette after bounce 1
@@ -501,27 +484,25 @@ float SpectralIntegrator::_ShadeSpectral(
         float u1 = _Hash(rngSeed++);
         float u2 = _Hash(rngSeed++);
         float bounceThroughput;
+        bool transmitted = false;
         GfVec3f bounceDir = SpectralBSDF::SampleDirection(
-            *bounceMat, bounceN, bounceV, lambda, u1, u2, bounceThroughput);
+            *bounceMat, bounceN, bounceV, lambda, u1, u2,
+            bounceThroughput, transmitted, isEntering);
 
         if (bounceThroughput <= 0.f) break;
         pathThroughput *= bounceThroughput;
 
-        // Trace bounce ray
-        GfVec3f bOffset = bounceN * 0.01f;
+        // Trace bounce ray — use SetPointAndDirection so t = actual distance
+        GfVec3f bOffset = transmitted ? (bounceN * -0.1f) : (bounceN * 0.01f);
         GfRay bounceRay;
-        bounceRay.SetEnds(
+        bounceRay.SetPointAndDirection(
             GfVec3d(bounceOrigin + bOffset),
-            GfVec3d(bounceOrigin + bOffset) + GfVec3d(bounceDir) * 10000.0);
+            GfVec3d(bounceDir));
 
         SpectralBVH::Hit bounceHit = bvh.Intersect(bounceRay, rayTime);
 
         if (!bounceHit.valid()) {
-            // Hit sky
-            GfVec3f dir = GfVec3f(bounceRay.GetDirection());
-            float dlen = dir.GetLength();
-            if (dlen > 1e-6f) dir /= dlen;
-            radiance += pathThroughput * _SkySpectral(dir, lambda);
+            // Miss — no sky contribution
             break;
         }
 
@@ -540,8 +521,11 @@ float SpectralIntegrator::_ShadeSpectral(
 
         bounceV = GfVec3f(-bounceDir[0], -bounceDir[1], -bounceDir[2]);
 
-        // Flip normal if back-facing
+        // Determine entering/exiting BEFORE flipping normal
         float bNdotV = bounceN[0]*bounceV[0] + bounceN[1]*bounceV[1] + bounceN[2]*bounceV[2];
+        isEntering = (bNdotV > 0.f);  // normal faces camera = entering
+
+        // Flip normal to face camera
         if (bNdotV < 0.f) bounceN = -bounceN;
 
         bounceOrigin = GfVec3f(
@@ -549,9 +533,10 @@ float SpectralIntegrator::_ShadeSpectral(
             bounceOrigin[1] + bOffset[1] + bounceDir[1] * bounceHit.t,
             bounceOrigin[2] + bOffset[2] + bounceDir[2] * bounceHit.t);
 
-        // Direct lighting at bounce hit (with backface shadow filtering)
+        // Direct lighting — skip if inside a transparent object
+        bool insideTransparent = (!isEntering && bounceMat->opacity < 0.99f);
         float bounceRadiance = 0.f;
-        if (scene.HasLights()) {
+        if (scene.HasLights() && !insideTransparent) {
             for (const SpectralLight& light : scene.GetLights()) {
                 GfVec3f L = light.DirectionFrom(bounceOrigin);
 
@@ -583,20 +568,12 @@ float SpectralIntegrator::_ShadeSpectral(
                     bounceRadiance += bsdf * lightRad * atten;
                 }
             }
-            auto skyFn = [](const GfVec3f& dir, float lam) -> float {
-                return _SkySpectral(dir, lam);
-            };
-            bounceRadiance += SpectralBSDF::EvaluateSkylighting(
-                *bounceMat, bounceN, bounceV, lambda, skyFn) * 0.05f;
-        } else {
-            auto skyFn = [](const GfVec3f& dir, float lam) -> float {
-                return _SkySpectral(dir, lam);
-            };
-            bounceRadiance = SpectralBSDF::EvaluateSkylighting(
-                *bounceMat, bounceN, bounceV, lambda, skyFn);
+
         }
 
-        bounceRadiance += bounceMat->SpectralEmission(lambda);
+        if (!insideTransparent) {
+            bounceRadiance += bounceMat->SpectralEmission(lambda);
+        }
         radiance += pathThroughput * bounceRadiance;
     }
 

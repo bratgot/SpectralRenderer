@@ -158,6 +158,13 @@ public:
 
     size_t TextureCount() const { return _textures.size(); }
 
+    /// Add a pre-rendered texture directly (for Nuke Iop textures)
+    int AddTexture(SpectralTexture&& tex) {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _textures.push_back(std::move(tex));
+        return static_cast<int>(_textures.size() - 1);
+    }
+
 private:
     mutable std::mutex _mutex;
     std::unordered_map<SdfPath, SpectralMeshData, SdfPath::Hash> _meshes;

@@ -28,6 +28,8 @@ struct GPUMaterial {
     float  ior;
     float  opacity;
     float3 emissiveColor;
+    float  abbeNumber;
+    float  thinFilmThickness;
 };
 
 // GPU-side light

@@ -1,4 +1,5 @@
 #include "SpectralRenderIop.h"
+#include "SpectralSurfaceOp.h"
 
 #ifdef SPECTRAL_HAS_OSD
 #include "SpectralSubdiv.h"
@@ -169,6 +170,19 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                "Nuke's USD pipeline uses physical light units which\n"
                "can produce very large values. Adjust this to\n"
                "compensate. Default 1.0.");
+
+    static const char* const illuminantNames[] = {
+        "auto", "D50", "D65", "A", "F2", "F11", nullptr
+    };
+    Enumeration_knob(f, &_illuminant, illuminantNames, "illuminant", "illuminant");
+    Tooltip(f, "CIE illuminant override for all lights.\n"
+               "auto = use each light's own color/temperature\n"
+               "D50  = CIE D50 (horizon daylight, 5003K)\n"
+               "D65  = CIE D65 (noon daylight, 6504K)\n"
+               "A    = CIE A (tungsten incandescent, 2856K)\n"
+               "F2   = CIE F2 (cool white fluorescent)\n"
+               "F11  = CIE F11 (narrow-band fluorescent)");
+
 
     Divider(f, "Motion blur");
     Float_knob(f, &_shutterOpen,  "shutter_open",  "shutter open");  SetRange(f, -1.f, 0.f);
@@ -565,6 +579,33 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
             // Apply global light intensity multiplier
             light.intensity *= _lightIntensity;
 
+            // Apply CIE illuminant override
+            if (_illuminant > 0) {
+                light.enableColorTemperature = true;
+                switch (_illuminant) {
+                    case 1: // D50
+                        light.illuminant = SpectralLight::Illuminant::D65; // closest match
+                        light.colorTemperature = 5003.f;
+                        break;
+                    case 2: // D65
+                        light.illuminant = SpectralLight::Illuminant::D65;
+                        light.colorTemperature = 6504.f;
+                        break;
+                    case 3: // A
+                        light.illuminant = SpectralLight::Illuminant::A;
+                        light.colorTemperature = 2856.f;
+                        break;
+                    case 4: // F2
+                        light.illuminant = SpectralLight::Illuminant::Blackbody;
+                        light.colorTemperature = 4230.f;
+                        break;
+                    case 5: // F11
+                        light.illuminant = SpectralLight::Illuminant::Blackbody;
+                        light.colorTemperature = 4000.f;
+                        break;
+                }
+            }
+
             _scene->AddLight(light);
             fprintf(stderr, "SpectralRender: light '%s' — type=%d color=(%.2f,%.2f,%.2f) "
                     "intensity=%.2f exposure=%.2f effective=%.2f (multiplier=%.2f)\n",
@@ -657,6 +698,40 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                     SpectralMaterial mat;
                     mat.name = boundMat.GetPath().GetString();
 
+                    // Debug: print shader ID and all inputs
+                    TfToken surfShaderId;
+                    surfaceShader.GetIdAttr().Get(&surfShaderId, timeCode);
+                    fprintf(stderr, "SpectralRender: shader id='%s' prim='%s'\n",
+                            surfShaderId.GetText(), surfaceShader.GetPath().GetText());
+
+                    // List all inputs
+                    auto inputs = surfaceShader.GetInputs();
+                    for (const auto& inp : inputs) {
+                        VtValue val;
+                        inp.Get(&val, timeCode);
+
+                        // Check for connections
+                        UsdShadeConnectableAPI connSrc;
+                        TfToken connName;
+                        UsdShadeAttributeType connType;
+                        bool connected = UsdShadeConnectableAPI::GetConnectedSource(
+                            inp, &connSrc, &connName, &connType);
+
+                        if (connected) {
+                            UsdShadeShader connShader(connSrc.GetPrim());
+                            TfToken connId;
+                            if (connShader) connShader.GetIdAttr().Get(&connId, timeCode);
+                            fprintf(stderr, "  input '%s' -> connected to '%s' (id='%s')\n",
+                                    inp.GetBaseName().GetText(),
+                                    connSrc.GetPrim().GetPath().GetText(),
+                                    connId.GetText());
+                        } else if (val.IsHolding<SdfAssetPath>()) {
+                            fprintf(stderr, "  input '%s' = asset:'%s'\n",
+                                    inp.GetBaseName().GetText(),
+                                    val.UncheckedGet<SdfAssetPath>().GetAssetPath().c_str());
+                        }
+                    }
+
                     // Read UsdPreviewSurface inputs
                     auto readFloat = [&](const char* inputName, float& val) {
                         UsdShadeInput inp = surfaceShader.GetInput(TfToken(inputName));
@@ -684,7 +759,21 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                     readFloat("clearcoat", mat.clearcoat);
                     readFloat("clearcoatRoughness", mat.clearcoatRoughness);
 
-                    // Check for texture connections (UsdUVTexture nodes)
+                    // Determine texture input names based on shader type
+                    const char* diffuseTexInput = "diffuseColor";
+                    const char* roughTexInput   = "roughness";
+                    const char* metalTexInput   = "metallic";
+
+                    if (surfShaderId == TfToken("NukeDefaultSurface")) {
+                        // Nuke's default surface uses different input names
+                        diffuseTexInput = "tex_color";
+                        // NukeDefaultSurface has tex_color/tex_opacity but
+                        // no separate roughness/metallic texture inputs
+                        roughTexInput = nullptr;
+                        metalTexInput = nullptr;
+                    }
+
+                    // Check for texture connections (UsdUVTexture or Nuke Iop textures)
                     auto readTexture = [&](const char* inputName) -> int {
                         UsdShadeInput inp = surfaceShader.GetInput(TfToken(inputName));
                         if (!inp) return -1;
@@ -700,47 +789,183 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                         UsdShadeShader texShader(src.GetPrim());
                         if (!texShader) return -1;
 
-                        // Verify it's a UsdUVTexture
                         TfToken shaderId;
                         texShader.GetIdAttr().Get(&shaderId, timeCode);
-                        if (shaderId != TfToken("UsdUVTexture")) return -1;
 
-                        // Get the file path
+                        // --- Path 1: UsdUVTexture ---
+                        if (shaderId == TfToken("UsdUVTexture")) {
+                            UsdShadeInput fileInp = texShader.GetInput(TfToken("file"));
+                            if (!fileInp) return -1;
+
+                            VtValue fileVal;
+                            fileInp.Get(&fileVal, timeCode);
+                            std::string filePath;
+                            std::string assetPath;
+                            if (fileVal.IsHolding<SdfAssetPath>()) {
+                                SdfAssetPath ap = fileVal.UncheckedGet<SdfAssetPath>();
+                                filePath = ap.GetResolvedPath();
+                                assetPath = ap.GetAssetPath();
+                                if (filePath.empty()) filePath = assetPath;
+                            } else if (fileVal.IsHolding<std::string>()) {
+                                filePath = fileVal.UncheckedGet<std::string>();
+                                assetPath = filePath;
+                            }
+
+                            if (filePath.empty()) return -1;
+
+                            // Check if it's a Nuke Iop reference (not a real file)
+                            if (assetPath.find("/NkRoot/") != std::string::npos) {
+                                Op* texOp = ShaderOp::retrieveOpFromAssetPath(assetPath);
+                                Iop* texIop = dynamic_cast<Iop*>(texOp);
+                                if (texIop) {
+                                    try {
+                                        texIop->validate(true);
+                                        const int texW = texIop->info().format().width();
+                                        const int texH = texIop->info().format().height();
+                                        if (texW > 0 && texH > 0) {
+                                            pxr::SpectralTexture tex;
+                                            tex._width = texW;
+                                            tex._height = texH;
+                                            tex._channels = 3;
+                                            tex._pixels.resize(size_t(texW) * texH * 3);
+                                            tex._path = assetPath;
+
+                                            texIop->request(0, 0, texW, texH, Mask_RGB, 1);
+                                            for (int y = 0; y < texH; ++y) {
+                                                Row row(0, texW);
+                                                texIop->get(y, 0, texW, Mask_RGB, row);
+                                                const float* rp = row[Chan_Red];
+                                                const float* gp = row[Chan_Green];
+                                                const float* bp = row[Chan_Blue];
+                                                int storeY = texH - 1 - y;
+                                                for (int x = 0; x < texW; ++x) {
+                                                    size_t idx = (size_t(storeY) * texW + x) * 3;
+                                                    tex._pixels[idx + 0] = rp ? rp[x] : 0.f;
+                                                    tex._pixels[idx + 1] = gp ? gp[x] : 0.f;
+                                                    tex._pixels[idx + 2] = bp ? bp[x] : 0.f;
+                                                }
+                                            }
+
+                                            int texId = _scene->AddTexture(std::move(tex));
+                                            fprintf(stderr, "SpectralRender: Iop texture '%s' -> %s (%dx%d, id=%d)\n",
+                                                    inputName, texIop->node_name(), texW, texH, texId);
+                                            return texId;
+                                        }
+                                    } catch (...) {
+                                        fprintf(stderr, "SpectralRender: failed to render Iop texture '%s'\n",
+                                                inputName);
+                                    }
+                                }
+                                return -1;
+                            }
+
+                            // Real file on disk
+                            int texId = _scene->LoadTexture(filePath);
+                            if (texId >= 0) {
+                                fprintf(stderr, "SpectralRender: texture '%s' -> '%s' (id=%d)\n",
+                                        inputName, filePath.c_str(), texId);
+                            }
+                            return texId;
+                        }
+
+                        // --- Path 2: Nuke Iop texture (CheckerBoard, etc) ---
+                        // Look for an asset path referencing a Nuke Op
                         UsdShadeInput fileInp = texShader.GetInput(TfToken("file"));
-                        if (!fileInp) return -1;
+                        if (fileInp) {
+                            VtValue fileVal;
+                            fileInp.Get(&fileVal, timeCode);
+                            std::string assetPath;
+                            if (fileVal.IsHolding<SdfAssetPath>()) {
+                                SdfAssetPath ap = fileVal.UncheckedGet<SdfAssetPath>();
+                                assetPath = ap.GetAssetPath();
+                            } else if (fileVal.IsHolding<std::string>()) {
+                                assetPath = fileVal.UncheckedGet<std::string>();
+                            }
 
-                        VtValue fileVal;
-                        fileInp.Get(&fileVal, timeCode);
-                        std::string filePath;
-                        if (fileVal.IsHolding<SdfAssetPath>()) {
-                            SdfAssetPath ap = fileVal.UncheckedGet<SdfAssetPath>();
-                            filePath = ap.GetResolvedPath();
-                            if (filePath.empty()) filePath = ap.GetAssetPath();
-                        } else if (fileVal.IsHolding<std::string>()) {
-                            filePath = fileVal.UncheckedGet<std::string>();
+                            if (!assetPath.empty() && assetPath.find("/NkRoot/") != std::string::npos) {
+                                // It's a Nuke Iop reference — render it to a texture buffer
+                                Op* texOp = ShaderOp::retrieveOpFromAssetPath(assetPath);
+                                Iop* texIop = dynamic_cast<Iop*>(texOp);
+                                if (texIop) {
+                                    try {
+                                        texIop->validate(true);
+                                        const int texW = texIop->info().format().width();
+                                        const int texH = texIop->info().format().height();
+                                        if (texW > 0 && texH > 0) {
+                                            // Render the Iop into a pixel buffer
+                                            pxr::SpectralTexture tex;
+                                            tex._width = texW;
+                                            tex._height = texH;
+                                            tex._channels = 3;
+                                            tex._pixels.resize(size_t(texW) * texH * 3);
+                                            tex._path = assetPath;
+
+                                            texIop->request(0, 0, texW, texH, Mask_RGB, 1);
+                                            for (int y = 0; y < texH; ++y) {
+                                                Row row(0, texW);
+                                                texIop->get(y, 0, texW, Mask_RGB, row);
+                                                const float* rp = row[Chan_Red] ? row[Chan_Red] : nullptr;
+                                                const float* gp = row[Chan_Green] ? row[Chan_Green] : nullptr;
+                                                const float* bp = row[Chan_Blue] ? row[Chan_Blue] : nullptr;
+                                                // Store top-down (row 0 = top of image)
+                                                int storeY = texH - 1 - y;
+                                                for (int x = 0; x < texW; ++x) {
+                                                    size_t idx = (size_t(storeY) * texW + x) * 3;
+                                                    tex._pixels[idx + 0] = rp ? rp[x] : 0.f;
+                                                    tex._pixels[idx + 1] = gp ? gp[x] : 0.f;
+                                                    tex._pixels[idx + 2] = bp ? bp[x] : 0.f;
+                                                }
+                                            }
+
+                                            // Add to texture table
+                                            int texId = _scene->AddTexture(std::move(tex));
+                                            fprintf(stderr, "SpectralRender: Iop texture '%s' -> %s (%dx%d, id=%d)\n",
+                                                    inputName, texIop->node_name(), texW, texH, texId);
+                                            return texId;
+                                        }
+                                    } catch (...) {
+                                        fprintf(stderr, "SpectralRender: failed to render Iop texture '%s'\n",
+                                                inputName);
+                                    }
+                                }
+                            }
                         }
 
-                        if (filePath.empty()) return -1;
-
-                        // Load the texture
-                        int texId = _scene->LoadTexture(filePath);
-                        if (texId >= 0) {
-                            fprintf(stderr, "SpectralRender: texture '%s' -> '%s' (id=%d)\n",
-                                    inputName, filePath.c_str(), texId);
-                        }
-                        return texId;
+                        fprintf(stderr, "SpectralRender: unsupported texture shader '%s' on '%s'\n",
+                                shaderId.GetText(), inputName);
+                        return -1;
                     };
 
-                    mat.baseColorTexId = readTexture("diffuseColor");
-                    mat.roughnessTexId = readTexture("roughness");
-                    mat.metallicTexId  = readTexture("metallic");
+                    mat.baseColorTexId = readTexture(diffuseTexInput);
+                    mat.roughnessTexId = roughTexInput ? readTexture(roughTexInput) : -1;
+                    mat.metallicTexId  = metalTexInput ? readTexture(metalTexInput) : -1;
+
+                    // Check for spectral properties from SpectralSurface nodes
+                    {
+                        std::string shaderPath = surfaceShader.GetPath().GetString();
+                        // Try each registered SpectralSurface node name
+                        const auto& registry = SpectralSurfaceOp::GetRegistry();
+                        for (const auto& entry : registry) {
+                            if (shaderPath.find(entry.first) != std::string::npos) {
+                                mat.abbeNumber        = entry.second.abbeNumber;
+                                mat.thinFilmThickness = entry.second.thinFilmThickness;
+                                if (mat.abbeNumber > 0.f || mat.thinFilmThickness > 0.f) {
+                                    fprintf(stderr, "SpectralRender: spectral props from '%s'"
+                                            " — Abbe=%.1f thinFilm=%.0fnm\n",
+                                            entry.first.c_str(),
+                                            mat.abbeNumber, mat.thinFilmThickness);
+                                }
+                                break;
+                            }
+                        }
+                    }
 
                     matId = _scene->AddMaterial(mat);
 
-                    fprintf(stderr, "SpectralRender: material '%s' — color=(%.2f,%.2f,%.2f) metal=%.2f rough=%.2f\n",
+                    fprintf(stderr, "SpectralRender: material '%s' — color=(%.2f,%.2f,%.2f) metal=%.2f rough=%.2f opacity=%.2f\n",
                             mat.name.c_str(),
                             mat.baseColor[0], mat.baseColor[1], mat.baseColor[2],
-                            mat.metallic, mat.roughness);
+                            mat.metallic, mat.roughness, mat.opacity);
                 }
             }
         }
@@ -1072,17 +1297,20 @@ void SpectralRenderIop::_BuildCameraFromInput()
     _camera.imageWidth  = W;
     _camera.imageHeight = H;
     _camera.pixelAspect = fmtPtr ? fmtPtr->pixel_aspect() : 1.0;
-    // DDImage uses row-vector convention (v * M), PXR uses column-vector (M * v).
-    // Must TRANSPOSE when converting DDImage → PXR.
+    // DDImage cam->matrix() is the camera-to-world matrix.
+    // DDImage uses row-vector (v*M) and PXR Transform() also uses row-vector (v*M),
+    // so viewToWorld is copied WITHOUT transposing.
     const DD::Image::Matrix4& cw = cam->matrix();
     _camera.viewToWorld = GfMatrix4d(
-        cw[0][0], cw[1][0], cw[2][0], cw[3][0],
-        cw[0][1], cw[1][1], cw[2][1], cw[3][1],
-        cw[0][2], cw[1][2], cw[2][2], cw[3][2],
-        cw[0][3], cw[1][3], cw[2][3], cw[3][3]
+        cw[0][0], cw[0][1], cw[0][2], cw[0][3],
+        cw[1][0], cw[1][1], cw[1][2], cw[1][3],
+        cw[2][0], cw[2][1], cw[2][2], cw[2][3],
+        cw[3][0], cw[3][1], cw[3][2], cw[3][3]
     );
 
-    // Projection matrix — transpose DDImage row-vector → PXR column-vector.
+    // Projection matrix — TRANSPOSE DDImage row-vector → PXR column-vector.
+    // _MakeRay uses projInverse * vec4 (column-vector M*v multiply), so the
+    // projection MUST be transposed from DDImage's row-vector convention.
     // DDImage's projection is square (proj[0][0] == proj[1][1]) — it only
     // encodes haperture. We must scale [1][1] by the image aspect ratio
     // so the vertical FOV matches the image height.
@@ -1147,6 +1375,7 @@ void SpectralRenderIop::_EnsureFrameRendered()
         cam.shutterOpen  = 0.f;
         cam.shutterClose = 0.f;
     }
+
 
     // Determine render device
     bool useGPU = false;

@@ -68,13 +68,29 @@ public:
         float baseRefl = mat.SpectralReflectance(lambda);
 
         // ----------------------------------------------------------
+        // IOR with dispersion (wavelength-dependent)
+        // Abbe number V_d: n(lambda) varies more for lower V_d
+        // ----------------------------------------------------------
+        float ior = mat.ior;
+        if (mat.abbeNumber > 0.f) {
+            ior = _DispersedIOR(mat.ior, mat.abbeNumber, lambda);
+        }
+
+        // ----------------------------------------------------------
         // Fresnel F0 — metallic uses base colour, dielectric uses ior
         // ----------------------------------------------------------
-        float iorF0 = _IorToF0(mat.ior);
+        float iorF0 = _IorToF0(ior);
         float F0 = _Lerp(iorF0, baseRefl, mat.metallic);
 
         // Schlick Fresnel
         float F = _FresnelSchlick(F0, VdotH);
+
+        // ----------------------------------------------------------
+        // Thin-film interference modulation
+        // ----------------------------------------------------------
+        if (mat.thinFilmThickness > 0.f) {
+            F = _ThinFilmFresnel(F, ior, mat.thinFilmThickness, lambda, VdotH);
+        }
 
         // ----------------------------------------------------------
         // Specular: GGX microfacet
@@ -93,7 +109,8 @@ public:
                             * (1.f + (FD90 - 1.f) * FDV);
 
         // Metals have no diffuse — only specular with coloured F0
-        float diffuse = (1.f - mat.metallic) * baseRefl * diffuseFactor / 3.14159f;
+        // Transparent materials (opacity < 1) reduce diffuse proportionally
+        float diffuse = (1.f - mat.metallic) * mat.opacity * baseRefl * diffuseFactor / 3.14159f;
 
         return (diffuse + specular) * NdotL;
     }
@@ -139,12 +156,14 @@ public:
     }
 
     // ------------------------------------------------------------------
-    // Sample a bounce direction (cosine-weighted hemisphere).
-    //   Returns sampled direction L, and the BSDF value / pdf.
-    //   For diffuse-dominant materials this is importance-sampled.
+    // Sample a bounce direction — reflection or transmission.
+    //   For opaque materials: GGX + cosine importance sampling
+    //   For transparent materials (opacity < 1): Fresnel-weighted
+    //     reflection vs refraction with wavelength-dependent IOR
     //
     //   u1, u2: uniform random numbers in [0, 1)
-    //   Returns throughput: BSDF(N,V,L) * NdotL / pdf
+    //   throughput: BSDF weight / pdf for the sampled direction
+    //   transmitted: true if the ray refracts through the surface
     // ------------------------------------------------------------------
     static GfVec3f SampleDirection(
         const SpectralMaterial& mat,
@@ -152,38 +171,129 @@ public:
         const GfVec3f& V,
         float lambda,
         float u1, float u2,
-        float& throughput)
+        float& throughput,
+        bool& transmitted,
+        bool entering = true)
     {
-        // Cosine-weighted hemisphere sampling
-        //   pdf = cos(theta) / pi
-        //   For Lambertian diffuse: BSDF = albedo / pi
-        //   throughput = (albedo/pi * cos) / (cos/pi) = albedo
-        float r = std::sqrt(u1);
-        float phi = 2.f * 3.14159f * u2;
+        transmitted = false;
+        float roughness = std::max(0.01f, mat.roughness);
+        float alpha = roughness * roughness;
 
-        // Local tangent frame
+        // ----------------------------------------------------------
+        // Transparent dielectric: Fresnel-weighted reflect vs refract
+        // ----------------------------------------------------------
+        if (mat.opacity < 0.99f && mat.metallic < 0.5f) {
+            float ior = mat.ior;
+            if (mat.abbeNumber > 0.f) ior = _DispersedIOR(mat.ior, mat.abbeNumber, lambda);
+
+            // Compute eta and geometric normal for refraction
+            // N is already flipped to face V. For refraction we need the
+            // geometric orientation:
+            //   entering: geoN = N (outward), eta = 1/ior
+            //   exiting:  geoN = -N (outward), eta = ior/1
+            float eta;
+            GfVec3f geoN;
+            if (entering) {
+                eta = 1.f / ior;
+                geoN = N;
+            } else {
+                eta = ior;
+                geoN = -N;  // unflip to get outward-facing
+            }
+
+            float cosI = std::abs(V[0]*geoN[0] + V[1]*geoN[1] + V[2]*geoN[2]);
+            float F = _FresnelDielectric(cosI, entering ? ior : 1.f/ior);
+
+            if (u1 < F) {
+                // Specular reflection
+                GfVec3f L = _Reflect(V, N);
+                throughput = 1.f;
+                return L;
+            } else {
+                // Refraction — use geometric normal
+                float sinT2 = eta * eta * (1.f - cosI * cosI);
+                if (sinT2 > 1.f) {
+                    // Total internal reflection
+                    GfVec3f L = _Reflect(V, N);
+                    throughput = 1.f;
+                    return L;
+                }
+                float cosT = std::sqrt(1.f - sinT2);
+                // Incident direction = -V, normal = geoN
+                GfVec3f refracted = _Normalize(
+                    GfVec3f(-V[0] * eta + geoN[0] * (eta * cosI - cosT),
+                            -V[1] * eta + geoN[1] * (eta * cosI - cosT),
+                            -V[2] * eta + geoN[2] * (eta * cosI - cosT)));
+                transmitted = true;
+                throughput = 1.f;  // clear glass, no absorption
+                return refracted;
+            }
+        }
+
+        // ----------------------------------------------------------
+        // Opaque: GGX + cosine importance sampling (unchanged)
+        // ----------------------------------------------------------
+        float specProb = std::max(0.25f, 0.5f * (1.f - roughness) + 0.5f * mat.metallic);
+
+        GfVec3f L;
+        float pdf;
+
         GfVec3f T, B;
         _MakeBasis(N, T, B);
 
-        float x = r * std::cos(phi);
-        float y = r * std::sin(phi);
-        float z = std::sqrt(std::max(0.f, 1.f - u1));
+        if (u1 < specProb) {
+            float xi1 = u1 / specProb;
+            float xi2 = u2;
 
-        GfVec3f L = _Normalize(T * x + B * y + N * z);
+            float theta = std::atan(alpha * std::sqrt(xi1) / std::sqrt(std::max(1e-8f, 1.f - xi1)));
+            float phi = 2.f * 3.14159f * xi2;
 
-        float NdotL = _Dot(N, L);
-        if (NdotL <= 0.f) {
-            throughput = 0.f;
-            return L;
+            float sinT = std::sin(theta);
+            float cosT = std::cos(theta);
+            GfVec3f H = _Normalize(T * (sinT * std::cos(phi))
+                                  + B * (sinT * std::sin(phi))
+                                  + N * cosT);
+
+            float VdotH = _Dot(V, H);
+            if (VdotH <= 0.f) { throughput = 0.f; return N; }
+            L = _Normalize(H * (2.f * VdotH) - V);
+
+            float NdotH = _Dot(N, H);
+            float NdotL = _Dot(N, L);
+            if (NdotL <= 0.f) { throughput = 0.f; return L; }
+
+            float D = _GGX_D(alpha, NdotH);
+            float pdfGGX = D * NdotH / (4.f * VdotH + 1e-7f);
+            float pdfCos = NdotL / 3.14159f;
+            pdf = specProb * pdfGGX + (1.f - specProb) * pdfCos;
+        } else {
+            float xi1 = (u1 - specProb) / (1.f - specProb);
+            float xi2 = u2;
+
+            float r = std::sqrt(xi1);
+            float phi = 2.f * 3.14159f * xi2;
+            float x = r * std::cos(phi);
+            float y = r * std::sin(phi);
+            float z = std::sqrt(std::max(0.f, 1.f - xi1));
+            L = _Normalize(T * x + B * y + N * z);
+
+            float NdotL = _Dot(N, L);
+            if (NdotL <= 0.f) { throughput = 0.f; return L; }
+
+            float pdfCos = NdotL / 3.14159f;
+            GfVec3f H = _Normalize(V + L);
+            float NdotH = _Dot(N, H);
+            float VdotH = _Dot(V, H);
+            float D = _GGX_D(alpha, NdotH);
+            float pdfGGX = (VdotH > 1e-7f) ? D * NdotH / (4.f * VdotH) : 0.f;
+            pdf = specProb * pdfGGX + (1.f - specProb) * pdfCos;
         }
 
-        // Evaluate full BSDF at the sampled direction
+        float NdotL = _Dot(N, L);
+        if (NdotL <= 0.f || pdf < 1e-7f) { throughput = 0.f; return L; }
+
         float bsdfVal = Evaluate(mat, N, V, L, lambda);
-
-        // PDF = cos(theta) / pi
-        float pdf = NdotL / 3.14159f;
-
-        throughput = (pdf > 1e-7f) ? bsdfVal / pdf : 0.f;
+        throughput = bsdfVal / pdf;
 
         return L;
     }
@@ -210,6 +320,96 @@ private:
     {
         float r = (ior - 1.f) / (ior + 1.f);
         return r * r;
+    }
+
+    // Reflect V around N
+    static GfVec3f _Reflect(const GfVec3f& V, const GfVec3f& N)
+    {
+        float VdotN = V[0]*N[0] + V[1]*N[1] + V[2]*N[2];
+        return _Normalize(N * (2.f * VdotN) - V);
+    }
+
+    // Exact Fresnel for dielectrics (not Schlick approximation)
+    static float _FresnelDielectric(float cosI, float ior)
+    {
+        cosI = std::max(0.f, std::min(1.f, cosI));
+        float sinT2 = (1.f - cosI * cosI) / (ior * ior);
+        if (sinT2 > 1.f) return 1.f;  // total internal reflection
+        float cosT = std::sqrt(std::max(0.f, 1.f - sinT2));
+        float rS = (cosI - ior * cosT) / (cosI + ior * cosT);
+        float rP = (ior * cosI - cosT) / (ior * cosI + cosT);
+        return 0.5f * (rS * rS + rP * rP);
+    }
+
+    // Refract using pre-computed eta = n1/n2
+    // V points toward camera, N points outward from surface (already flipped to face V)
+    // Returns the refracted direction pointing away from the surface (into material or out)
+    static bool _RefractEta(const GfVec3f& V, const GfVec3f& N, float eta, GfVec3f& refracted)
+    {
+        // Incident direction = -V (toward the surface)
+        float cosI = V[0]*N[0] + V[1]*N[1] + V[2]*N[2];
+        if (cosI < 0.f) cosI = 0.f;
+
+        float sinT2 = eta * eta * (1.f - cosI * cosI);
+        if (sinT2 > 1.f) return false;  // total internal reflection
+
+        float cosT = std::sqrt(1.f - sinT2);
+        // refracted = eta * (-V) + (eta * cosI - cosT) * N
+        refracted = _Normalize(
+            GfVec3f(-V[0] * eta + N[0] * (eta * cosI - cosT),
+                    -V[1] * eta + N[1] * (eta * cosI - cosT),
+                    -V[2] * eta + N[2] * (eta * cosI - cosT)));
+        return true;
+    }
+
+    // ------------------------------------------------------------------
+    // Dispersion: wavelength-dependent IOR from Abbe number
+    //
+    // The Abbe number V_d = (n_d - 1) / (n_F - n_C) where:
+    //   n_d = IOR at 587.6 nm (sodium d-line)
+    //   n_F = IOR at 486.1 nm (hydrogen F-line)
+    //   n_C = IOR at 656.3 nm (hydrogen C-line)
+    //
+    // We use a linear dispersion model:
+    //   n(lambda) ≈ n_d + (n_d - 1) / V_d * (587.6 - lambda) / (656.3 - 486.1)
+    // ------------------------------------------------------------------
+    static float _DispersedIOR(float ior_d, float abbeNumber, float lambda)
+    {
+        if (abbeNumber <= 0.f) return ior_d;
+        float dispersion = (ior_d - 1.f) / abbeNumber;
+        float dLambda = (587.6f - lambda) / (656.3f - 486.1f);
+        return ior_d + dispersion * dLambda;
+    }
+
+    // ------------------------------------------------------------------
+    // Thin-film interference
+    //
+    // Modulates Fresnel reflectance based on optical path difference
+    // through a thin coating of thickness d (in nm).
+    //
+    // Phase difference: delta = 4*pi * n_film * d * cos(theta_t) / lambda
+    // where n_film ≈ 1.5 (typical coating), theta_t from Snell's law.
+    //
+    // Reflectance modulation (simplified Fabry-Perot):
+    //   F_film = F * (1 + A * cos(delta))
+    // where A ≈ 0.5 for a visible but not extreme effect.
+    // ------------------------------------------------------------------
+    static float _ThinFilmFresnel(float F, float ior, float thickness_nm,
+                                   float lambda, float cosTheta)
+    {
+        const float n_film = 1.5f;  // coating refractive index
+
+        // Snell's law for angle inside the film
+        float sinTheta = std::sqrt(std::max(0.f, 1.f - cosTheta * cosTheta));
+        float sinThetaT = sinTheta / n_film;
+        float cosThetaT = std::sqrt(std::max(0.f, 1.f - sinThetaT * sinThetaT));
+
+        // Optical path difference → phase
+        float delta = 4.f * 3.14159f * n_film * thickness_nm * cosThetaT / lambda;
+
+        // Modulate Fresnel with interference
+        float modulation = 0.5f * std::cos(delta);
+        return std::max(0.f, std::min(1.f, F * (1.f + modulation)));
     }
 
     // Schlick Fresnel approximation

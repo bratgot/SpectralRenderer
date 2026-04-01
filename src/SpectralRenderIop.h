@@ -105,6 +105,7 @@ private:
     float _shutterOpen  = -0.5f;   // shutter open  (relative to frame)
     float _shutterClose =  0.5f;   // shutter close (relative to frame)
     float _lightIntensity = 1.0f;  // global light intensity multiplier
+    int   _illuminant = 0;         // 0=auto, 1=D50, 2=D65, 3=A, 4=F2, 5=F11
     const char* _cameraPath = "";
 
     FormatPair _outputFormat;

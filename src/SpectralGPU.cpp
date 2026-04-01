@@ -314,6 +314,8 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
             gpuMats[i].ior          = mats[i].ior;
             gpuMats[i].opacity      = mats[i].opacity;
             gpuMats[i].emissiveColor = make_float3(mats[i].emissiveColor[0], mats[i].emissiveColor[1], mats[i].emissiveColor[2]);
+            gpuMats[i].abbeNumber        = mats[i].abbeNumber;
+            gpuMats[i].thinFilmThickness = mats[i].thinFilmThickness;
         }
         const size_t matBytes = gpuMats.size() * sizeof(spectral_gpu::GPUMaterial);
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_materials), matBytes));
