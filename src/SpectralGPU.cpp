@@ -93,10 +93,12 @@ void SpectralGPU::_FreeAccel()
 
 void SpectralGPU::_FreeBuffers()
 {
-    if (_d_framebuffer) { cudaFree(reinterpret_cast<void*>(_d_framebuffer)); _d_framebuffer = 0; }
-    if (_d_depthbuffer) { cudaFree(reinterpret_cast<void*>(_d_depthbuffer)); _d_depthbuffer = 0; }
-    if (_d_normals)     { cudaFree(reinterpret_cast<void*>(_d_normals));     _d_normals = 0; }
-    if (_d_params)      { cudaFree(reinterpret_cast<void*>(_d_params));      _d_params = 0; }
+    if (_d_framebuffer)  { cudaFree(reinterpret_cast<void*>(_d_framebuffer));  _d_framebuffer = 0; }
+    if (_d_depthbuffer)  { cudaFree(reinterpret_cast<void*>(_d_depthbuffer));  _d_depthbuffer = 0; }
+    if (_d_normals)      { cudaFree(reinterpret_cast<void*>(_d_normals));      _d_normals = 0; }
+    if (_d_materialIds)  { cudaFree(reinterpret_cast<void*>(_d_materialIds));  _d_materialIds = 0; }
+    if (_d_materials)    { cudaFree(reinterpret_cast<void*>(_d_materials));    _d_materials = 0; }
+    if (_d_params)       { cudaFree(reinterpret_cast<void*>(_d_params));       _d_params = 0; }
     _allocW = _allocH = 0;
     _triCount = 0;
 }
@@ -250,13 +252,17 @@ bool SpectralGPU::Initialize(const std::string& ptxSource)
 bool SpectralGPU::BuildAccel(const SpectralScene& scene)
 {
     _FreeAccel();
-    if (_d_normals) { cudaFree(reinterpret_cast<void*>(_d_normals)); _d_normals = 0; }
+    if (_d_normals)     { cudaFree(reinterpret_cast<void*>(_d_normals));     _d_normals = 0; }
+    if (_d_materialIds) { cudaFree(reinterpret_cast<void*>(_d_materialIds)); _d_materialIds = 0; }
+    if (_d_materials)   { cudaFree(reinterpret_cast<void*>(_d_materials));   _d_materials = 0; }
 
     // Flatten triangles
     std::vector<float3> vertices;
     std::vector<float3> normals;
+    std::vector<int>    matIds;
     vertices.reserve(scene.TotalTriangles() * 3);
     normals.reserve(scene.TotalTriangles() * 3);
+    matIds.reserve(scene.TotalTriangles());
 
     for (auto& kv : scene.GetMeshes()) {
         if (!kv.second.visible) continue;
@@ -267,6 +273,7 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
             normals.push_back(make_float3(tri.n0[0], tri.n0[1], tri.n0[2]));
             normals.push_back(make_float3(tri.n1[0], tri.n1[1], tri.n1[2]));
             normals.push_back(make_float3(tri.n2[0], tri.n2[1], tri.n2[2]));
+            matIds.push_back(tri.materialId);
         }
     }
 
@@ -288,6 +295,33 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_normals), normalBytes));
     CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_normals), normals.data(),
                           normalBytes, cudaMemcpyHostToDevice));
+
+    // Upload material IDs (one per triangle)
+    const size_t matIdBytes = matIds.size() * sizeof(int);
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_materialIds), matIdBytes));
+    CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_materialIds), matIds.data(),
+                          matIdBytes, cudaMemcpyHostToDevice));
+
+    // Upload material table
+    {
+        const auto& mats = scene.GetMaterials();
+        std::vector<spectral_gpu::GPUMaterial> gpuMats(mats.size());
+        for (size_t i = 0; i < mats.size(); ++i) {
+            gpuMats[i].baseColor    = make_float3(mats[i].baseColor[0], mats[i].baseColor[1], mats[i].baseColor[2]);
+            gpuMats[i].metallic     = mats[i].metallic;
+            gpuMats[i].roughness    = mats[i].roughness;
+            gpuMats[i].ior          = mats[i].ior;
+            gpuMats[i].opacity      = mats[i].opacity;
+            gpuMats[i].emissiveColor = make_float3(mats[i].emissiveColor[0], mats[i].emissiveColor[1], mats[i].emissiveColor[2]);
+        }
+        const size_t matBytes = gpuMats.size() * sizeof(spectral_gpu::GPUMaterial);
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_materials), matBytes));
+        CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_materials), gpuMats.data(),
+                              matBytes, cudaMemcpyHostToDevice));
+
+        fprintf(stderr, "SpectralGPU: uploaded %zu materials to device\n", gpuMats.size());
+        _materialCount = static_cast<unsigned int>(gpuMats.size());
+    }
 
     // Build indices (trivial: 0,1,2, 3,4,5, ...)
     std::vector<unsigned int> indices(_triCount * 3);
@@ -352,6 +386,7 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
 
     HitGroupSbtRecord hitRec = {};
     hitRec.data.normals = reinterpret_cast<float3*>(_d_normals);
+    hitRec.data.materialIds = reinterpret_cast<int*>(_d_materialIds);
     OPTIX_CHECK(optixSbtRecordPackHeader(_hitgroupPG, &hitRec));
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_sbtHitgroupRecord), sizeof(HitGroupSbtRecord)));
     CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_sbtHitgroupRecord), &hitRec,
@@ -392,30 +427,13 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
         _allocH = height;
     }
 
-    // Build camera frame vectors from the projection inverse and view-to-world
-    // Extract the camera basis from the view-to-world matrix
-    // PXR convention: camera looks down -Z, Y is up, X is right
-    auto extract3 = [](const pxr::GfMatrix4d& m, int col) -> float3 {
-        return make_float3(
-            static_cast<float>(m[0][col]),
-            static_cast<float>(m[1][col]),
-            static_cast<float>(m[2][col]));
+    // Copy camera matrices to GPU — same ray generation as CPU _MakeRay
+    // GfMatrix4d is row-major [row][col], copy as flat float[16]
+    auto copyMatrix = [](const pxr::GfMatrix4d& src, float* dst) {
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 4; ++c)
+                dst[r * 4 + c] = static_cast<float>(src[r][c]);
     };
-
-    float3 camRight   = extract3(camera.viewToWorld, 0);
-    float3 camUp      = extract3(camera.viewToWorld, 1);
-    float3 camForward = extract3(camera.viewToWorld, 2);  // -Z in camera space
-    float3 camOrigin  = make_float3(
-        static_cast<float>(camera.viewToWorld[3][0]),
-        static_cast<float>(camera.viewToWorld[3][1]),
-        static_cast<float>(camera.viewToWorld[3][2]));
-
-    // Compute half-FOV from projection inverse
-    // projInverse maps NDC to view space:
-    //   view.x = projInverse[0][0] * ndc.x  →  tanHalfFovX = projInverse[0][0]
-    //   view.y = projInverse[1][1] * ndc.y  →  tanHalfFovY = projInverse[1][1]
-    float tanHalfFovX = static_cast<float>(std::abs(camera.projInverse[0][0]));
-    float tanHalfFovY = static_cast<float>(std::abs(camera.projInverse[1][1]));
 
     // Fill launch params
     spectral_gpu::LaunchParams launchParams = {};
@@ -426,14 +444,21 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     launchParams.traversable = _gasHandle;
     launchParams.spp         = spp;
     launchParams.normals     = reinterpret_cast<float3*>(_d_normals);
+    launchParams.materialIds = reinterpret_cast<int*>(_d_materialIds);
     launchParams.triCount    = _triCount;
+    launchParams.materials   = reinterpret_cast<spectral_gpu::GPUMaterial*>(_d_materials);
+    launchParams.materialCount = _materialCount;
 
-    launchParams.camera.origin       = camOrigin;
-    launchParams.camera.U            = camRight;
-    launchParams.camera.V            = camUp;
-    launchParams.camera.W            = make_float3(-camForward.x, -camForward.y, -camForward.z);
-    launchParams.camera.tanHalfFovX  = tanHalfFovX;
-    launchParams.camera.tanHalfFovY  = tanHalfFovY;
+    // projInverse: CPU uses M*v (column-vector), copy as-is
+    // viewToWorld: CPU uses v*M (row-vector via Transform), so transpose for GPU
+    auto copyMatrixTransposed = [](const pxr::GfMatrix4d& src, float* dst) {
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 4; ++c)
+                dst[r * 4 + c] = static_cast<float>(src[c][r]);
+    };
+
+    copyMatrix(camera.projInverse, launchParams.camera.projInverse);
+    copyMatrixTransposed(camera.viewToWorld, launchParams.camera.viewToWorld);
 
     // Upload launch params
     CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_params), &launchParams,

@@ -20,17 +20,26 @@
 
 namespace spectral_gpu {
 
+// GPU-side material — plain data, no pointers to host objects
+struct GPUMaterial {
+    float3 baseColor;
+    float  metallic;
+    float  roughness;
+    float  ior;
+    float  opacity;
+    float3 emissiveColor;
+};
+
 struct CameraParams {
-    float3 origin;
-    float3 U, V, W;       // camera frame vectors (right, up, -forward)
-    float  tanHalfFovX;
-    float  tanHalfFovY;
+    // Full matrices — same ray generation as CPU _MakeRay
+    float projInverse[16];   // 4x4 column-major
+    float viewToWorld[16];   // 4x4 column-major
 };
 
 struct LaunchParams {
     // Output
-    float4*            framebuffer;   // RGBA output, width * height
-    float*             depthbuffer;   // per-pixel depth, width * height
+    float4*            framebuffer;
+    float*             depthbuffer;
     unsigned int       width;
     unsigned int       height;
 
@@ -45,7 +54,12 @@ struct LaunchParams {
 
     // Triangle data for shading (device pointers)
     float3*            normals;       // 3 normals per triangle (n0, n1, n2)
+    int*               materialIds;   // 1 per triangle
     unsigned int       triCount;
+
+    // Material table
+    GPUMaterial*       materials;
+    unsigned int       materialCount;
 };
 
 // Per-ray payload — carried through the trace
@@ -60,7 +74,8 @@ struct RayGenData {};
 struct MissData {};
 
 struct HitGroupData {
-    float3* normals;     // pointer to normals array (3 per triangle)
+    float3* normals;      // pointer to normals array (3 per triangle)
+    int*    materialIds;  // pointer to material IDs (1 per triangle)
 };
 
 } // namespace spectral_gpu

@@ -97,15 +97,18 @@ private:
     CUdeviceptr            _sbtHitgroupRecord = 0;
 
     // Device buffers
-    CUdeviceptr            _d_framebuffer = 0;
-    CUdeviceptr            _d_depthbuffer = 0;
-    CUdeviceptr            _d_normals     = 0;
-    CUdeviceptr            _d_params      = 0;
+    CUdeviceptr            _d_framebuffer  = 0;
+    CUdeviceptr            _d_depthbuffer  = 0;
+    CUdeviceptr            _d_normals      = 0;
+    CUdeviceptr            _d_materialIds  = 0;
+    CUdeviceptr            _d_materials    = 0;
+    CUdeviceptr            _d_params       = 0;
 
     // Current allocation sizes
     unsigned int           _allocW = 0;
     unsigned int           _allocH = 0;
     unsigned int           _triCount = 0;
+    unsigned int           _materialCount = 0;
 
     void _FreeAccel();
     void _FreeBuffers();
