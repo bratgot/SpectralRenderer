@@ -138,6 +138,56 @@ public:
         return radiance;
     }
 
+    // ------------------------------------------------------------------
+    // Sample a bounce direction (cosine-weighted hemisphere).
+    //   Returns sampled direction L, and the BSDF value / pdf.
+    //   For diffuse-dominant materials this is importance-sampled.
+    //
+    //   u1, u2: uniform random numbers in [0, 1)
+    //   Returns throughput: BSDF(N,V,L) * NdotL / pdf
+    // ------------------------------------------------------------------
+    static GfVec3f SampleDirection(
+        const SpectralMaterial& mat,
+        const GfVec3f& N,
+        const GfVec3f& V,
+        float lambda,
+        float u1, float u2,
+        float& throughput)
+    {
+        // Cosine-weighted hemisphere sampling
+        //   pdf = cos(theta) / pi
+        //   For Lambertian diffuse: BSDF = albedo / pi
+        //   throughput = (albedo/pi * cos) / (cos/pi) = albedo
+        float r = std::sqrt(u1);
+        float phi = 2.f * 3.14159f * u2;
+
+        // Local tangent frame
+        GfVec3f T, B;
+        _MakeBasis(N, T, B);
+
+        float x = r * std::cos(phi);
+        float y = r * std::sin(phi);
+        float z = std::sqrt(std::max(0.f, 1.f - u1));
+
+        GfVec3f L = _Normalize(T * x + B * y + N * z);
+
+        float NdotL = _Dot(N, L);
+        if (NdotL <= 0.f) {
+            throughput = 0.f;
+            return L;
+        }
+
+        // Evaluate full BSDF at the sampled direction
+        float bsdfVal = Evaluate(mat, N, V, L, lambda);
+
+        // PDF = cos(theta) / pi
+        float pdf = NdotL / 3.14159f;
+
+        throughput = (pdf > 1e-7f) ? bsdfVal / pdf : 0.f;
+
+        return L;
+    }
+
 private:
     static float _Dot(const GfVec3f& a, const GfVec3f& b)
     {
@@ -197,6 +247,22 @@ private:
         float a2 = alpha * alpha;
         float denom = NdotX + std::sqrt(a2 + (1.f - a2) * NdotX * NdotX);
         return (2.f * NdotX) / (denom + 1e-7f);
+    }
+
+    // Build orthonormal tangent frame from N
+    static void _MakeBasis(const GfVec3f& N, GfVec3f& T, GfVec3f& B)
+    {
+        GfVec3f up = (std::abs(N[1]) < 0.999f) ? GfVec3f(0.f, 1.f, 0.f) : GfVec3f(1.f, 0.f, 0.f);
+        T = _Normalize(_Cross(up, N));
+        B = _Cross(N, T);
+    }
+
+    static GfVec3f _Cross(const GfVec3f& a, const GfVec3f& b)
+    {
+        return GfVec3f(
+            a[1]*b[2] - a[2]*b[1],
+            a[2]*b[0] - a[0]*b[2],
+            a[0]*b[1] - a[1]*b[0]);
     }
 };
 

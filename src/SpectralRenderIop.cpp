@@ -950,7 +950,7 @@ void SpectralRenderIop::_EnsureFrameRendered()
 #endif
     {
         SpectralIntegrator::RenderFrame(*_scene, cam, _frameBuffer.data(),
-                                         _samples, _depthBuffer.data());
+                                         _samples, _depthBuffer.data(), _maxBounces);
     }
     _frameReady.store(true);
 

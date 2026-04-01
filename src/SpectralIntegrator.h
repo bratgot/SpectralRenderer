@@ -93,7 +93,8 @@ public:
         const SpectralCamera& camera,
         float* pixels,
         int spp = 1,
-        float* depthOut = nullptr);
+        float* depthOut = nullptr,
+        int maxBounces = 4);
 
 #ifdef SPECTRAL_HAS_OPTIX
     /// GPU render path using OptiX.
@@ -140,7 +141,11 @@ private:
                                  double u, double v, float lambda,
                                  const SpectralMaterial& mat,
                                  const SpectralScene& scene,
-                                 const GfVec3f& hitPos);
+                                 const GfVec3f& hitPos,
+                                 const GfVec3f& rayDir,
+                                 int maxBounces,
+                                 unsigned int& rngSeed,
+                                 const SpectralBVH& bvh);
     static float _SkySpectral(const GfVec3f& dir, float lambda);
 
     // Simple hash-based RNG for per-pixel, per-sample jitter

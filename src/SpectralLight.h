@@ -179,9 +179,9 @@ private:
             return std::exp(-0.5f * t * t);
         };
 
-        return rgb[0] * gauss(lambda, 600.f, 55.f)
-             + rgb[1] * gauss(lambda, 540.f, 50.f)
-             + rgb[2] * gauss(lambda, 450.f, 40.f);
+        return rgb[0] * gauss(lambda, 630.f, 30.f)
+             + rgb[1] * gauss(lambda, 532.f, 30.f)
+             + rgb[2] * gauss(lambda, 460.f, 25.f);
     }
 };
 

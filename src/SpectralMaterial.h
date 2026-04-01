@@ -50,23 +50,21 @@ struct SpectralMaterial
     // ------------------------------------------------------------------
     float SpectralReflectance(float lambda) const
     {
-        // Gaussian basis functions for each RGB channel
         auto gauss = [](float l, float center, float sigma) -> float {
             float t = (l - center) / sigma;
             return std::exp(-0.5f * t * t);
         };
 
-        // Broad Gaussians that approximate the spectral sensitivity
-        // of sRGB primaries (red ~600nm, green ~540nm, blue ~450nm)
-        float rBasis = gauss(lambda, 600.f, 55.f);
-        float gBasis = gauss(lambda, 540.f, 50.f);
-        float bBasis = gauss(lambda, 450.f, 40.f);
+        // Tighter, better-separated Gaussians to avoid colour crosstalk.
+        // Previous sigmas (55/50/40) caused red to leak into green → yellow.
+        float rBasis = gauss(lambda, 630.f, 30.f);
+        float gBasis = gauss(lambda, 532.f, 30.f);
+        float bBasis = gauss(lambda, 460.f, 25.f);
 
         float reflectance = baseColor[0] * rBasis
                           + baseColor[1] * gBasis
                           + baseColor[2] * bBasis;
 
-        // Clamp to [0, 1] — spectral reflectance can't exceed 1.0
         return std::max(0.0f, std::min(1.0f, reflectance));
     }
 
@@ -85,9 +83,9 @@ struct SpectralMaterial
             return std::exp(-0.5f * t * t);
         };
 
-        float rBasis = gauss(lambda, 600.f, 55.f);
-        float gBasis = gauss(lambda, 540.f, 50.f);
-        float bBasis = gauss(lambda, 450.f, 40.f);
+        float rBasis = gauss(lambda, 630.f, 30.f);
+        float gBasis = gauss(lambda, 532.f, 30.f);
+        float bBasis = gauss(lambda, 460.f, 25.f);
 
         return emissiveColor[0] * rBasis
              + emissiveColor[1] * gBasis
