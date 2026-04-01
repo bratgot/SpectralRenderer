@@ -24,6 +24,7 @@ struct SpectralTriangle {
     GfVec3f faceNormal;        // geometric (flat) normal
     GfVec2f uv0, uv1, uv2;   // per-vertex texture coordinates
     SpectralMaterialId materialId = kDefaultMaterialId;
+    int     objectId = 0;          // per-mesh object ID for AOV
 
     // Motion blur: vertex positions at shutter close
     // If hasMotion is false, these are unused (static geometry)
@@ -49,6 +50,7 @@ struct SpectralMeshData {
     SdfPath                       id;
     std::vector<SpectralTriangle> triangles;
     bool                          visible = true;
+    int                           objectId = 0;   // unique per mesh
 };
 
 // ---------------------------------------------------------------------------
@@ -71,6 +73,9 @@ public:
         std::lock_guard<std::mutex> lock(_mutex);
         _meshes.erase(id);
     }
+
+    /// Assign a unique object ID (call once per mesh during loading)
+    int NextObjectId() { return _nextObjectId++; }
 
     const std::unordered_map<SdfPath, SpectralMeshData, SdfPath::Hash>&
     GetMeshes() const { return _meshes; }
@@ -159,6 +164,7 @@ private:
     std::vector<SpectralMaterial> _materials;
     std::vector<SpectralLight> _lights;
     std::vector<SpectralTexture> _textures;
+    int _nextObjectId = 1;  // 0 = background/no hit
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

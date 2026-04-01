@@ -113,11 +113,17 @@ private:
     SpectralCamera                      _camera;
     bool                                _cameraFromInput = false;
 
-    // Frame buffer (RGBA) + depth buffer
+    // Frame buffer (RGBA) + depth buffer + ID buffers
     std::vector<float>  _frameBuffer;
     std::vector<float>  _depthBuffer;   // per-pixel depth (camera-space Z)
+    std::vector<float>  _objectIdBuffer; // per-pixel object ID
+    std::vector<float>  _materialIdBuffer; // per-pixel material ID
     unsigned int        _fbWidth  = 0;
     unsigned int        _fbHeight = 0;
     std::atomic<bool>   _frameReady { false };
     std::mutex          _renderMutex;
+
+    // Custom output channels
+    Channel             _chanObjectId   = Chan_Black;
+    Channel             _chanMaterialId = Chan_Black;
 };

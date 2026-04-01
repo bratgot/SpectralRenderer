@@ -213,7 +213,14 @@ void SpectralRenderIop::_validate(bool forReal)
     info_.format(*fmtPtr);
     info_.full_size_format(*fmtPtr);
     info_.set(*fmtPtr);
-    info_.channels(Mask_RGBA);
+
+    // Register channels: RGBA + custom ID channels
+    ChannelSet channels = Mask_RGBA;
+    _chanObjectId   = getChannel("other.objectId");
+    _chanMaterialId = getChannel("other.materialId");
+    channels += _chanObjectId;
+    channels += _chanMaterialId;
+    info_.channels(channels);
     info_.black_outside(true);
 
     if (forReal) {
@@ -319,6 +326,21 @@ void SpectralRenderIop::engine(
             }
         }
     }
+
+    // Output object/material ID channels
+    auto writeIdChannel = [&](Channel ch, const std::vector<float>& idBuf) {
+        if (!(channels & ch) || idBuf.empty()) return;
+        float* out = row.writable(ch);
+        for (int px = x; px < r; ++px) {
+            if (px >= 0 && px < W && bufY >= 0 && bufY < H) {
+                out[px] = idBuf[static_cast<size_t>(bufY) * W + px];
+            } else {
+                out[px] = 0.f;
+            }
+        }
+    };
+    writeIdChannel(_chanObjectId, _objectIdBuffer);
+    writeIdChannel(_chanMaterialId, _materialIdBuffer);
 }
 
 // ---------------------------------------------------------------------------
@@ -835,6 +857,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
         pxr::SpectralMeshData data;
         data.id      = prim.GetPath();
         data.visible = true;
+        data.objectId = _scene->NextObjectId();
 
         // Fan-triangulate each face
         int vertexOffset = 0;
@@ -931,6 +954,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                 }
 
                 tri.materialId = matId;
+                tri.objectId = data.objectId;
                 data.triangles.push_back(tri);
                 totalTris++;
             }
@@ -1091,6 +1115,8 @@ void SpectralRenderIop::_EnsureFrameRendered()
     _fbHeight = H;
     _frameBuffer.assign(size_t(W) * H * 4, 0.f);
     _depthBuffer.assign(size_t(W) * H, 1e30f);
+    _objectIdBuffer.assign(size_t(W) * H, 0.f);
+    _materialIdBuffer.assign(size_t(W) * H, 0.f);
 
     SpectralCamera cam = _camera;
     cam.imageWidth  = W;
@@ -1130,7 +1156,8 @@ void SpectralRenderIop::_EnsureFrameRendered()
 #endif
     {
         SpectralIntegrator::RenderFrame(*_scene, cam, _frameBuffer.data(),
-                                         _samples, _depthBuffer.data(), _maxBounces);
+                                         _samples, _depthBuffer.data(), _maxBounces,
+                                         _objectIdBuffer.data(), _materialIdBuffer.data());
     }
     _frameReady.store(true);
 

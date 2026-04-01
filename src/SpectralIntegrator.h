@@ -96,7 +96,9 @@ public:
         float* pixels,
         int spp = 1,
         float* depthOut = nullptr,
-        int maxBounces = 4);
+        int maxBounces = 4,
+        float* objectIdOut = nullptr,
+        float* materialIdOut = nullptr);
 
 #ifdef SPECTRAL_HAS_OPTIX
     /// GPU render path using OptiX.

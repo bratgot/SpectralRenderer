@@ -24,7 +24,9 @@ void SpectralIntegrator::RenderFrame(
     float*                pixels,
     int                   spp,
     float*                depthOut,
-    int                   maxBounces)
+    int                   maxBounces,
+    float*                objectIdOut,
+    float*                materialIdOut)
 {
 #ifdef SPECTRAL_HAS_EMBREE
     SpectralBVH bvh;
@@ -56,15 +58,17 @@ void SpectralIntegrator::RenderFrame(
 
                     GfVec3f color;
                     float depth = 1e30f;
+                    int hitObjectId = 0, hitMaterialId = 0;
                     if (hit.valid()) {
                         color = _ShadeSmoothNormal(
                             *hit.tri,
                             static_cast<double>(hit.u),
                             static_cast<double>(hit.v));
-                        // Camera-space Z: transform hit point to view space, take -Z
                         GfVec3d worldHit = ray.GetStartPoint() + hit.t * ray.GetDirection();
                         GfVec3d viewHit = worldToView.Transform(worldHit);
                         depth = static_cast<float>(-viewHit[2]);
+                        hitObjectId = hit.tri->objectId;
+                        hitMaterialId = hit.tri->materialId;
                     } else {
                         GfVec3f dir = GfVec3f(ray.GetDirection());
                         float len = dir.GetLength();
@@ -79,11 +83,15 @@ void SpectralIntegrator::RenderFrame(
                     px[3] = 1.0f;
 
                     if (depthOut) depthOut[pixIdx] = depth;
+                    if (objectIdOut) objectIdOut[pixIdx] = static_cast<float>(hitObjectId);
+                    if (materialIdOut) materialIdOut[pixIdx] = static_cast<float>(hitMaterialId);
 
                 } else {
                     // ---- SPP>1: hero wavelength spectral mode ----
                     float X = 0.f, Y = 0.f, Z = 0.f;
                     float minDepth = 1e30f;
+                    int firstObjectId = 0, firstMaterialId = 0;
+                    bool gotFirstHit = false;
 
                     for (int s = 0; s < spp; ++s) {
                         unsigned int seed = (imageY * W + imageX) * 1031 + s * 6571;
@@ -118,6 +126,11 @@ void SpectralIntegrator::RenderFrame(
                             GfVec3d viewHit = worldToView.Transform(worldHit);
                             float camZ = static_cast<float>(-viewHit[2]);
                             if (camZ < minDepth) minDepth = camZ;
+                            if (!gotFirstHit) {
+                                firstObjectId = hit.tri->objectId;
+                                firstMaterialId = hit.tri->materialId;
+                                gotFirstHit = true;
+                            }
                         } else {
                             GfVec3f dir = GfVec3f(ray.GetDirection());
                             float len = dir.GetLength();
@@ -142,6 +155,8 @@ void SpectralIntegrator::RenderFrame(
                     px[3] = 1.0f;
 
                     if (depthOut) depthOut[pixIdx] = minDepth;
+                    if (objectIdOut) objectIdOut[pixIdx] = static_cast<float>(firstObjectId);
+                    if (materialIdOut) materialIdOut[pixIdx] = static_cast<float>(firstMaterialId);
                 }
             }
         });
