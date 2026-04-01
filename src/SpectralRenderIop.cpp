@@ -12,6 +12,10 @@
 #include <pxr/usd/usdGeom/camera.h>
 #include <pxr/usd/usdGeom/xformCache.h>
 #include <pxr/usd/usdGeom/tokens.h>
+#include <pxr/usd/usdShade/material.h>
+#include <pxr/usd/usdShade/materialBindingAPI.h>
+#include <pxr/usd/usdShade/shader.h>
+#include <pxr/usd/usdShade/tokens.h>
 #include <pxr/usd/sdf/path.h>
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/vec3f.h>
@@ -446,6 +450,58 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
         TfToken normalsInterp = mesh.GetNormalsInterpolation();
 
         // ----------------------------------------------------------
+        // Material reading (Phase 4)
+        //   Read UsdPreviewSurface material bound to this mesh.
+        //   Extract baseColor, metallic, roughness, etc.
+        // ----------------------------------------------------------
+        SpectralMaterialId matId = kDefaultMaterialId;
+        {
+            UsdShadeMaterialBindingAPI bindingAPI(prim);
+            UsdShadeMaterial boundMat = bindingAPI.ComputeBoundMaterial();
+            if (boundMat) {
+                UsdShadeShader surfaceShader = boundMat.ComputeSurfaceSource();
+                if (surfaceShader) {
+                    SpectralMaterial mat;
+                    mat.name = boundMat.GetPath().GetString();
+
+                    // Read UsdPreviewSurface inputs
+                    auto readFloat = [&](const char* inputName, float& val) {
+                        UsdShadeInput inp = surfaceShader.GetInput(TfToken(inputName));
+                        if (inp) {
+                            VtValue v;
+                            inp.Get(&v, timeCode);
+                            if (v.IsHolding<float>()) val = v.UncheckedGet<float>();
+                        }
+                    };
+                    auto readColor = [&](const char* inputName, GfVec3f& val) {
+                        UsdShadeInput inp = surfaceShader.GetInput(TfToken(inputName));
+                        if (inp) {
+                            VtValue v;
+                            inp.Get(&v, timeCode);
+                            if (v.IsHolding<GfVec3f>()) val = v.UncheckedGet<GfVec3f>();
+                        }
+                    };
+
+                    readColor("diffuseColor", mat.baseColor);
+                    readFloat("metallic", mat.metallic);
+                    readFloat("roughness", mat.roughness);
+                    readFloat("ior", mat.ior);
+                    readFloat("opacity", mat.opacity);
+                    readColor("emissiveColor", mat.emissiveColor);
+                    readFloat("clearcoat", mat.clearcoat);
+                    readFloat("clearcoatRoughness", mat.clearcoatRoughness);
+
+                    matId = _scene->AddMaterial(mat);
+
+                    fprintf(stderr, "SpectralRender: material '%s' — color=(%.2f,%.2f,%.2f) metal=%.2f rough=%.2f\n",
+                            mat.name.c_str(),
+                            mat.baseColor[0], mat.baseColor[1], mat.baseColor[2],
+                            mat.metallic, mat.roughness);
+                }
+            }
+        }
+
+        // ----------------------------------------------------------
         // Subdivision (Phase 2)
         // ----------------------------------------------------------
 #ifdef SPECTRAL_HAS_OSD
@@ -609,6 +665,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                     tri.n0 = tri.n1 = tri.n2 = tri.faceNormal;
                 }
 
+                tri.materialId = matId;
                 data.triangles.push_back(tri);
                 totalTris++;
             }

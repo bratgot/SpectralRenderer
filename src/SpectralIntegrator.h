@@ -136,7 +136,8 @@ private:
 
     // Spectral shading — returns spectral radiance at a single wavelength
     static float _ShadeSpectral(const SpectralTriangle& tri,
-                                 double u, double v, float lambda);
+                                 double u, double v, float lambda,
+                                 const SpectralMaterial& mat);
     static float _SkySpectral(const GfVec3f& dir, float lambda);
 
     // Simple hash-based RNG for per-pixel, per-sample jitter

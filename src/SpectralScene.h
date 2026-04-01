@@ -5,6 +5,8 @@
 #include <pxr/base/vt/array.h>
 #include <pxr/usd/sdf/path.h>
 
+#include "SpectralMaterial.h"
+
 #include <vector>
 #include <mutex>
 
@@ -12,14 +14,12 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 // ---------------------------------------------------------------------------
 // SpectralTriangle
-//   Flat representation of one triangle after mesh Sync + subdivision.
-//   Stored in world space — transform is baked in during Sync so the
-//   render pass never has to touch matrices per-triangle.
 // ---------------------------------------------------------------------------
 struct SpectralTriangle {
     GfVec3f v0, v1, v2;       // world-space vertices
-    GfVec3f n0, n1, n2;       // per-vertex world-space normals (for smooth shading)
+    GfVec3f n0, n1, n2;       // per-vertex world-space normals
     GfVec3f faceNormal;        // geometric (flat) normal
+    SpectralMaterialId materialId = kDefaultMaterialId;
 };
 
 // ---------------------------------------------------------------------------
@@ -35,42 +35,66 @@ struct SpectralMeshData {
 
 // ---------------------------------------------------------------------------
 // SpectralScene
-//   Owned by HdSpectralRenderDelegate.  Shared (by raw pointer) with
-//   HdSpectralRenderPass so both sides can access the triangle soup.
-//
-//   Thread safety: meshes are written during HdEngine::Execute → Sync phase
-//   (single-threaded in Hydra 1.x), then read during _Execute (also
-//   single-threaded for now).  The mutex is here for future safety when we
-//   move to a progressive render thread in Phase 3.
 // ---------------------------------------------------------------------------
 class SpectralScene {
 public:
-    // Called by HdSpectralMesh::Sync to register/update geometry
+    SpectralScene() {
+        // Material 0 is always the default white material
+        _materials.push_back(SpectralMaterial::Default());
+    }
+
+    // ---- Geometry ----
     void SetMeshData(const SdfPath& id, SpectralMeshData&& data) {
         std::lock_guard<std::mutex> lock(_mutex);
         _meshes[id] = std::move(data);
     }
 
-    // Called by HdSpectralMesh when the rprim is destroyed
     void RemoveMesh(const SdfPath& id) {
         std::lock_guard<std::mutex> lock(_mutex);
         _meshes.erase(id);
     }
 
-    // Read-only access for the render pass — call inside _Execute
     const std::unordered_map<SdfPath, SpectralMeshData, SdfPath::Hash>&
     GetMeshes() const { return _meshes; }
 
-    // Number of triangles in the entire scene (diagnostic)
     size_t TotalTriangles() const {
         size_t n = 0;
         for (auto& kv : _meshes) n += kv.second.triangles.size();
         return n;
     }
 
+    // ---- Materials ----
+
+    /// Add a material and return its ID. If a material with the same name
+    /// already exists, return the existing ID.
+    SpectralMaterialId AddMaterial(const SpectralMaterial& mat) {
+        std::lock_guard<std::mutex> lock(_mutex);
+        // Check for existing
+        for (size_t i = 0; i < _materials.size(); ++i) {
+            if (_materials[i].name == mat.name)
+                return static_cast<SpectralMaterialId>(i);
+        }
+        _materials.push_back(mat);
+        return static_cast<SpectralMaterialId>(_materials.size() - 1);
+    }
+
+    /// Get material by ID. Returns default material for invalid IDs.
+    const SpectralMaterial& GetMaterial(SpectralMaterialId id) const {
+        if (id >= 0 && id < static_cast<SpectralMaterialId>(_materials.size()))
+            return _materials[id];
+        return _materials[0];  // default
+    }
+
+    /// Number of materials (including default)
+    size_t MaterialCount() const { return _materials.size(); }
+
+    /// All materials
+    const std::vector<SpectralMaterial>& GetMaterials() const { return _materials; }
+
 private:
     mutable std::mutex _mutex;
     std::unordered_map<SdfPath, SpectralMeshData, SdfPath::Hash> _meshes;
+    std::vector<SpectralMaterial> _materials;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

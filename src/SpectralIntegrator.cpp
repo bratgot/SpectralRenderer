@@ -98,11 +98,12 @@ void SpectralIntegrator::RenderFrame(
 
                         float radiance;
                         if (hit.valid()) {
+                            const SpectralMaterial& mat = scene.GetMaterial(hit.tri->materialId);
                             radiance = _ShadeSpectral(
                                 *hit.tri,
                                 static_cast<double>(hit.u),
                                 static_cast<double>(hit.v),
-                                lambda);
+                                lambda, mat);
                             // Camera-space Z for this sample
                             GfVec3d worldHit = ray.GetStartPoint() + hit.t * ray.GetDirection();
                             GfVec3d viewHit = worldToView.Transform(worldHit);
@@ -328,15 +329,12 @@ GfVec3f SpectralIntegrator::_SkyColor(const GfVec3f& dir)
 // ---------------------------------------------------------------------------
 // _ShadeSpectral — spectral radiance from a surface hit at one wavelength
 //
-//   White diffuse material: flat 0.8 reflectance across all wavelengths.
-//   Lit by the spectral sky using a simple N·L hemisphere model.
-//   The surface takes on the colour of the sky illumination —
-//   blue from above, warm from the horizon — proving spectral transport.
-//
-//   Phase 4 will replace this with a full spectral Disney BSDF.
+//   Uses the material's spectral reflectance (converted from RGB baseColor)
+//   lit by the spectral sky using a hemisphere model.
 // ---------------------------------------------------------------------------
 float SpectralIntegrator::_ShadeSpectral(
-    const SpectralTriangle& tri, double u, double v, float lambda)
+    const SpectralTriangle& tri, double u, double v, float lambda,
+    const SpectralMaterial& mat)
 {
     float w  = float(1.0 - u - v);
     float uf = float(u);
@@ -346,25 +344,25 @@ float SpectralIntegrator::_ShadeSpectral(
     float len = n.GetLength();
     if (len > 1e-6f) n /= len;
 
-    // White diffuse reflectance (flat across spectrum)
-    const float albedo = 0.8f;
+    // Material spectral reflectance at this wavelength
+    float reflectance = mat.SpectralReflectance(lambda);
 
-    // Simple hemisphere lighting: blend sky radiance from above and below
-    // Upper hemisphere contribution (N·up clamped)
-    float nDotUp = std::max(0.f, n[1]);
+    // Emissive contribution
+    float emission = mat.SpectralEmission(lambda);
+
+    // Hemisphere lighting
+    float nDotUp   = std::max(0.f, n[1]);
     float skyAbove = _SkySpectral(GfVec3f(0.f, 1.f, 0.f), lambda);
 
-    // Lower hemisphere: ground bounce (dim warm)
     float nDotDown = std::max(0.f, -n[1]);
     float skyBelow = _SkySpectral(GfVec3f(0.f, -1.f, 0.f), lambda) * 0.3f;
 
-    // Side lighting (horizon)
     float nDotSide = 1.f - nDotUp - nDotDown;
     float skySide  = _SkySpectral(GfVec3f(1.f, 0.f, 0.f), lambda);
 
     float irradiance = nDotUp * skyAbove + nDotDown * skyBelow + nDotSide * skySide;
 
-    return albedo * irradiance;
+    return reflectance * irradiance + emission;
 }
 
 // ---------------------------------------------------------------------------
