@@ -327,10 +327,11 @@ GfVec3f SpectralIntegrator::_SkyColor(const GfVec3f& dir)
 }
 
 // ---------------------------------------------------------------------------
-// _ShadeSpectral — spectral radiance from a surface hit at one wavelength
+// _ShadeSpectral — spectral Disney BSDF + sky lighting
 //
-//   Uses the material's spectral reflectance (converted from RGB baseColor)
-//   lit by the spectral sky using a hemisphere model.
+//   Evaluates the spectral Disney BSDF (diffuse + GGX specular)
+//   against a 6-direction sky quadrature.
+//   Metals use baseColor as spectral F0; dielectrics use ior.
 // ---------------------------------------------------------------------------
 float SpectralIntegrator::_ShadeSpectral(
     const SpectralTriangle& tri, double u, double v, float lambda,
@@ -340,29 +341,20 @@ float SpectralIntegrator::_ShadeSpectral(
     float uf = float(u);
     float vf = float(v);
 
-    GfVec3f n = tri.n0 * w + tri.n1 * uf + tri.n2 * vf;
-    float len = n.GetLength();
-    if (len > 1e-6f) n /= len;
+    GfVec3f N = tri.n0 * w + tri.n1 * uf + tri.n2 * vf;
+    float len = N.GetLength();
+    if (len > 1e-6f) N /= len;
 
-    // Material spectral reflectance at this wavelength
-    float reflectance = mat.SpectralReflectance(lambda);
+    // View direction — for direct sky lighting, approximate as normal
+    // (proper V from camera comes with bounce rays in Phase 4d)
+    GfVec3f V = N;
 
-    // Emissive contribution
-    float emission = mat.SpectralEmission(lambda);
+    // Sky function wrapper (static member → function pointer)
+    auto skyFn = [](const GfVec3f& dir, float lam) -> float {
+        return _SkySpectral(dir, lam);
+    };
 
-    // Hemisphere lighting
-    float nDotUp   = std::max(0.f, n[1]);
-    float skyAbove = _SkySpectral(GfVec3f(0.f, 1.f, 0.f), lambda);
-
-    float nDotDown = std::max(0.f, -n[1]);
-    float skyBelow = _SkySpectral(GfVec3f(0.f, -1.f, 0.f), lambda) * 0.3f;
-
-    float nDotSide = 1.f - nDotUp - nDotDown;
-    float skySide  = _SkySpectral(GfVec3f(1.f, 0.f, 0.f), lambda);
-
-    float irradiance = nDotUp * skyAbove + nDotDown * skyBelow + nDotSide * skySide;
-
-    return reflectance * irradiance + emission;
+    return SpectralBSDF::EvaluateSkylighting(mat, N, V, lambda, skyFn);
 }
 
 // ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@
 
 #include "SpectralScene.h"
 #include "SpectralSpectrum.h"
+#include "SpectralBSDF.h"
 
 #ifdef SPECTRAL_HAS_EMBREE
 #include "SpectralBVH.h"
