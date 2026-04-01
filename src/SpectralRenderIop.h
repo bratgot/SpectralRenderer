@@ -103,6 +103,10 @@ private:
     int   _tileSize   = 64;
     int   _deviceMode = 0;         // 0=cpu, 1=gpu, 2=auto
     float _adaptiveThreshold = 0.05f; // adaptive sampling threshold
+    bool  _progressive = true;          // progressive refinement mode
+    bool  _blueNoise = true;            // R2 quasi-random sampling
+    int   _progressiveSppDone = 0;      // samples accumulated so far
+    bool  _denoise = false;             // OptiX AI denoiser
     float _shutterOpen  = -0.5f;   // shutter open  (relative to frame)
     float _shutterClose =  0.5f;   // shutter close (relative to frame)
     float _lightIntensity = 1.0f;  // global light intensity multiplier
@@ -121,6 +125,8 @@ private:
     std::vector<float>  _depthBuffer;   // per-pixel depth (camera-space Z)
     std::vector<float>  _objectIdBuffer; // per-pixel object ID
     std::vector<float>  _materialIdBuffer; // per-pixel material ID
+    std::vector<float>  _accBuffer;      // progressive XYZ accumulation (3 per pixel)
+    std::vector<int>    _accSampleCount; // samples accumulated per pixel
     unsigned int        _fbWidth  = 0;
     unsigned int        _fbHeight = 0;
     std::atomic<bool>   _frameReady { false };

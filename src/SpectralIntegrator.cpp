@@ -129,9 +129,24 @@ void SpectralIntegrator::RenderFrame(
                         for (int s = passStart; s < passEnd; ++s) {
                             unsigned int seed = (imageY * W + imageX) * 1031 + s * 6571;
 
-                            float jx = _Hash(seed);
-                            float jy = _Hash(seed + 1);
-                            float wu = (float(s) + _Hash(seed + 2)) / float(spp);
+                            // R2 quasi-random sequence for pixel jitter + wavelength
+                            // Gives blue-noise-like distribution without a texture
+                            // α₁ = 1/φ₂ ≈ 0.7548776662, α₂ = 1/φ₂² ≈ 0.5698402909
+                            // Cranley-Patterson rotation per pixel for decorrelation
+                            unsigned int pixSeed = imageY * W + imageX;
+                            float r2_offset1 = _Hash(pixSeed * 2u);
+                            float r2_offset2 = _Hash(pixSeed * 2u + 1u);
+
+                            float jx, jy, wu;
+                            if (camera.blueNoise) {
+                                jx = std::fmod(r2_offset1 + float(s) * 0.7548776662f, 1.f);
+                                jy = std::fmod(r2_offset2 + float(s) * 0.5698402909f, 1.f);
+                                wu = std::fmod(_Hash(pixSeed * 3u) + float(s) * 0.7548776662f, 1.f);
+                            } else {
+                                jx = _Hash(seed);
+                                jy = _Hash(seed + 1);
+                                wu = (float(s) + _Hash(seed + 2)) / float(spp);
+                            }
                             float lambda = SpectralSpectrum::SampleWavelength(wu);
 
                             float rayTime = camera.shutterOpen +
@@ -752,6 +767,17 @@ void SpectralIntegrator::RenderFrameGPU(
 
     fprintf(stderr, "SpectralIntegrator: GPU render complete (%dx%d)\n",
             camera.imageWidth, camera.imageHeight);
+}
+
+void SpectralIntegrator::DenoiseGPU(
+    unsigned int width, unsigned int height, float* pixels)
+{
+    SpectralGPU* gpu = _GetGPU();
+    if (!gpu) {
+        fprintf(stderr, "SpectralIntegrator: GPU not available for denoising\n");
+        return;
+    }
+    gpu->Denoise(width, height, pixels);
 }
 
 #endif // SPECTRAL_HAS_OPTIX

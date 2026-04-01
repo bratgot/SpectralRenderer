@@ -25,6 +25,7 @@
 
 #ifdef SPECTRAL_HAS_OSD
 
+#include <pxr/base/gf/vec2f.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/vt/array.h>
 
@@ -51,12 +52,21 @@ public:
 
         // Optional: coarse per-vertex normals (will be refined too)
         VtVec3fArray        normals;
+
+        // Optional: coarse UVs (face-varying or vertex)
+        VtVec2fArray        uvs;
+        VtIntArray          uvIndices;    // face-varying UV indices (if empty, use faceVertexIndices)
+        bool                uvIsFaceVarying = true;
     };
 
     struct Output {
         VtVec3fArray        points;              // refined vertex positions
         VtVec3fArray        normals;             // refined per-vertex normals
         std::vector<int>    triangleIndices;     // flat: [v0,v1,v2, v0,v1,v2, ...]
+
+        // Refined UVs — face-varying (one per face-vertex, same count as triangle indices)
+        VtVec2fArray        uvs;
+        std::vector<int>    uvIndices;           // UV index per triangle vertex
     };
 
     /// Refine a coarse mesh to the specified subdivision level.

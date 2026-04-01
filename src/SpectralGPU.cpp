@@ -103,6 +103,7 @@ void SpectralGPU::_FreeBuffers()
     for (auto& dp : _d_texPixels) { if (dp) cudaFree(reinterpret_cast<void*>(dp)); }
     _d_texPixels.clear();
     if (_d_textures)     { cudaFree(reinterpret_cast<void*>(_d_textures));     _d_textures = 0; }
+    _FreeDenoiser();
     if (_d_params)       { cudaFree(reinterpret_cast<void*>(_d_params));       _d_params = 0; }
     _allocW = _allocH = 0;
     _triCount = 0;
@@ -541,6 +542,7 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     launchParams.uvs          = reinterpret_cast<float2*>(_d_uvs);
     launchParams.textures     = reinterpret_cast<spectral_gpu::GPUTexture*>(_d_textures);
     launchParams.textureCount = _textureCount;
+    launchParams.blueNoise    = camera.blueNoise ? 1 : 0;
 
     // projInverse: CPU uses M*v (column-vector), copy as-is
     // viewToWorld: CPU uses v*M (row-vector via Transform), so transpose for GPU
@@ -580,6 +582,117 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
                               cudaMemcpyDeviceToHost));
     }
 
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Denoiser
+// ---------------------------------------------------------------------------
+
+bool SpectralGPU::_SetupDenoiser(unsigned int W, unsigned int H)
+{
+    if (_denoiser && _denoiserW == W && _denoiserH == H) return true;
+
+    _FreeDenoiser();
+
+    OptixDenoiserOptions denoiserOptions = {};
+    denoiserOptions.guideAlbedo = 0;
+    denoiserOptions.guideNormal = 0;
+
+    OPTIX_CHECK(optixDenoiserCreate(
+        _optixContext,
+        OPTIX_DENOISER_MODEL_KIND_HDR,
+        &denoiserOptions,
+        &_denoiser));
+
+    OptixDenoiserSizes sizes = {};
+    OPTIX_CHECK(optixDenoiserComputeMemoryResources(
+        _denoiser, W, H, &sizes));
+
+    _denoiserStateSize   = sizes.stateSizeInBytes;
+    _denoiserScratchSize = sizes.withoutOverlapScratchSizeInBytes;
+
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_denoiserState), _denoiserStateSize));
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_denoiserScratch), _denoiserScratchSize));
+
+    OPTIX_CHECK(optixDenoiserSetup(
+        _denoiser,
+        _stream,
+        W, H,
+        _d_denoiserState, _denoiserStateSize,
+        _d_denoiserScratch, _denoiserScratchSize));
+
+    _denoiserW = W;
+    _denoiserH = H;
+    fprintf(stderr, "SpectralGPU: denoiser set up for %dx%d\n", W, H);
+    return true;
+}
+
+void SpectralGPU::_FreeDenoiser()
+{
+    if (_d_denoiserState)   { cudaFree(reinterpret_cast<void*>(_d_denoiserState));   _d_denoiserState = 0; }
+    if (_d_denoiserScratch) { cudaFree(reinterpret_cast<void*>(_d_denoiserScratch)); _d_denoiserScratch = 0; }
+    if (_denoiser)          { optixDenoiserDestroy(_denoiser); _denoiser = nullptr; }
+    _denoiserW = _denoiserH = 0;
+}
+
+bool SpectralGPU::Denoise(unsigned int width, unsigned int height, float* pixels)
+{
+    if (!_optixContext) return false;
+
+    _SetupDenoiser(width, height);
+    if (!_denoiser) return false;
+
+    size_t fbBytes = size_t(width) * height * sizeof(float4);
+
+    // Upload host pixels to GPU input buffer
+    CUdeviceptr d_input = 0;
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_input), fbBytes));
+    CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(d_input), pixels,
+                          fbBytes, cudaMemcpyHostToDevice));
+
+    CUdeviceptr d_output = 0;
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_output), fbBytes));
+
+    OptixImage2D inputImage = {};
+    inputImage.data               = d_input;
+    inputImage.width              = width;
+    inputImage.height             = height;
+    inputImage.rowStrideInBytes   = width * sizeof(float4);
+    inputImage.pixelStrideInBytes = sizeof(float4);
+    inputImage.format             = OPTIX_PIXEL_FORMAT_FLOAT4;
+
+    OptixImage2D outputImage = inputImage;
+    outputImage.data = d_output;
+
+    OptixDenoiserGuideLayer guideLayer = {};
+
+    OptixDenoiserLayer layer = {};
+    layer.input  = inputImage;
+    layer.output = outputImage;
+
+    OptixDenoiserParams denoiserParams = {};
+    denoiserParams.blendFactor = 0.f;
+
+    OPTIX_CHECK(optixDenoiserInvoke(
+        _denoiser,
+        _stream,
+        &denoiserParams,
+        _d_denoiserState, _denoiserStateSize,
+        &guideLayer,
+        &layer, 1,
+        0, 0,
+        _d_denoiserScratch, _denoiserScratchSize));
+
+    CUDA_CHECK(cudaStreamSynchronize(_stream));
+
+    CUDA_CHECK(cudaMemcpy(pixels, reinterpret_cast<void*>(d_output),
+                          fbBytes, cudaMemcpyDeviceToHost));
+
+    cudaFree(reinterpret_cast<void*>(d_input));
+    cudaFree(reinterpret_cast<void*>(d_output));
+
+    fprintf(stderr, "SpectralGPU: denoised %dx%d\n", width, height);
     return true;
 }
 

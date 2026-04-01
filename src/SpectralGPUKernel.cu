@@ -525,6 +525,16 @@ extern "C" __global__ void __raygen__spectral()
             unsigned int seed = pixIdx*1031u + s*6571u;
             float jx = hashRNG(seed); float jy = hashRNG(seed+1u);
             float wu = (float(s)+hashRNG(seed+2u))/float(spp);
+
+            // R2 quasi-random override
+            if (params.blueNoise) {
+                unsigned int pixSeed = py * dim.x + px;
+                float r2off1 = hashRNG(pixSeed * 2u);
+                float r2off2 = hashRNG(pixSeed * 2u + 1u);
+                jx = fmodf(r2off1 + float(s) * 0.7548776662f, 1.f);
+                jy = fmodf(r2off2 + float(s) * 0.5698402909f, 1.f);
+                wu = fmodf(hashRNG(pixSeed * 3u) + float(s) * 0.7548776662f, 1.f);
+            }
             float lambda = 380.f + wu*400.f;
 
             float3 origin, dir;

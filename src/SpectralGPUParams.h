@@ -86,6 +86,8 @@ struct LaunchParams {
     // Texture table
     GPUTexture*        textures;
     unsigned int       textureCount;
+
+    int                blueNoise;        // 1 = R2 sampling, 0 = random
 };
 
 // Per-ray payload — carried through the trace

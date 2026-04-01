@@ -34,6 +34,24 @@ struct OsdVertex3f {
     GfVec3f ToVec3f() const { return GfVec3f(x, y, z); }
 };
 
+// UV adapter for face-varying interpolation
+struct OsdVertex2f {
+    float u, v;
+
+    OsdVertex2f() : u(0), v(0) {}
+    OsdVertex2f(float _u, float _v) : u(_u), v(_v) {}
+    OsdVertex2f(const GfVec2f& uv) : u(uv[0]), v(uv[1]) {}
+
+    void Clear(void* = nullptr) { u = v = 0.f; }
+
+    void AddWithWeight(const OsdVertex2f& src, float weight) {
+        u += src.u * weight;
+        v += src.v * weight;
+    }
+
+    GfVec2f ToVec2f() const { return GfVec2f(u, v); }
+};
+
 // ---------------------------------------------------------------------------
 // SchemeFromToken
 // ---------------------------------------------------------------------------
@@ -91,6 +109,21 @@ bool SpectralSubdiv::Refine(const Input& input, Output& output)
     desc.numFaces           = static_cast<int>(input.faceVertexCounts.size());
     desc.numVertsPerFace    = input.faceVertexCounts.cdata();
     desc.vertIndicesPerFace = input.faceVertexIndices.cdata();
+
+    // Face-varying UV channel
+    Far::TopologyDescriptor::FVarChannel uvChannel;
+    bool hasUVs = !input.uvs.empty();
+    if (hasUVs) {
+        uvChannel.numValues = static_cast<int>(input.uvs.size());
+        // If separate UV indices provided, use them; otherwise use vertex indices
+        if (!input.uvIndices.empty()) {
+            uvChannel.valueIndices = input.uvIndices.cdata();
+        } else {
+            uvChannel.valueIndices = input.faceVertexIndices.cdata();
+        }
+        desc.numFVarChannels = 1;
+        desc.fvarChannels    = &uvChannel;
+    }
 
     // ------------------------------------------------------------------
     // Create topology refiner
@@ -163,6 +196,29 @@ bool SpectralSubdiv::Refine(const Input& input, Output& output)
     }
 
     // ------------------------------------------------------------------
+    // Interpolate face-varying UVs
+    // ------------------------------------------------------------------
+    std::vector<OsdVertex2f> uvBuffer;
+    int totalFVarValues = 0;
+    if (hasUVs) {
+        int coarseFVarCount = static_cast<int>(input.uvs.size());
+        totalFVarValues = coarseFVarCount;
+        for (int l = 1; l <= level; ++l) {
+            totalFVarValues += refiner->GetLevel(l).GetNumFVarValues(0);
+        }
+        uvBuffer.resize(totalFVarValues);
+        for (int i = 0; i < coarseFVarCount; ++i) {
+            uvBuffer[i] = OsdVertex2f(input.uvs[i]);
+        }
+        OsdVertex2f* usrc = uvBuffer.data();
+        for (int l = 1; l <= level; ++l) {
+            OsdVertex2f* udst = usrc + refiner->GetLevel(l - 1).GetNumFVarValues(0);
+            primvarRefiner.InterpolateFaceVarying(l, usrc, udst, 0);
+            usrc = udst;
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Extract refined positions
     // ------------------------------------------------------------------
     output.points.resize(fineVertCount);
@@ -195,17 +251,44 @@ bool SpectralSubdiv::Refine(const Input& input, Output& output)
     output.triangleIndices.clear();
     output.triangleIndices.reserve(numFaces * 6);  // worst case: all quads
 
+    // Get refined face-varying UVs
+    OsdVertex2f* fineUVs = nullptr;
+    if (hasUVs) {
+        // Navigate to the finest level's UV data
+        fineUVs = uvBuffer.data();
+        for (int l = 0; l < level; ++l) {
+            fineUVs += refiner->GetLevel(l).GetNumFVarValues(0);
+        }
+        int fineFVarCount = fineLevel.GetNumFVarValues(0);
+        output.uvs.resize(fineFVarCount);
+        for (int i = 0; i < fineFVarCount; ++i) {
+            output.uvs[i] = fineUVs[i].ToVec2f();
+        }
+    }
+
     for (int fi = 0; fi < numFaces; ++fi) {
         Far::ConstIndexArray faceVerts = fineLevel.GetFaceVertices(fi);
         const int nv = faceVerts.size();
 
         if (nv < 3) continue;
 
+        // Get face-varying UV indices for this face
+        Far::ConstIndexArray faceUVs;
+        if (hasUVs) {
+            faceUVs = fineLevel.GetFaceFVarValues(fi, 0);
+        }
+
         // Fan-triangulate: (0,1,2), (0,2,3), (0,3,4), ...
         for (int ti = 0; ti < nv - 2; ++ti) {
             output.triangleIndices.push_back(faceVerts[0]);
             output.triangleIndices.push_back(faceVerts[ti + 1]);
             output.triangleIndices.push_back(faceVerts[ti + 2]);
+
+            if (hasUVs && faceUVs.size() > 0) {
+                output.uvIndices.push_back(faceUVs[0]);
+                output.uvIndices.push_back(faceUVs[ti + 1]);
+                output.uvIndices.push_back(faceUVs[ti + 2]);
+            }
         }
     }
 

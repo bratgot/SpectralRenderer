@@ -65,6 +65,9 @@ public:
                 float* pixels, float* depth = nullptr,
                 int spp = 1, int maxBounces = 4);
 
+    /// Denoise the framebuffer in-place on GPU, copy result to host pixels.
+    bool Denoise(unsigned int width, unsigned int height, float* pixels);
+
     /// Release all GPU resources.
     void Cleanup();
 
@@ -116,8 +119,19 @@ private:
     unsigned int           _lightCount = 0;
     unsigned int           _textureCount = 0;
 
+    // Denoiser
+    OptixDenoiser          _denoiser = nullptr;
+    CUdeviceptr            _d_denoiserState    = 0;
+    CUdeviceptr            _d_denoiserScratch  = 0;
+    size_t                 _denoiserStateSize   = 0;
+    size_t                 _denoiserScratchSize = 0;
+    unsigned int           _denoiserW = 0;
+    unsigned int           _denoiserH = 0;
+
     void _FreeAccel();
     void _FreeBuffers();
+    bool _SetupDenoiser(unsigned int W, unsigned int H);
+    void _FreeDenoiser();
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

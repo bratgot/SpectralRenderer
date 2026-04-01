@@ -52,6 +52,7 @@ struct SpectralCamera {
     float  shutterOpen       = 0.f;   // motion blur shutter [0,1] for Embree
     float  shutterClose      = 0.f;   // 0,0 = no motion blur
     float  adaptiveThreshold = 0.05f; // 0 = disabled, 0.05 = default
+    bool   blueNoise         = true;  // R2 quasi-random sampling
 };
 
 // ---------------------------------------------------------------------------
@@ -114,6 +115,9 @@ public:
 
     /// Check if GPU rendering is available.
     static bool IsGPUAvailable();
+
+    /// Denoise a framebuffer using OptiX AI denoiser (GPU only).
+    static void DenoiseGPU(unsigned int width, unsigned int height, float* pixels);
 #endif  // optional per-pixel depth output
 
 private:

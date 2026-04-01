@@ -171,6 +171,21 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                "0.05 = default (saves 30-60% render time)\n"
                "0.1 = aggressive (faster, slightly noisier dark areas)");
 
+    Bool_knob(f, &_progressive, "progressive", "progressive");
+    Tooltip(f, "Progressive refinement: first render is a fast preview,\n"
+               "subsequent renders accumulate more samples until full spp.\n"
+               "Change any parameter to reset and start fresh.");
+
+    Bool_knob(f, &_blueNoise, "blue_noise", "blue noise");
+    Tooltip(f, "R2 quasi-random sampling for better sample distribution.\n"
+               "Reduces visible noise patterns at low sample counts.\n"
+               "Enabled by default. Disable for pure random sampling.");
+
+    Bool_knob(f, &_denoise, "denoise", "denoise (GPU)");
+    Tooltip(f, "Apply OptiX AI denoiser after GPU rendering.\n"
+               "Dramatically cleans up low-spp renders.\n"
+               "Only available on GPU device mode.");
+
     Divider(f, "Lighting");
     Float_knob(f, &_lightIntensity, "light_intensity", "light intensity");
     SetRange(f, 0.01f, 10.f);
@@ -204,6 +219,7 @@ void SpectralRenderIop::knobs(Knob_Callback f)
 int SpectralRenderIop::knob_changed(Knob* k)
 {
     _frameReady.store(false);
+    _progressiveSppDone = 0;  // reset progressive accumulation
     return Iop::knob_changed(k);
 }
 
@@ -257,6 +273,7 @@ void SpectralRenderIop::_validate(bool forReal)
         _LoadStage();
         _BuildCameraFromInput();
         _frameReady.store(false);
+        _progressiveSppDone = 0;
     }
 
     // Deep output info: construct from flat IopInfo, which copies format/bbox/channels.
@@ -1001,6 +1018,24 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                     subIn.normals = normals;
                 }
 
+                // Pass UVs to subdivider
+                if (!uvs.empty()) {
+                    if (uvsInterp == UsdGeomTokens->faceVarying) {
+                        // Face-varying: each face-vertex has its own UV
+                        // UV indices are identity (0, 1, 2, ...)
+                        subIn.uvs = uvs;
+                        subIn.uvIndices.resize(uvs.size());
+                        for (int i = 0; i < static_cast<int>(uvs.size()); ++i)
+                            subIn.uvIndices[i] = i;
+                        subIn.uvIsFaceVarying = true;
+                    } else if (uvsInterp == UsdGeomTokens->vertex) {
+                        // Vertex: UVs indexed same as positions
+                        subIn.uvs = uvs;
+                        subIn.uvIndices = faceVertexIndices;
+                        subIn.uvIsFaceVarying = true;
+                    }
+                }
+
                 SpectralSubdiv::Output subOut;
                 if (SpectralSubdiv::Refine(subIn, subOut)) {
                     points = subOut.points;
@@ -1047,9 +1082,26 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                     fprintf(stderr, "SpectralRender: mesh %s subdivided (%s level 2)\n",
                             prim.GetPath().GetText(), schemeStr.c_str());
 
-                    // UVs don't survive subdivision yet — clear them
-                    // (OpenSubdiv UV refinement is a future enhancement)
-                    uvs.clear();
+                    // Use refined UVs from subdivision
+                    if (!subOut.uvs.empty() && !subOut.uvIndices.empty()) {
+                        // Flatten face-varying UVs: create one UV per face-vertex
+                        // so the face-varying lookup in triangulation works directly
+                        size_t numFaceVerts = subOut.uvIndices.size();
+                        uvs.resize(numFaceVerts);
+                        for (size_t i = 0; i < numFaceVerts; ++i) {
+                            int uvIdx = subOut.uvIndices[i];
+                            if (uvIdx >= 0 && uvIdx < static_cast<int>(subOut.uvs.size())) {
+                                uvs[i] = subOut.uvs[uvIdx];
+                            } else {
+                                uvs[i] = GfVec2f(0.f);
+                            }
+                        }
+                        uvsInterp = UsdGeomTokens->faceVarying;
+                        fprintf(stderr, "SpectralRender: refined %zu UVs for %s\n",
+                                uvs.size(), prim.GetPath().GetText());
+                    } else {
+                        uvs.clear();
+                    }
 
                     // Motion blur: pointsClose must match subdivided topology.
                     // For transform-only motion, the local points are identical
@@ -1350,7 +1402,12 @@ void SpectralRenderIop::_BuildCameraFromInput()
 // ---------------------------------------------------------------------------
 void SpectralRenderIop::_EnsureFrameRendered()
 {
-    if (_frameReady.load()) return;
+    // Allow re-entry for progressive refinement
+    if (_frameReady.load()) {
+        if (!_progressive || _progressiveSppDone >= _samples) return;
+        // Progressive: preview done, need full quality
+        _frameReady.store(false);
+    }
     std::lock_guard<std::mutex> lock(_renderMutex);
     if (_frameReady.load()) return;
 
@@ -1385,6 +1442,13 @@ void SpectralRenderIop::_EnsureFrameRendered()
     }
 
     cam.adaptiveThreshold = _adaptiveThreshold;
+    cam.blueNoise = _blueNoise;
+
+    // Progressive rendering: first pass is a fast preview
+    int renderSpp = _samples;
+    if (_progressive && _progressiveSppDone == 0 && _samples > 8) {
+        renderSpp = 8;  // fast preview pass
+    }
 
     // Determine render device
     bool useGPU = false;
@@ -1397,20 +1461,37 @@ void SpectralRenderIop::_EnsureFrameRendered()
 #endif
 
     const char* deviceStr = useGPU ? "GPU" : "CPU";
-    fprintf(stderr, "SpectralRender: rendering %dx%d, %zu tris, %d spp, device=%s\n",
-            W, H, _scene->TotalTriangles(), _samples, deviceStr);
+    const char* passStr = (_progressive && renderSpp < _samples) ? " [preview]" : "";
+    fprintf(stderr, "SpectralRender: rendering %dx%d, %zu tris, %d spp, device=%s%s\n",
+            W, H, _scene->TotalTriangles(), renderSpp, deviceStr, passStr);
 
 #ifdef SPECTRAL_HAS_OPTIX
     if (useGPU) {
         SpectralIntegrator::RenderFrameGPU(*_scene, cam, _frameBuffer.data(),
-                                            _samples, _depthBuffer.data(), _maxBounces);
+                                            renderSpp, _depthBuffer.data(), _maxBounces);
     } else
 #endif
     {
         SpectralIntegrator::RenderFrame(*_scene, cam, _frameBuffer.data(),
-                                         _samples, _depthBuffer.data(), _maxBounces,
+                                         renderSpp, _depthBuffer.data(), _maxBounces,
                                          _objectIdBuffer.data(), _materialIdBuffer.data());
     }
+
+    // Denoise — works for both GPU and CPU renders
+#ifdef SPECTRAL_HAS_OPTIX
+    if (_denoise) {
+        SpectralIntegrator::DenoiseGPU(W, H, _frameBuffer.data());
+    }
+#endif
+
+    _progressiveSppDone = renderSpp;
+
+    // If this was a preview pass, schedule refinement
+    if (_progressive && _progressiveSppDone < _samples) {
+        fprintf(stderr, "SpectralRender: preview complete (%d spp) — re-render for full %d spp\n",
+                _progressiveSppDone, _samples);
+    }
+
     _frameReady.store(true);
 
     fprintf(stderr, "SpectralRender: render complete\n");
