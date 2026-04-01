@@ -34,6 +34,12 @@ struct SpectralMaterial
     float   clearcoat    = 0.0f;
     float   clearcoatRoughness = 0.0f;
 
+    // Texture references (indices into SpectralScene texture table, -1 = none)
+    int     baseColorTexId = -1;   // diffuseColor texture
+    int     roughnessTexId = -1;   // roughness texture
+    int     metallicTexId  = -1;   // metallic texture
+    int     normalMapTexId = -1;   // normal map
+
     // Identifier
     std::string name = "default";
 

@@ -12,6 +12,7 @@
 #include <pxr/usd/usdGeom/camera.h>
 #include <pxr/usd/usdGeom/xformCache.h>
 #include <pxr/usd/usdGeom/tokens.h>
+#include <pxr/usd/usdGeom/primvarsAPI.h>
 #include <pxr/usd/usdShade/material.h>
 #include <pxr/usd/usdShade/materialBindingAPI.h>
 #include <pxr/usd/usdShade/shader.h>
@@ -23,6 +24,7 @@
 #include <pxr/usd/usdLux/lightAPI.h>
 #include <pxr/usd/usdLux/tokens.h>
 #include <pxr/usd/sdf/path.h>
+#include <pxr/usd/sdf/assetPath.h>
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/gf/vec3d.h>
@@ -546,6 +548,22 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
         TfToken normalsInterp = mesh.GetNormalsInterpolation();
 
         // ----------------------------------------------------------
+        // UV coordinates (Phase 5: texture mapping)
+        //   Read "st" or "uv" primvar for texture coordinates.
+        // ----------------------------------------------------------
+        VtVec2fArray uvs;
+        TfToken uvsInterp;
+        {
+            UsdGeomPrimvarsAPI pvAPI(prim);
+            UsdGeomPrimvar stPrimvar = pvAPI.GetPrimvar(TfToken("st"));
+            if (!stPrimvar) stPrimvar = pvAPI.GetPrimvar(TfToken("uv"));
+            if (stPrimvar) {
+                stPrimvar.Get(&uvs, timeCode);
+                uvsInterp = stPrimvar.GetInterpolation();
+            }
+        }
+
+        // ----------------------------------------------------------
         // Material reading (Phase 4)
         //   Read UsdPreviewSurface material bound to this mesh.
         //   Extract baseColor, metallic, roughness, etc.
@@ -586,6 +604,57 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                     readColor("emissiveColor", mat.emissiveColor);
                     readFloat("clearcoat", mat.clearcoat);
                     readFloat("clearcoatRoughness", mat.clearcoatRoughness);
+
+                    // Check for texture connections (UsdUVTexture nodes)
+                    auto readTexture = [&](const char* inputName) -> int {
+                        UsdShadeInput inp = surfaceShader.GetInput(TfToken(inputName));
+                        if (!inp) return -1;
+
+                        // Check if connected to another shader
+                        UsdShadeConnectableAPI src;
+                        TfToken srcName;
+                        UsdShadeAttributeType srcType;
+                        if (!UsdShadeConnectableAPI::GetConnectedSource(
+                                inp, &src, &srcName, &srcType))
+                            return -1;
+
+                        UsdShadeShader texShader(src.GetPrim());
+                        if (!texShader) return -1;
+
+                        // Verify it's a UsdUVTexture
+                        TfToken shaderId;
+                        texShader.GetIdAttr().Get(&shaderId, timeCode);
+                        if (shaderId != TfToken("UsdUVTexture")) return -1;
+
+                        // Get the file path
+                        UsdShadeInput fileInp = texShader.GetInput(TfToken("file"));
+                        if (!fileInp) return -1;
+
+                        VtValue fileVal;
+                        fileInp.Get(&fileVal, timeCode);
+                        std::string filePath;
+                        if (fileVal.IsHolding<SdfAssetPath>()) {
+                            SdfAssetPath ap = fileVal.UncheckedGet<SdfAssetPath>();
+                            filePath = ap.GetResolvedPath();
+                            if (filePath.empty()) filePath = ap.GetAssetPath();
+                        } else if (fileVal.IsHolding<std::string>()) {
+                            filePath = fileVal.UncheckedGet<std::string>();
+                        }
+
+                        if (filePath.empty()) return -1;
+
+                        // Load the texture
+                        int texId = _scene->LoadTexture(filePath);
+                        if (texId >= 0) {
+                            fprintf(stderr, "SpectralRender: texture '%s' -> '%s' (id=%d)\n",
+                                    inputName, filePath.c_str(), texId);
+                        }
+                        return texId;
+                    };
+
+                    mat.baseColorTexId = readTexture("diffuseColor");
+                    mat.roughnessTexId = readTexture("roughness");
+                    mat.metallicTexId  = readTexture("metallic");
 
                     matId = _scene->AddMaterial(mat);
 
@@ -665,6 +734,10 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
 
                     fprintf(stderr, "SpectralRender: mesh %s subdivided (%s level 2)\n",
                             prim.GetPath().GetText(), schemeStr.c_str());
+
+                    // UVs don't survive subdivision yet — clear them
+                    // (OpenSubdiv UV refinement is a future enhancement)
+                    uvs.clear();
                 }
             }
         }
@@ -759,6 +832,26 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
 
                 if (!gotNormals) {
                     tri.n0 = tri.n1 = tri.n2 = tri.faceNormal;
+                }
+
+                // Assign UVs
+                tri.uv0 = tri.uv1 = tri.uv2 = GfVec2f(0.f);
+                if (!uvs.empty()) {
+                    if (uvsInterp == UsdGeomTokens->faceVarying) {
+                        if (idx2 < static_cast<int>(uvs.size())) {
+                            tri.uv0 = uvs[idx0];
+                            tri.uv1 = uvs[idx1];
+                            tri.uv2 = uvs[idx2];
+                        }
+                    } else if (uvsInterp == UsdGeomTokens->vertex) {
+                        if (pi0 < static_cast<int>(uvs.size()) &&
+                            pi1 < static_cast<int>(uvs.size()) &&
+                            pi2 < static_cast<int>(uvs.size())) {
+                            tri.uv0 = uvs[pi0];
+                            tri.uv1 = uvs[pi1];
+                            tri.uv2 = uvs[pi2];
+                        }
+                    }
                 }
 
                 tri.materialId = matId;

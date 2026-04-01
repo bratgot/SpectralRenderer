@@ -332,6 +332,49 @@ GfVec3f SpectralIntegrator::_SkyColor(const GfVec3f& dir)
 }
 
 // ---------------------------------------------------------------------------
+// _ResolveMaterial — apply texture lookups to get final material properties
+// ---------------------------------------------------------------------------
+static SpectralMaterial _ResolveMaterial(
+    const SpectralMaterial& mat,
+    const SpectralTriangle& tri,
+    float baryW, float baryU, float baryV,
+    const SpectralScene& scene)
+{
+    // Interpolate UV
+    GfVec2f uv = tri.uv0 * baryW + tri.uv1 * baryU + tri.uv2 * baryV;
+
+    SpectralMaterial resolved = mat;
+
+    // Sample baseColor texture
+    if (mat.baseColorTexId >= 0) {
+        const SpectralTexture* tex = scene.GetTexture(mat.baseColorTexId);
+        if (tex && tex->IsValid()) {
+            resolved.baseColor = tex->Sample(uv);
+        }
+    }
+
+    // Sample roughness texture (stored in green channel typically)
+    if (mat.roughnessTexId >= 0) {
+        const SpectralTexture* tex = scene.GetTexture(mat.roughnessTexId);
+        if (tex && tex->IsValid()) {
+            GfVec3f val = tex->Sample(uv);
+            resolved.roughness = val[1]; // green channel
+        }
+    }
+
+    // Sample metallic texture (stored in blue channel typically)
+    if (mat.metallicTexId >= 0) {
+        const SpectralTexture* tex = scene.GetTexture(mat.metallicTexId);
+        if (tex && tex->IsValid()) {
+            GfVec3f val = tex->Sample(uv);
+            resolved.metallic = val[2]; // blue channel
+        }
+    }
+
+    return resolved;
+}
+
+// ---------------------------------------------------------------------------
 // _ShadeSpectral — iterative path tracing with Disney BSDF
 // ---------------------------------------------------------------------------
 float SpectralIntegrator::_ShadeSpectral(
@@ -356,6 +399,9 @@ float SpectralIntegrator::_ShadeSpectral(
     // Ensure N faces the camera (flip if back-facing)
     float NdotV = N[0]*V[0] + N[1]*V[1] + N[2]*V[2];
     if (NdotV < 0.f) N = -N;
+
+    // Resolve textures at this hit point
+    SpectralMaterial resolvedMat = _ResolveMaterial(mat, tri, w, uf, vf, scene);
 
     float radiance = 0.f;
 
@@ -393,7 +439,7 @@ float SpectralIntegrator::_ShadeSpectral(
             }
 
             if (!inShadow) {
-                float bsdf = SpectralBSDF::Evaluate(mat, N, V, L, lambda);
+                float bsdf = SpectralBSDF::Evaluate(resolvedMat, N, V, L, lambda);
                 float lightRad = light.SpectralEmission(lambda);
                 float atten = light.Attenuation(hitPos);
                 radiance += bsdf * lightRad * atten;
@@ -403,16 +449,16 @@ float SpectralIntegrator::_ShadeSpectral(
         auto skyFn = [](const GfVec3f& dir, float lam) -> float {
             return _SkySpectral(dir, lam);
         };
-        radiance += SpectralBSDF::EvaluateSkylighting(mat, N, V, lambda, skyFn) * 0.05f;
+        radiance += SpectralBSDF::EvaluateSkylighting(resolvedMat, N, V, lambda, skyFn) * 0.05f;
     } else {
         // No explicit lights — full sky lighting
         auto skyFn = [](const GfVec3f& dir, float lam) -> float {
             return _SkySpectral(dir, lam);
         };
-        radiance = SpectralBSDF::EvaluateSkylighting(mat, N, V, lambda, skyFn);
+        radiance = SpectralBSDF::EvaluateSkylighting(resolvedMat, N, V, lambda, skyFn);
     }
 
-    radiance += mat.SpectralEmission(lambda);
+    radiance += resolvedMat.SpectralEmission(lambda);
 
     // ---- Bounce rays ----
     if (maxBounces <= 0) return radiance;
@@ -421,7 +467,8 @@ float SpectralIntegrator::_ShadeSpectral(
     GfVec3f bounceOrigin = hitPos;
     GfVec3f bounceN = N;
     GfVec3f bounceV = V;
-    const SpectralMaterial* bounceMat = &mat;
+    SpectralMaterial resolvedBounceMat = resolvedMat;
+    const SpectralMaterial* bounceMat = &resolvedBounceMat;
 
     for (int bounce = 0; bounce < maxBounces; ++bounce) {
         // Russian roulette after bounce 1
@@ -461,9 +508,13 @@ float SpectralIntegrator::_ShadeSpectral(
 
         // Hit surface — set up for next iteration
         const SpectralTriangle& hitTri = *bounceHit.tri;
-        bounceMat = &scene.GetMaterial(hitTri.materialId);
+        const SpectralMaterial& rawBounceMat = scene.GetMaterial(hitTri.materialId);
 
         float bw = 1.f - bounceHit.u - bounceHit.v;
+        // Resolve textures at bounce hit
+        resolvedBounceMat = _ResolveMaterial(
+            rawBounceMat, hitTri, bw, bounceHit.u, bounceHit.v, scene);
+        bounceMat = &resolvedBounceMat;
         bounceN = hitTri.n0 * bw + hitTri.n1 * bounceHit.u + hitTri.n2 * bounceHit.v;
         float nlen = bounceN.GetLength();
         if (nlen > 1e-6f) bounceN /= nlen;

@@ -1,12 +1,14 @@
 #pragma once
 
 #include <pxr/base/gf/matrix4d.h>
+#include <pxr/base/gf/vec2f.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/vt/array.h>
 #include <pxr/usd/sdf/path.h>
 
 #include "SpectralMaterial.h"
 #include "SpectralLight.h"
+#include "SpectralTexture.h"
 
 #include <vector>
 #include <mutex>
@@ -20,6 +22,7 @@ struct SpectralTriangle {
     GfVec3f v0, v1, v2;       // world-space vertices
     GfVec3f n0, n1, n2;       // per-vertex world-space normals
     GfVec3f faceNormal;        // geometric (flat) normal
+    GfVec2f uv0, uv1, uv2;   // per-vertex texture coordinates
     SpectralMaterialId materialId = kDefaultMaterialId;
 };
 
@@ -111,11 +114,37 @@ public:
     /// If false, the integrator falls back to sky-only lighting.
     bool HasLights() const { return !_lights.empty(); }
 
+    // ---- Textures ----
+
+    /// Load a texture and return its ID. If already loaded, returns existing ID.
+    int LoadTexture(const std::string& filePath) {
+        std::lock_guard<std::mutex> lock(_mutex);
+        // Check if already loaded
+        for (size_t i = 0; i < _textures.size(); ++i) {
+            if (_textures[i].GetPath() == filePath)
+                return static_cast<int>(i);
+        }
+        SpectralTexture tex;
+        if (!tex.Load(filePath)) return -1;
+        _textures.push_back(std::move(tex));
+        return static_cast<int>(_textures.size() - 1);
+    }
+
+    /// Get texture by ID. Returns nullptr for invalid IDs.
+    const SpectralTexture* GetTexture(int id) const {
+        if (id >= 0 && id < static_cast<int>(_textures.size()))
+            return &_textures[id];
+        return nullptr;
+    }
+
+    size_t TextureCount() const { return _textures.size(); }
+
 private:
     mutable std::mutex _mutex;
     std::unordered_map<SdfPath, SpectralMeshData, SdfPath::Hash> _meshes;
     std::vector<SpectralMaterial> _materials;
     std::vector<SpectralLight> _lights;
+    std::vector<SpectralTexture> _textures;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

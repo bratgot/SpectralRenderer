@@ -154,7 +154,7 @@ endif()
 # ---------------------------------------------------------------------------
 # SpectralCore — static lib shared by both DLLs
 # ---------------------------------------------------------------------------
-set(SPECTRAL_CORE_SOURCES src/SpectralIntegrator.cpp)
+set(SPECTRAL_CORE_SOURCES src/SpectralIntegrator.cpp src/SpectralTexture.cpp)
 if(HAS_EMBREE)
     list(APPEND SPECTRAL_CORE_SOURCES src/SpectralBVH.cpp)
 endif()
