@@ -16,6 +16,7 @@ PXR_NAMESPACE_USING_DIRECTIVE
 
 // NDK headers
 #include <DDImage/Iop.h>
+#include <DDImage/DeepOp.h>
 #include <DDImage/Knobs.h>
 #include <DDImage/Row.h>
 #include <DDImage/Format.h>
@@ -31,21 +32,17 @@ PXR_NAMESPACE_USING_DIRECTIVE
 // ---------------------------------------------------------------------------
 // SpectralRenderIop
 //
-//   Phase 1.5: Dual input mode
-//     - Input 0 (optional): GeomOp from Nuke's USD node graph
-//       (GeoCube, GeoImport, transforms, etc.)
-//     - File knob fallback: .usd/.usda/.usdc path for farm/standalone
+//   Dual Iop + DeepOp render node.
+//   Flat RGBA output via engine() (Iop path).
+//   Deep output via doDeepEngine() (DeepOp path).
 //
-//   If input 0 is connected to a GeometryProviderI, we use
-//   GeometryProviderI::BuildStage() to get a usg::Stage, then
-//   extract the PXR UsdStageRefPtr to traverse meshes.
-//   If not connected, we fall back to UsdStage::Open() on the file path.
-//
-//   Global scope + Op::Description pattern required by Nuke 17 NDK.
+//   Input 0 (Scene): GeometryProviderI — optional
+//   Input 1 (Cam):   CameraOp          — optional
+//   Input 2 (BG):    any Iop            — optional, sets resolution
 // ---------------------------------------------------------------------------
 using namespace DD::Image;
 
-class HDSPECTRAL_API SpectralRenderIop : public Iop
+class HDSPECTRAL_API SpectralRenderIop : public Iop, public DeepOp
 {
 public:
     const char* Class()         const override { return CLASS; }
@@ -54,11 +51,14 @@ public:
     explicit SpectralRenderIop(Node* node);
     ~SpectralRenderIop() override;
 
-    // Input 0: optional GeomOp (USD scene)
+    // Input 0: Scene  (GeometryProviderI) — optional
+    // Input 1: Camera (CameraOp)          — optional
+    // Input 2: BG     (any Iop)           — optional, sets output resolution
     int  minimum_inputs()               const override { return 0; }
-    int  maximum_inputs()               const override { return 1; }
+    int  maximum_inputs()               const override { return 3; }
     const char* input_label(int idx, char*) const override;
     bool test_input(int idx, Op* op)    const override;
+    Op*  default_input(int idx)         const override;
 
     void _validate(bool forReal)        override;
     void _request(int x, int y, int r, int t,
@@ -72,15 +72,27 @@ public:
 
     static const Op::Description description;
 
+    // ----- DeepOp interface -----
+    const char* conversionHelperNodeClass() const override { return "DeepToImage"; }
+    const Format* convertibleFormat() const override { return &(info_.format()); }
+    Op* op() override { return this; }
+
+protected:
+    // DeepOp pure virtuals
+    bool doDeepEngine(DD::Image::Box box,
+                      const DD::Image::ChannelSet& channels,
+                      DeepOutputPlane& plane) override;
+    void getDeepRequests(DD::Image::Box box,
+                         const DD::Image::ChannelSet& channels,
+                         int count,
+                         std::vector<RequestData>& reqData) override;
+
 private:
     static const char* const CLASS;
 
-    // Opens stage from input GeomOp or file, loads meshes + camera
     void _LoadStage();
-
-    // Load from a PXR UsdStageRefPtr (shared by both input paths)
     void _LoadFromPxrStage(const UsdStageRefPtr& stage);
-
+    void _BuildCameraFromInput();
     void _EnsureFrameRendered();
 
     // Knobs
@@ -96,9 +108,11 @@ private:
     // Scene + camera built together during _LoadStage
     std::unique_ptr<pxr::SpectralScene> _scene;
     SpectralCamera                      _camera;
+    bool                                _cameraFromInput = false;
 
-    // Frame buffer
+    // Frame buffer (RGBA) + depth buffer
     std::vector<float>  _frameBuffer;
+    std::vector<float>  _depthBuffer;   // per-pixel depth (camera-space Z)
     unsigned int        _fbWidth  = 0;
     unsigned int        _fbHeight = 0;
     std::atomic<bool>   _frameReady { false };

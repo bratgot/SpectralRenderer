@@ -43,6 +43,7 @@ struct SpectralCamera {
     GfMatrix4d projInverse;   // clip→view     (inverse of projection matrix)
     unsigned int imageWidth  = 1920;
     unsigned int imageHeight = 1080;
+    double pixelAspect       = 1.0;   // pixel aspect ratio from format
 };
 
 // ---------------------------------------------------------------------------
@@ -86,7 +87,8 @@ public:
         const SpectralScene& scene,
         const SpectralCamera& camera,
         float* pixels,
-        int spp = 1);
+        int spp = 1,
+        float* depthOut = nullptr);  // optional per-pixel depth output
 
 private:
     // Ray generation

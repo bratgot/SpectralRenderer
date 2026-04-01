@@ -22,7 +22,8 @@ void SpectralIntegrator::RenderFrame(
     const SpectralScene&  scene,
     const SpectralCamera& camera,
     float*                pixels,
-    int                   spp)
+    int                   spp,
+    float*                depthOut)
 {
 #ifdef SPECTRAL_HAS_EMBREE
     SpectralBVH bvh;
@@ -31,6 +32,10 @@ void SpectralIntegrator::RenderFrame(
     const unsigned int W = camera.imageWidth;
     const unsigned int H = camera.imageHeight;
     const bool spectral = (spp > 1);
+
+    // World-to-camera matrix for converting hit points to camera-space Z.
+    // Nuke deep expects Z depth along the camera's view axis, not ray distance.
+    const GfMatrix4d worldToView = camera.viewToWorld.GetInverse();
 
     std::vector<unsigned int> rows(H);
     std::iota(rows.begin(), rows.end(), 0u);
@@ -41,6 +46,7 @@ void SpectralIntegrator::RenderFrame(
         [&](unsigned int imageY)
         {
             for (unsigned int imageX = 0; imageX < W; ++imageX) {
+                const size_t pixIdx = imageY * W + imageX;
 
                 if (!spectral) {
                     // ---- SPP=1: fast normal-as-colour mode ----
@@ -48,11 +54,16 @@ void SpectralIntegrator::RenderFrame(
                     SpectralBVH::Hit hit = bvh.Intersect(ray);
 
                     GfVec3f color;
+                    float depth = 1e30f;
                     if (hit.valid()) {
                         color = _ShadeSmoothNormal(
                             *hit.tri,
                             static_cast<double>(hit.u),
                             static_cast<double>(hit.v));
+                        // Camera-space Z: transform hit point to view space, take -Z
+                        GfVec3d worldHit = ray.GetStartPoint() + hit.t * ray.GetDirection();
+                        GfVec3d viewHit = worldToView.Transform(worldHit);
+                        depth = static_cast<float>(-viewHit[2]);
                     } else {
                         GfVec3f dir = GfVec3f(ray.GetDirection());
                         float len = dir.GetLength();
@@ -60,15 +71,18 @@ void SpectralIntegrator::RenderFrame(
                         color = _SkyColor(dir);
                     }
 
-                    float* px = pixels + (imageY * W + imageX) * 4;
+                    float* px = pixels + pixIdx * 4;
                     px[0] = color[0];
                     px[1] = color[1];
                     px[2] = color[2];
                     px[3] = 1.0f;
 
+                    if (depthOut) depthOut[pixIdx] = depth;
+
                 } else {
                     // ---- SPP>1: hero wavelength spectral mode ----
                     float X = 0.f, Y = 0.f, Z = 0.f;
+                    float minDepth = 1e30f;
 
                     for (int s = 0; s < spp; ++s) {
                         unsigned int seed = (imageY * W + imageX) * 1031 + s * 6571;
@@ -76,7 +90,6 @@ void SpectralIntegrator::RenderFrame(
                         float jx = _Hash(seed);
                         float jy = _Hash(seed + 1);
 
-                        // Stratified wavelength sampling
                         float wu = (float(s) + _Hash(seed + 2)) / float(spp);
                         float lambda = SpectralSpectrum::SampleWavelength(wu);
 
@@ -90,6 +103,11 @@ void SpectralIntegrator::RenderFrame(
                                 static_cast<double>(hit.u),
                                 static_cast<double>(hit.v),
                                 lambda);
+                            // Camera-space Z for this sample
+                            GfVec3d worldHit = ray.GetStartPoint() + hit.t * ray.GetDirection();
+                            GfVec3d viewHit = worldToView.Transform(worldHit);
+                            float camZ = static_cast<float>(-viewHit[2]);
+                            if (camZ < minDepth) minDepth = camZ;
                         } else {
                             GfVec3f dir = GfVec3f(ray.GetDirection());
                             float len = dir.GetLength();
@@ -107,11 +125,13 @@ void SpectralIntegrator::RenderFrame(
                     GfVec3f rgb = SpectralSpectrum::XYZtoLinearRGB(
                         X * invSpp, Y * invSpp, Z * invSpp);
 
-                    float* px = pixels + (imageY * W + imageX) * 4;
+                    float* px = pixels + pixIdx * 4;
                     px[0] = std::max(0.f, rgb[0]);
                     px[1] = std::max(0.f, rgb[1]);
                     px[2] = std::max(0.f, rgb[2]);
                     px[3] = 1.0f;
+
+                    if (depthOut) depthOut[pixIdx] = minDepth;
                 }
             }
         });
@@ -190,6 +210,7 @@ GfRay SpectralIntegrator::_MakeRay(
     unsigned int px, unsigned int py,
     float jitterX, float jitterY)
 {
+    // Simple NDC mapping — aspect correction is baked into projInverse
     const double ndcX =  2.0 * (px + jitterX) / cam.imageWidth  - 1.0;
     const double ndcY = -2.0 * (py + jitterY) / cam.imageHeight + 1.0;
 

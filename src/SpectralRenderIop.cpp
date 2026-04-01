@@ -29,6 +29,10 @@
 
 // DDImage
 #include <DDImage/Channel.h>
+#include <DDImage/CameraOp.h>
+#include <DDImage/Black.h>
+#include <DDImage/DeepPlane.h>
+#include <DDImage/DeepInfo.h>
 
 #include <cmath>
 #include <cstdio>
@@ -62,9 +66,14 @@ const char* SpectralRenderIop::node_help() const
 {
     return
         "SpectralRender — physically-based spectral path tracer.\n\n"
-        "Input 0 (optional): Connect any USD GeomOp\n"
+        "Input 0 (Scene): Connect any USD GeomOp\n"
         "(GeoCube, GeoSphere, GeoImport, etc.)\n\n"
-        "If no input is connected, set the 'USD file' knob\n"
+        "Input 1 (Cam): Connect a Camera node.\n"
+        "If not connected, uses first camera found in the USD stage,\n"
+        "or a default 50mm perspective.\n\n"
+        "Input 2 (BG): Connect any 2D image. Its format sets the\n"
+        "output resolution. The BG image is rendered behind the scene.\n\n"
+        "If no scene input is connected, set the 'USD file' knob\n"
         "to a .usd/.usda/.usdc file path instead.\n\n"
         "For interactive viewport, use the Hydra delegate\n"
         "(\"Spectral (CPU)\" in the renderer dropdown).";
@@ -75,18 +84,44 @@ const char* SpectralRenderIop::node_help() const
 // ---------------------------------------------------------------------------
 const char* SpectralRenderIop::input_label(int idx, char*) const
 {
-    if (idx == 0) return "Scene";
-    return "";
+    switch (idx) {
+        case 0: return "Scene";
+        case 1: return "Cam";
+        case 2: return "BG";
+        default: return "";
+    }
 }
 
 bool SpectralRenderIop::test_input(int idx, Op* op) const
 {
-    if (idx != 0) return false;
-    if (!op) return true;  // allow disconnection
+    if (!op) return true;  // allow disconnection on any input
 
-    // Accept any Op that implements GeometryProviderI
-    GeometryProviderI* geoProvider = dynamic_cast<GeometryProviderI*>(op);
-    return (geoProvider != nullptr);
+    switch (idx) {
+        case 0: {
+            // Accept any Op that implements GeometryProviderI
+            GeometryProviderI* gp = dynamic_cast<GeometryProviderI*>(op);
+            return (gp != nullptr);
+        }
+        case 1: {
+            // Accept CameraOp (covers both classic and CameraSceneOp)
+            return dynamic_cast<CameraOp*>(op) != nullptr;
+        }
+        case 2: {
+            // Accept any Iop for background
+            return dynamic_cast<Iop*>(op) != nullptr;
+        }
+        default:
+            return false;
+    }
+}
+
+Op* SpectralRenderIop::default_input(int idx) const
+{
+    // Input 2 (BG): provide a Black node as default so Nuke
+    // doesn't complain about unconnected Iop inputs.
+    // Inputs 0 and 1 are optional — return null.
+    if (idx == 2) return Iop::default_input(0);
+    return nullptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -122,7 +157,29 @@ int SpectralRenderIop::knob_changed(Knob* k)
 // ---------------------------------------------------------------------------
 void SpectralRenderIop::_validate(bool forReal)
 {
-    const Format* fmtPtr = _outputFormat.format();
+    // ------------------------------------------------------------------
+    // Determine output format:
+    //   Priority: BG input format > format knob > fallback
+    // ------------------------------------------------------------------
+    const Format* fmtPtr = nullptr;
+
+    // Try BG input (input 2) first
+    Op* bgOp = (inputs() > 2) ? input(2) : nullptr;
+    Iop* bgIop = bgOp ? dynamic_cast<Iop*>(bgOp) : nullptr;
+    if (bgIop) {
+        try {
+            bgIop->validate(forReal);
+            fmtPtr = &(bgIop->info().format());
+        } catch (...) {
+            bgIop = nullptr;
+        }
+    }
+
+    // Fall back to format knob
+    if (!fmtPtr) {
+        fmtPtr = _outputFormat.format();
+    }
+
     if (!fmtPtr) {
         info_.channels(Mask_RGBA);
         return;
@@ -136,14 +193,28 @@ void SpectralRenderIop::_validate(bool forReal)
 
     if (forReal) {
         _LoadStage();
+        _BuildCameraFromInput();
         _frameReady.store(false);
+    }
+
+    // Deep output info: construct from flat IopInfo, which copies format/bbox/channels.
+    // The IopInfo-based DeepInfo constructor handles everything.
+    _deepInfo = DeepInfo(info_);
+}
+
+void SpectralRenderIop::_request(int x, int y, int r, int t,
+                                  ChannelMask channels, int count)
+{
+    // Request BG input pixels if connected
+    Op* bgOp = (inputs() > 2) ? input(2) : nullptr;
+    Iop* bgIop = bgOp ? dynamic_cast<Iop*>(bgOp) : nullptr;
+    if (bgIop) {
+        bgIop->request(x, y, r, t, channels, count);
     }
 }
 
-void SpectralRenderIop::_request(int, int, int, int, ChannelMask, int) {}
-
 // ---------------------------------------------------------------------------
-// engine
+// engine — render pixels, composite BG behind
 // ---------------------------------------------------------------------------
 void SpectralRenderIop::engine(
     int y, int x, int r, ChannelMask channels, Row& row)
@@ -154,24 +225,75 @@ void SpectralRenderIop::engine(
     const int H = static_cast<int>(_fbHeight);
     int bufY = H - 1 - y;
 
+    // Get BG pixels if available
+    Row bgRow(x, r);
+    Op* bgOp = (inputs() > 2) ? input(2) : nullptr;
+    Iop* bgIop = bgOp ? dynamic_cast<Iop*>(bgOp) : nullptr;
+    bool hasBG = false;
+    if (bgIop) {
+        bgIop->get(y, x, r, channels, bgRow);
+        hasBG = true;
+    }
+
     if (bufY < 0 || bufY >= H || _frameBuffer.empty()) {
-        row.erase(channels);
+        // Outside render area — pass through BG or black
+        if (hasBG) {
+            foreach(z, channels) {
+                const float* bgPtr = bgRow[z] + x;
+                float* out = row.writable(z) + x;
+                for (int px = x; px < r; ++px)
+                    *out++ = *bgPtr++;
+            }
+        } else {
+            row.erase(channels);
+        }
         return;
     }
 
     const float* srcRow = _frameBuffer.data() + bufY * W * 4;
 
-    auto copyChannel = [&](Channel ch, int comp) {
+    // Composite: render over BG using render alpha
+    auto compositeChannel = [&](Channel ch, int comp) {
         if (!(channels & ch)) return;
         float* out = row.writable(ch);
-        for (int px = x; px < r; ++px)
-            out[px] = (px >= 0 && px < W) ? srcRow[px * 4 + comp] : 0.f;
+        const float* bgPtr = hasBG ? bgRow[ch] + x : nullptr;
+
+        for (int px = x; px < r; ++px) {
+            float fg = 0.f, fgA = 0.f;
+            if (px >= 0 && px < W) {
+                fg  = srcRow[px * 4 + comp];
+                fgA = srcRow[px * 4 + 3];
+            }
+
+            if (bgPtr) {
+                // Standard "over" composite: fg + bg * (1 - fgA)
+                float bg = bgPtr[px - x];
+                out[px] = fg + bg * (1.f - fgA);
+            } else {
+                out[px] = fg;
+            }
+        }
     };
 
-    copyChannel(Chan_Red,   0);
-    copyChannel(Chan_Green, 1);
-    copyChannel(Chan_Blue,  2);
-    copyChannel(Chan_Alpha, 3);
+    compositeChannel(Chan_Red,   0);
+    compositeChannel(Chan_Green, 1);
+    compositeChannel(Chan_Blue,  2);
+
+    // Alpha: render alpha over BG alpha
+    if (channels & Chan_Alpha) {
+        float* out = row.writable(Chan_Alpha);
+        const float* bgPtr = hasBG ? bgRow[Chan_Alpha] + x : nullptr;
+
+        for (int px = x; px < r; ++px) {
+            float fgA = (px >= 0 && px < W) ? srcRow[px * 4 + 3] : 0.f;
+            if (bgPtr) {
+                float bgA = bgPtr[px - x];
+                out[px] = fgA + bgA * (1.f - fgA);
+            } else {
+                out[px] = fgA;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -499,9 +621,9 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
             meshCount, totalTris);
 
     // ------------------------------------------------------------------
-    // Build camera
+    // Build camera from USD stage (may be overridden by _BuildCameraFromInput)
     // ------------------------------------------------------------------
-    const Format* fmtPtr = _outputFormat.format();
+    const Format* fmtPtr = &(info_.format());
     unsigned int W = 1920, H = 1080;
     if (fmtPtr) {
         W = static_cast<unsigned int>(fmtPtr->width());
@@ -512,7 +634,11 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
 
     _camera.imageWidth  = W;
     _camera.imageHeight = H;
+    _camera.pixelAspect = fmtPtr ? fmtPtr->pixel_aspect() : 1.0;
     const double aspect = double(W) / double(H);
+
+    fprintf(stderr, "SpectralRender: format %dx%d pixel_aspect=%.4f\n",
+            W, H, _camera.pixelAspect);
 
     bool foundCamera = false;
     if (cameraPrim.IsValid()) {
@@ -551,6 +677,74 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
 }
 
 // ---------------------------------------------------------------------------
+// _BuildCameraFromInput — override camera from input 1 (CameraOp) if connected
+// ---------------------------------------------------------------------------
+void SpectralRenderIop::_BuildCameraFromInput()
+{
+    _cameraFromInput = false;
+
+    Op* camOp = (inputs() > 1) ? input(1) : nullptr;
+    if (!camOp) return;
+
+    CameraOp* cam = dynamic_cast<CameraOp*>(camOp);
+    if (!cam) return;
+
+    try {
+        cam->validate(true);
+    } catch (...) {
+        fprintf(stderr, "SpectralRender: camera input validation failed\n");
+        return;
+    }
+
+    // Get image dimensions from info_ (already set by _validate from BG or format knob)
+    const Format* fmtPtr = &(info_.format());
+    unsigned int W = fmtPtr ? static_cast<unsigned int>(fmtPtr->width())  : 1920;
+    unsigned int H = fmtPtr ? static_cast<unsigned int>(fmtPtr->height()) : 1080;
+    if (W == 0) W = 1920;
+    if (H == 0) H = 1080;
+    const double aspect = double(W) / double(H);
+
+    _camera.imageWidth  = W;
+    _camera.imageHeight = H;
+    _camera.pixelAspect = fmtPtr ? fmtPtr->pixel_aspect() : 1.0;
+    // DDImage uses row-vector convention (v * M), PXR uses column-vector (M * v).
+    // Must TRANSPOSE when converting DDImage → PXR.
+    const DD::Image::Matrix4& cw = cam->matrix();
+    _camera.viewToWorld = GfMatrix4d(
+        cw[0][0], cw[1][0], cw[2][0], cw[3][0],
+        cw[0][1], cw[1][1], cw[2][1], cw[3][1],
+        cw[0][2], cw[1][2], cw[2][2], cw[3][2],
+        cw[0][3], cw[1][3], cw[2][3], cw[3][3]
+    );
+
+    // Projection matrix — transpose DDImage row-vector → PXR column-vector.
+    // DDImage's projection is square (proj[0][0] == proj[1][1]) — it only
+    // encodes haperture. We must scale [1][1] by the image aspect ratio
+    // so the vertical FOV matches the image height.
+    const DD::Image::Matrix4& pr = cam->projection();
+    GfMatrix4d pxrProj(
+        pr[0][0], pr[1][0], pr[2][0], pr[3][0],
+        pr[0][1], pr[1][1], pr[2][1], pr[3][1],
+        pr[0][2], pr[1][2], pr[2][2], pr[3][2],
+        pr[0][3], pr[1][3], pr[2][3], pr[3][3]
+    );
+
+    // Scale vertical projection by image aspect to correct for non-square image
+    const double imageAspect = (double(W) * _camera.pixelAspect) / double(H);
+    pxrProj[1][1] *= imageAspect;
+
+    _camera.projInverse = pxrProj.GetInverse();
+
+    _cameraFromInput = true;
+
+    GfVec3d camPos = _camera.viewToWorld.ExtractTranslation();
+    fprintf(stderr, "SpectralRender: camera from input at (%.2f, %.2f, %.2f)\n",
+            camPos[0], camPos[1], camPos[2]);
+    fprintf(stderr, "SpectralRender: DDImage proj[0][0]=%.4f [1][1]=%.4f → corrected [1][1]=%.4f (aspect=%.4f)\n",
+            pr[0][0], pr[1][1], pxrProj[1][1], imageAspect);
+}
+
+// ---------------------------------------------------------------------------
 // _EnsureFrameRendered
 // ---------------------------------------------------------------------------
 void SpectralRenderIop::_EnsureFrameRendered()
@@ -559,7 +753,8 @@ void SpectralRenderIop::_EnsureFrameRendered()
     std::lock_guard<std::mutex> lock(_renderMutex);
     if (_frameReady.load()) return;
 
-    const Format* fmtPtr = _outputFormat.format();
+    // Use the format from info_ (set by _validate from BG or format knob)
+    const Format* fmtPtr = &(info_.format());
     if (!fmtPtr) { _frameReady.store(true); return; }
     const unsigned int W = static_cast<unsigned int>(fmtPtr->width());
     const unsigned int H = static_cast<unsigned int>(fmtPtr->height());
@@ -568,17 +763,100 @@ void SpectralRenderIop::_EnsureFrameRendered()
     _fbWidth  = W;
     _fbHeight = H;
     _frameBuffer.assign(size_t(W) * H * 4, 0.f);
+    _depthBuffer.assign(size_t(W) * H, 1e30f);
 
     SpectralCamera cam = _camera;
     cam.imageWidth  = W;
     cam.imageHeight = H;
+    cam.pixelAspect = fmtPtr->pixel_aspect();
 
-    fprintf(stderr, "SpectralRender: rendering %dx%d, %zu triangles, %d spp%s\n",
-            W, H, _scene->TotalTriangles(), _samples,
+    // Diagnostic: show the values that _MakeRay will use for aspect correction
+    double screenAspect = (W * cam.pixelAspect) / double(H);
+    double projAspectInv = std::abs(cam.projInverse[0][0] / cam.projInverse[1][1]);
+    fprintf(stderr, "SpectralRender: rendering %dx%d pa=%.4f screenAspect=%.4f projAspect=%.4f correction=%.4f\n",
+            W, H, cam.pixelAspect, screenAspect, projAspectInv,
+            projAspectInv > 1e-6 ? screenAspect / projAspectInv : 1.0);
+    fprintf(stderr, "SpectralRender: projInverse diag: [%.4f, %.4f, %.4f, %.4f]\n",
+            cam.projInverse[0][0], cam.projInverse[1][1], cam.projInverse[2][2], cam.projInverse[3][3]);
+    fprintf(stderr, "SpectralRender: %zu triangles, %d spp%s\n",
+            _scene->TotalTriangles(), _samples,
             _samples > 1 ? " (spectral)" : " (normal-as-colour)");
 
-    SpectralIntegrator::RenderFrame(*_scene, cam, _frameBuffer.data(), _samples);
+    SpectralIntegrator::RenderFrame(*_scene, cam, _frameBuffer.data(), _samples,
+                                     _depthBuffer.data());
     _frameReady.store(true);
 
     fprintf(stderr, "SpectralRender: render complete\n");
+}
+
+// ---------------------------------------------------------------------------
+// DeepOp interface
+// ---------------------------------------------------------------------------
+void SpectralRenderIop::getDeepRequests(DD::Image::Box /*box*/,
+                                         const DD::Image::ChannelSet& /*channels*/,
+                                         int /*count*/,
+                                         std::vector<RequestData>& /*reqData*/)
+{
+    // No deep inputs to request from — we generate all data ourselves.
+}
+
+bool SpectralRenderIop::doDeepEngine(DD::Image::Box box,
+                                      const DD::Image::ChannelSet& channels,
+                                      DeepOutputPlane& plane)
+{
+    _EnsureFrameRendered();
+
+    const int W = static_cast<int>(_fbWidth);
+    const int H = static_cast<int>(_fbHeight);
+
+    if (_frameBuffer.empty() || _depthBuffer.empty() || W == 0 || H == 0)
+        return true;  // empty plane
+
+    // Create the output plane with requested channels
+    DD::Image::ChannelSet outChans = channels;
+    outChans += Chan_DeepFront;
+    outChans += Chan_DeepBack;
+
+    plane = DeepOutputPlane(outChans, box, DeepPixel::eZAscending);
+
+    const int nChans = outChans.size();
+
+    for (DD::Image::Box::iterator it = box.begin(); it != box.end(); ++it) {
+        const int px = it.x;
+        const int py = it.y;
+
+        // Flip Y: Nuke bottom-up, our buffer top-down
+        const int bufY = H - 1 - py;
+
+        if (px < 0 || px >= W || bufY < 0 || bufY >= H) {
+            plane.addHole();
+            continue;
+        }
+
+        const size_t pixIdx = static_cast<size_t>(bufY) * W + px;
+        const float depth = _depthBuffer[pixIdx];
+
+        // No hit = no deep sample (sky pixels)
+        if (depth >= 1e29f) {
+            plane.addHole();
+            continue;
+        }
+
+        const float* rgba = _frameBuffer.data() + pixIdx * 4;
+
+        // One deep sample per pixel
+        DeepOutPixel op(nChans);
+        foreach(z, outChans) {
+            if      (z == Chan_DeepFront) op.push_back(depth);
+            else if (z == Chan_DeepBack)  op.push_back(depth + 0.001f);
+            else if (z == Chan_Red)       op.push_back(rgba[0]);
+            else if (z == Chan_Green)     op.push_back(rgba[1]);
+            else if (z == Chan_Blue)      op.push_back(rgba[2]);
+            else if (z == Chan_Alpha)     op.push_back(rgba[3]);
+            else                          op.push_back(0.f);
+        }
+        plane.addPixel(op);
+    }
+
+    return true;
 }
