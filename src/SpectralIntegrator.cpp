@@ -611,28 +611,26 @@ void SpectralIntegrator::RenderFrameGPU(
     const SpectralCamera& camera,
     float*                pixels,
     int                   spp,
-    float*                depthOut)
+    float*                depthOut,
+    int                   maxBounces)
 {
     SpectralGPU* gpu = _GetGPU();
     if (!gpu) {
-        // Fallback to CPU
         fprintf(stderr, "SpectralIntegrator: GPU unavailable, using CPU\n");
-        RenderFrame(scene, camera, pixels, spp, depthOut);
+        RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces);
         return;
     }
 
-    // Build acceleration structure
     if (!gpu->BuildAccel(scene)) {
         fprintf(stderr, "SpectralIntegrator: GPU accel build failed, using CPU\n");
-        RenderFrame(scene, camera, pixels, spp, depthOut);
+        RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces);
         return;
     }
 
-    // Launch GPU render
     if (!gpu->Render(camera, camera.imageWidth, camera.imageHeight,
-                     pixels, depthOut, spp)) {
+                     pixels, depthOut, spp, maxBounces)) {
         fprintf(stderr, "SpectralIntegrator: GPU render failed, using CPU\n");
-        RenderFrame(scene, camera, pixels, spp, depthOut);
+        RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces);
         return;
     }
 

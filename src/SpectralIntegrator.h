@@ -104,7 +104,8 @@ public:
         const SpectralCamera& camera,
         float* pixels,
         int spp = 1,
-        float* depthOut = nullptr);
+        float* depthOut = nullptr,
+        int maxBounces = 4);
 
     /// Check if GPU rendering is available.
     static bool IsGPUAvailable();

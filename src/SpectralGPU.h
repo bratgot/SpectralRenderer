@@ -63,7 +63,7 @@ public:
     bool Render(const SpectralCamera& camera,
                 unsigned int width, unsigned int height,
                 float* pixels, float* depth = nullptr,
-                int spp = 1);
+                int spp = 1, int maxBounces = 4);
 
     /// Release all GPU resources.
     void Cleanup();
@@ -102,6 +102,7 @@ private:
     CUdeviceptr            _d_normals      = 0;
     CUdeviceptr            _d_materialIds  = 0;
     CUdeviceptr            _d_materials    = 0;
+    CUdeviceptr            _d_lights       = 0;
     CUdeviceptr            _d_params       = 0;
 
     // Current allocation sizes
@@ -109,6 +110,7 @@ private:
     unsigned int           _allocH = 0;
     unsigned int           _triCount = 0;
     unsigned int           _materialCount = 0;
+    unsigned int           _lightCount = 0;
 
     void _FreeAccel();
     void _FreeBuffers();

@@ -945,7 +945,7 @@ void SpectralRenderIop::_EnsureFrameRendered()
 #ifdef SPECTRAL_HAS_OPTIX
     if (useGPU) {
         SpectralIntegrator::RenderFrameGPU(*_scene, cam, _frameBuffer.data(),
-                                            _samples, _depthBuffer.data());
+                                            _samples, _depthBuffer.data(), _maxBounces);
     } else
 #endif
     {

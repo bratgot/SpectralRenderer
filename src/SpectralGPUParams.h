@@ -20,7 +20,7 @@
 
 namespace spectral_gpu {
 
-// GPU-side material — plain data, no pointers to host objects
+// GPU-side material
 struct GPUMaterial {
     float3 baseColor;
     float  metallic;
@@ -30,36 +30,44 @@ struct GPUMaterial {
     float3 emissiveColor;
 };
 
+// GPU-side light
+struct GPULight {
+    int    type;          // 0=distant, 1=sphere, 2=rect, 3=dome
+    float3 position;
+    float3 direction;
+    float3 color;
+    float  intensity;     // effective intensity (intensity * 2^exposure)
+    float  colorTemperature;
+    int    useColorTemp;  // 0=RGB, 1=blackbody
+    float  radius;
+};
+
 struct CameraParams {
-    // Full matrices — same ray generation as CPU _MakeRay
-    float projInverse[16];   // 4x4 column-major
-    float viewToWorld[16];   // 4x4 column-major
+    float projInverse[16];
+    float viewToWorld[16];
 };
 
 struct LaunchParams {
-    // Output
     float4*            framebuffer;
     float*             depthbuffer;
     unsigned int       width;
     unsigned int       height;
 
-    // Camera
     CameraParams       camera;
-
-    // Scene (OptiX traversable)
     OptixTraversableHandle traversable;
 
-    // Render settings
     int                spp;
+    int                maxBounces;
 
-    // Triangle data for shading (device pointers)
-    float3*            normals;       // 3 normals per triangle (n0, n1, n2)
-    int*               materialIds;   // 1 per triangle
+    float3*            normals;
+    int*               materialIds;
     unsigned int       triCount;
 
-    // Material table
     GPUMaterial*       materials;
     unsigned int       materialCount;
+
+    GPULight*          lights;
+    unsigned int       lightCount;
 };
 
 // Per-ray payload — carried through the trace

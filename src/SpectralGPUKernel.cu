@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
-// SpectralGPUKernel.cu — OptiX 8.1 spectral path tracer with Disney BSDF
-//   Ray generation matches CPU _MakeRay exactly (projInverse + viewToWorld)
+// SpectralGPUKernel.cu — Full feature parity with CPU path
+//   Explicit lights, shadow rays, bounce rays, Disney BSDF
 // ---------------------------------------------------------------------------
 
 #include <optix_device.h>
@@ -11,6 +11,9 @@ using namespace spectral_gpu;
 
 extern "C" { __constant__ LaunchParams params; }
 
+// ---------------------------------------------------------------------------
+// RNG
+// ---------------------------------------------------------------------------
 static __forceinline__ __device__ float hashRNG(unsigned int seed)
 {
     seed = (seed ^ 61u) ^ (seed >> 16u);
@@ -22,7 +25,7 @@ static __forceinline__ __device__ float hashRNG(unsigned int seed)
 }
 
 // ---------------------------------------------------------------------------
-// Matrix multiply: 4x4 * vec4, row-major storage [row*4+col]
+// Matrix math — matches CPU _MakeRay
 // ---------------------------------------------------------------------------
 static __forceinline__ __device__ void mat4mulv4(
     const float* m, float x, float y, float z, float w,
@@ -34,7 +37,6 @@ static __forceinline__ __device__ void mat4mulv4(
     ow = m[12]*x + m[13]*y + m[14]*z + m[15]*w;
 }
 
-// Transform point by 4x4 (perspective divide)
 static __forceinline__ __device__ float3 transformPoint(const float* m, float3 p)
 {
     float ox, oy, oz, ow;
@@ -43,33 +45,42 @@ static __forceinline__ __device__ float3 transformPoint(const float* m, float3 p
     return make_float3(ox, oy, oz);
 }
 
-// ---------------------------------------------------------------------------
-// Generate camera ray — matches CPU _MakeRay exactly
-// ---------------------------------------------------------------------------
 static __forceinline__ __device__ void makeRay(
-    float px, float py, float W, float H,
-    float3& origin, float3& dir)
+    float px, float py, float W, float H, float3& origin, float3& dir)
 {
-    float ndcX =  2.f * px / W - 1.f;
+    float ndcX = 2.f * px / W - 1.f;
     float ndcY = -2.f * py / H + 1.f;
-
-    // NDC -> view space via projInverse
-    float nx0, ny0, nz0, nw0;
-    mat4mulv4(params.camera.projInverse, ndcX, ndcY, -1.f, 1.f, nx0, ny0, nz0, nw0);
-    float nx1, ny1, nz1, nw1;
-    mat4mulv4(params.camera.projInverse, ndcX, ndcY,  1.f, 1.f, nx1, ny1, nz1, nw1);
-
-    // Perspective divide
+    float nx0,ny0,nz0,nw0; mat4mulv4(params.camera.projInverse, ndcX,ndcY,-1.f,1.f, nx0,ny0,nz0,nw0);
+    float nx1,ny1,nz1,nw1; mat4mulv4(params.camera.projInverse, ndcX,ndcY, 1.f,1.f, nx1,ny1,nz1,nw1);
     float3 nearPos = make_float3(nx0/nw0, ny0/nw0, nz0/nw0);
     float3 farPos  = make_float3(nx1/nw1, ny1/nw1, nz1/nw1);
-
-    // View -> world
     float3 worldNear = transformPoint(params.camera.viewToWorld, nearPos);
     float3 worldFar  = transformPoint(params.camera.viewToWorld, farPos);
-
     origin = worldNear;
-    dir = make_float3(worldFar.x - worldNear.x, worldFar.y - worldNear.y, worldFar.z - worldNear.z);
+    dir = make_float3(worldFar.x-worldNear.x, worldFar.y-worldNear.y, worldFar.z-worldNear.z);
 }
+
+// ---------------------------------------------------------------------------
+// Vector helpers
+// ---------------------------------------------------------------------------
+static __forceinline__ __device__ float dot3(float3 a, float3 b)
+{ return fmaxf(0.f, a.x*b.x + a.y*b.y + a.z*b.z); }
+
+static __forceinline__ __device__ float dot3raw(float3 a, float3 b)
+{ return a.x*b.x + a.y*b.y + a.z*b.z; }
+
+static __forceinline__ __device__ float3 normalize3(float3 v)
+{
+    float len = sqrtf(v.x*v.x + v.y*v.y + v.z*v.z);
+    if (len > 1e-8f) { v.x/=len; v.y/=len; v.z/=len; }
+    return v;
+}
+
+static __forceinline__ __device__ float3 neg3(float3 v)
+{ return make_float3(-v.x, -v.y, -v.z); }
+
+static __forceinline__ __device__ float len3(float3 v)
+{ return sqrtf(v.x*v.x + v.y*v.y + v.z*v.z); }
 
 // ---------------------------------------------------------------------------
 // CIE tables
@@ -83,8 +94,7 @@ __device__ static const float kCIE_X[81] = {
     0.6424f,0.5419f,0.4479f,0.3608f,0.2835f,0.2187f,0.1649f,0.1212f,0.0874f,0.0636f,
     0.0468f,0.0329f,0.0227f,0.0158f,0.0114f,0.0081f,0.0058f,0.0041f,0.0029f,0.0020f,
     0.0014f,0.0010f,0.0007f,0.0005f,0.0003f,0.0002f,0.0002f,0.0001f,0.0001f,0.0001f,
-    0.0000f
-};
+    0.0000f};
 __device__ static const float kCIE_Y[81] = {
     0.0000f,0.0001f,0.0001f,0.0002f,0.0004f,0.0006f,0.0012f,0.0022f,0.0040f,0.0073f,
     0.0116f,0.0168f,0.0230f,0.0298f,0.0380f,0.0480f,0.0600f,0.0739f,0.0910f,0.1126f,
@@ -94,8 +104,7 @@ __device__ static const float kCIE_Y[81] = {
     0.2650f,0.2170f,0.1750f,0.1382f,0.1070f,0.0816f,0.0610f,0.0446f,0.0320f,0.0232f,
     0.0170f,0.0119f,0.0082f,0.0057f,0.0041f,0.0029f,0.0021f,0.0015f,0.0010f,0.0007f,
     0.0005f,0.0004f,0.0003f,0.0002f,0.0001f,0.0001f,0.0001f,0.0000f,0.0000f,0.0000f,
-    0.0000f
-};
+    0.0000f};
 __device__ static const float kCIE_Z[81] = {
     0.0065f,0.0105f,0.0201f,0.0362f,0.0679f,0.1102f,0.2074f,0.3713f,0.6456f,1.0391f,
     1.3856f,1.6230f,1.7471f,1.7826f,1.7721f,1.7441f,1.6692f,1.5281f,1.2876f,1.0419f,
@@ -105,122 +114,156 @@ __device__ static const float kCIE_Z[81] = {
     0.0000f,0.0000f,0.0000f,0.0000f,0.0000f,0.0000f,0.0000f,0.0000f,0.0000f,0.0000f,
     0.0000f,0.0000f,0.0000f,0.0000f,0.0000f,0.0000f,0.0000f,0.0000f,0.0000f,0.0000f,
     0.0000f,0.0000f,0.0000f,0.0000f,0.0000f,0.0000f,0.0000f,0.0000f,0.0000f,0.0000f,
-    0.0000f
-};
+    0.0000f};
 
 static __forceinline__ __device__ void cieXYZ(float lambda, float& cx, float& cy, float& cz)
 {
-    if (lambda < 380.f || lambda > 780.f) { cx = cy = cz = 0.f; return; }
-    float t = (lambda - 380.f) / 5.f;
-    int i = min(int(t), 79);
-    float frac = t - float(i);
-    cx = kCIE_X[i]*(1.f-frac) + kCIE_X[i+1]*frac;
-    cy = kCIE_Y[i]*(1.f-frac) + kCIE_Y[i+1]*frac;
-    cz = kCIE_Z[i]*(1.f-frac) + kCIE_Z[i+1]*frac;
+    if (lambda < 380.f || lambda > 780.f) { cx=cy=cz=0.f; return; }
+    float t = (lambda-380.f)/5.f; int i = min(int(t),79); float f = t-float(i);
+    cx = kCIE_X[i]*(1.f-f)+kCIE_X[i+1]*f;
+    cy = kCIE_Y[i]*(1.f-f)+kCIE_Y[i+1]*f;
+    cz = kCIE_Z[i]*(1.f-f)+kCIE_Z[i+1]*f;
 }
 
 // ---------------------------------------------------------------------------
 // Spectral helpers
 // ---------------------------------------------------------------------------
-static __forceinline__ __device__ float spectralGauss(float l, float center, float sigma)
-{
-    float t = (l - center) / sigma;
-    return expf(-0.5f * t * t);
-}
+static __forceinline__ __device__ float spectralGauss(float l, float c, float s)
+{ float t=(l-c)/s; return expf(-0.5f*t*t); }
 
-static __forceinline__ __device__ float spectralReflectance(const GPUMaterial& mat, float lambda)
+static __forceinline__ __device__ float spectralReflectance(const GPUMaterial& m, float l)
 {
-    float r = mat.baseColor.x * spectralGauss(lambda, 630.f, 30.f)
-            + mat.baseColor.y * spectralGauss(lambda, 532.f, 30.f)
-            + mat.baseColor.z * spectralGauss(lambda, 460.f, 25.f);
+    float r = m.baseColor.x*spectralGauss(l,630.f,30.f)
+            + m.baseColor.y*spectralGauss(l,532.f,30.f)
+            + m.baseColor.z*spectralGauss(l,460.f,25.f);
     return fmaxf(0.f, fminf(1.f, r));
 }
 
 static __forceinline__ __device__ float skySpectral(float3 dir, float lambda)
 {
-    float len = sqrtf(dir.x*dir.x + dir.y*dir.y + dir.z*dir.z);
-    if (len > 1e-6f) { dir.x/=len; dir.y/=len; dir.z/=len; }
+    dir = normalize3(dir);
     float t = fmaxf(0.f, fminf(1.f, dir.y*0.5f+0.5f));
     float scatter = 1.f;
-    if (lambda > 400.f) { float ratio = 460.f/lambda; scatter = ratio*ratio*ratio*ratio; }
-    return 0.7f + (0.4f*scatter - 0.7f) * t;
+    if (lambda > 400.f) { float ratio=460.f/lambda; scatter=ratio*ratio*ratio*ratio; }
+    return 0.7f + (0.4f*scatter - 0.7f)*t;
 }
 
 static __forceinline__ __device__ float3 skyColor(float3 dir)
 {
-    float len = sqrtf(dir.x*dir.x + dir.y*dir.y + dir.z*dir.z);
-    if (len > 1e-6f) { dir.x/=len; dir.y/=len; dir.z/=len; }
+    dir = normalize3(dir);
     float t = fmaxf(0.f, fminf(1.f, dir.y*0.5f+0.5f));
     return make_float3(0.72f+(0.35f-0.72f)*t, 0.70f+(0.55f-0.70f)*t, 0.68f+(0.82f-0.68f)*t);
 }
 
 static __forceinline__ __device__ float3 shadeNormal(float3 n)
 {
-    float len = sqrtf(n.x*n.x + n.y*n.y + n.z*n.z);
-    if (len > 1e-6f) { n.x/=len; n.y/=len; n.z/=len; }
+    n = normalize3(n);
     return make_float3(n.x*0.5f+0.5f, n.y*0.5f+0.5f, n.z*0.5f+0.5f);
 }
 
 // ---------------------------------------------------------------------------
-// GPU Disney BSDF
+// Light emission
 // ---------------------------------------------------------------------------
-static __forceinline__ __device__ float dot3(float3 a, float3 b)
-{ return fmaxf(0.f, a.x*b.x + a.y*b.y + a.z*b.z); }
-
-static __forceinline__ __device__ float3 normalize3(float3 v)
+static __forceinline__ __device__ float blackbodyNorm(float lambda_nm, float temp)
 {
-    float len = sqrtf(v.x*v.x + v.y*v.y + v.z*v.z);
-    if (len > 1e-8f) { v.x/=len; v.y/=len; v.z/=len; }
-    return v;
+    if (temp < 100.f) return 0.f;
+    double lm = lambda_nm * 1e-9;
+    double h=6.62607015e-34, c=2.99792458e8, k=1.380649e-23;
+    double x = (h*c)/(lm*k*temp);
+    if (x > 500.0) return 0.f;
+    double B = (2.0*h*c*c)/(lm*lm*lm*lm*lm) / (exp(x)-1.0);
+    double peakL = 2.898e-3/temp;
+    double xp = (h*c)/(peakL*k*temp);
+    double Bp = (2.0*h*c*c)/(peakL*peakL*peakL*peakL*peakL) / (exp(xp)-1.0);
+    return Bp > 0.0 ? float(B/Bp) : 0.f;
 }
 
-static __forceinline__ __device__ float schlickWeight(float c)
+static __forceinline__ __device__ float lightEmission(const GPULight& light, float lambda)
+{
+    float spectrum;
+    if (light.useColorTemp) {
+        spectrum = blackbodyNorm(lambda, light.colorTemperature);
+    } else {
+        spectrum = light.color.x*spectralGauss(lambda,630.f,30.f)
+                 + light.color.y*spectralGauss(lambda,532.f,30.f)
+                 + light.color.z*spectralGauss(lambda,460.f,25.f);
+    }
+    return spectrum * light.intensity;
+}
+
+static __forceinline__ __device__ float3 lightDirection(const GPULight& light, float3 hitPos)
+{
+    if (light.type == 0 || light.type == 3) // distant or dome
+        return normalize3(neg3(light.direction));
+    float3 d = make_float3(light.position.x-hitPos.x, light.position.y-hitPos.y, light.position.z-hitPos.z);
+    return normalize3(d);
+}
+
+static __forceinline__ __device__ float lightAttenuation(const GPULight& light, float3 hitPos)
+{
+    if (light.type == 0 || light.type == 3) return 1.f;
+    float3 d = make_float3(light.position.x-hitPos.x, light.position.y-hitPos.y, light.position.z-hitPos.z);
+    float dist2 = d.x*d.x + d.y*d.y + d.z*d.z;
+    return 1.f / fmaxf(dist2, 0.001f);
+}
+
+// ---------------------------------------------------------------------------
+// Disney BSDF
+// ---------------------------------------------------------------------------
+static __forceinline__ __device__ float schlickW(float c)
 { float t=1.f-c; float t2=t*t; return t2*t2*t; }
 
-static __forceinline__ __device__ float ggxD(float alpha, float NdotH)
-{ float a2=alpha*alpha; float d=NdotH*NdotH*(a2-1.f)+1.f; return a2/(3.14159f*d*d+1e-7f); }
+static __forceinline__ __device__ float ggxD(float a, float NdH)
+{ float a2=a*a; float d=NdH*NdH*(a2-1.f)+1.f; return a2/(3.14159f*d*d+1e-7f); }
 
-static __forceinline__ __device__ float smithG1(float alpha, float NdotX)
-{ float a2=alpha*alpha; return (2.f*NdotX)/(NdotX+sqrtf(a2+(1.f-a2)*NdotX*NdotX)+1e-7f); }
+static __forceinline__ __device__ float smithG1(float a, float NdX)
+{ float a2=a*a; return (2.f*NdX)/(NdX+sqrtf(a2+(1.f-a2)*NdX*NdX)+1e-7f); }
 
-static __forceinline__ __device__ float evaluateBSDF(
+static __forceinline__ __device__ float evalBSDF(
     const GPUMaterial& mat, float3 N, float3 V, float3 L, float lambda)
 {
-    float NdotL = dot3(N,L); float NdotV = dot3(N,V);
-    if (NdotL<=0.f || NdotV<=0.f) return 0.f;
-    float3 H = normalize3(make_float3(V.x+L.x, V.y+L.y, V.z+L.z));
-    float NdotH = dot3(N,H); float VdotH = dot3(V,H);
-    if (NdotH<=0.f) return 0.f;
-
-    float roughness = fmaxf(0.01f, mat.roughness);
-    float alpha = roughness*roughness;
-    float baseRefl = spectralReflectance(mat, lambda);
-
-    float iorR = (mat.ior-1.f)/(mat.ior+1.f);
-    float F0 = iorR*iorR + (baseRefl - iorR*iorR)*mat.metallic;
-    float ft=1.f-VdotH; float ft2=ft*ft; float F = F0+(1.f-F0)*ft2*ft2*ft;
-
-    float D = ggxD(alpha, NdotH);
-    float G = smithG1(alpha, NdotV)*smithG1(alpha, NdotL);
-    float spec = (D*G*F)/(4.f*NdotV*NdotL+1e-7f);
-
-    float FD90 = 0.5f+2.f*VdotH*VdotH*roughness;
-    float diff = (1.f-mat.metallic)*baseRefl
-               *(1.f+(FD90-1.f)*schlickWeight(NdotL))
-               *(1.f+(FD90-1.f)*schlickWeight(NdotV))/3.14159f;
-
-    return (diff+spec)*NdotL;
+    float NdL=dot3(N,L); float NdV=dot3(N,V);
+    if (NdL<=0.f||NdV<=0.f) return 0.f;
+    float3 H=normalize3(make_float3(V.x+L.x,V.y+L.y,V.z+L.z));
+    float NdH=dot3(N,H); float VdH=dot3(V,H);
+    if (NdH<=0.f) return 0.f;
+    float rough=fmaxf(0.01f,mat.roughness); float alpha=rough*rough;
+    float baseR=spectralReflectance(mat,lambda);
+    float iorR=(mat.ior-1.f)/(mat.ior+1.f); float iorF0=iorR*iorR;
+    float F0=iorF0+(baseR-iorF0)*mat.metallic;
+    float F=F0+(1.f-F0)*schlickW(VdH);
+    float D=ggxD(alpha,NdH); float G=smithG1(alpha,NdV)*smithG1(alpha,NdL);
+    float spec=(D*G*F)/(4.f*NdV*NdL+1e-7f);
+    float FD90=0.5f+2.f*VdH*VdH*rough;
+    float diff=(1.f-mat.metallic)*baseR*(1.f+(FD90-1.f)*schlickW(NdL))*(1.f+(FD90-1.f)*schlickW(NdV))/3.14159f;
+    return (diff+spec)*NdL;
 }
 
-static __forceinline__ __device__ float shadeSpectralBSDF(
+static __forceinline__ __device__ float evalSkyQuad(
     const GPUMaterial& mat, float3 N, float3 V, float lambda)
 {
-    const float3 dirs[6] = {{0,1,0},{0,-1,0},{1,0,0},{-1,0,0},{0,0,1},{0,0,-1}};
-    const float wts[6] = {0.30f,0.10f,0.15f,0.15f,0.15f,0.15f};
-    float rad = 0.f;
-    for (int i=0; i<6; ++i)
-        rad += evaluateBSDF(mat,N,V,dirs[i],lambda) * skySpectral(dirs[i],lambda) * wts[i];
-    return rad;
+    const float3 dirs[6]={{0,1,0},{0,-1,0},{1,0,0},{-1,0,0},{0,0,1},{0,0,-1}};
+    const float wts[6]={0.30f,0.10f,0.15f,0.15f,0.15f,0.15f};
+    float r=0.f;
+    for (int i=0;i<6;++i) r+=evalBSDF(mat,N,V,dirs[i],lambda)*skySpectral(dirs[i],lambda)*wts[i];
+    return r;
+}
+
+// ---------------------------------------------------------------------------
+// Tangent frame for cosine sampling
+// ---------------------------------------------------------------------------
+static __forceinline__ __device__ float3 cross3(float3 a, float3 b)
+{ return make_float3(a.y*b.z-a.z*b.y, a.z*b.x-a.x*b.z, a.x*b.y-a.y*b.x); }
+
+static __forceinline__ __device__ float3 cosineSampleHemisphere(
+    float3 N, float u1, float u2)
+{
+    float3 up = (fabsf(N.y)<0.999f) ? make_float3(0,1,0) : make_float3(1,0,0);
+    float3 T = normalize3(cross3(up, N));
+    float3 B = cross3(N, T);
+    float r = sqrtf(u1); float phi = 6.28318f*u2;
+    float x = r*cosf(phi); float y = r*sinf(phi); float z = sqrtf(fmaxf(0.f,1.f-u1));
+    return normalize3(make_float3(T.x*x+B.x*y+N.x*z, T.y*x+B.y*y+N.y*z, T.z*x+B.z*y+N.z*z));
 }
 
 // ---------------------------------------------------------------------------
@@ -228,18 +271,64 @@ static __forceinline__ __device__ float shadeSpectralBSDF(
 // ---------------------------------------------------------------------------
 static __forceinline__ __device__ float3 getHitNormal()
 {
-    const unsigned int primIdx = optixGetPrimitiveIndex();
-    const float2 bary = optixGetTriangleBarycentrics();
-    const float u=bary.x, v=bary.y, w=1.f-u-v;
-    const HitGroupData* data = reinterpret_cast<const HitGroupData*>(optixGetSbtDataPointer());
-    float3 n0=data->normals[primIdx*3], n1=data->normals[primIdx*3+1], n2=data->normals[primIdx*3+2];
+    unsigned int pi = optixGetPrimitiveIndex();
+    float2 bary = optixGetTriangleBarycentrics();
+    float u=bary.x, v=bary.y, w=1.f-u-v;
+    const HitGroupData* d = reinterpret_cast<const HitGroupData*>(optixGetSbtDataPointer());
+    float3 n0=d->normals[pi*3], n1=d->normals[pi*3+1], n2=d->normals[pi*3+2];
     return make_float3(n0.x*w+n1.x*u+n2.x*v, n0.y*w+n1.y*u+n2.y*v, n0.z*w+n1.z*u+n2.z*v);
 }
 
 static __forceinline__ __device__ int getHitMaterialId()
 {
-    const HitGroupData* data = reinterpret_cast<const HitGroupData*>(optixGetSbtDataPointer());
-    return data->materialIds[optixGetPrimitiveIndex()];
+    const HitGroupData* d = reinterpret_cast<const HitGroupData*>(optixGetSbtDataPointer());
+    return d->materialIds[optixGetPrimitiveIndex()];
+}
+
+// ---------------------------------------------------------------------------
+// Shade one hit — direct lights + sky fill
+// ---------------------------------------------------------------------------
+static __forceinline__ __device__ float shadeHit(
+    const GPUMaterial& mat, float3 N, float3 V, float3 hitPos, float lambda)
+{
+    float radiance = 0.f;
+
+    if (params.lightCount > 0) {
+        for (unsigned int li = 0; li < params.lightCount; ++li) {
+            const GPULight& light = params.lights[li];
+            float3 L = lightDirection(light, hitPos);
+
+            // Shadow ray — cull backfaces so rays through convex objects pass through
+            bool inShadow = false;
+            float3 sOrig = make_float3(hitPos.x+N.x*0.01f, hitPos.y+N.y*0.01f, hitPos.z+N.z*0.01f);
+            unsigned int sp0=0,sp1=0,sp2=0,sp3=__float_as_uint(1e30f),sp4=0;
+            optixTrace(params.traversable, sOrig, L,
+                       1e-4f, 1e30f, 0.f, OptixVisibilityMask(0xFF),
+                       OPTIX_RAY_FLAG_CULL_BACK_FACING_TRIANGLES | OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
+                       0, 1, 0, sp0,sp1,sp2,sp3,sp4);
+
+            if (sp4 > 0u) {
+                if (light.type == 0 || light.type == 3) {
+                    inShadow = true;
+                } else {
+                    float3 toLight = make_float3(light.position.x-hitPos.x,
+                        light.position.y-hitPos.y, light.position.z-hitPos.z);
+                    if (__uint_as_float(sp3) < len3(toLight)) inShadow = true;
+                }
+            }
+
+            if (!inShadow) {
+                float bsdf = evalBSDF(mat, N, V, L, lambda);
+                radiance += bsdf * lightEmission(light, lambda) * lightAttenuation(light, hitPos);
+            }
+        }
+        // Sky fill
+        radiance += evalSkyQuad(mat, N, V, lambda) * 0.05f;
+    } else {
+        radiance = evalSkyQuad(mat, N, V, lambda);
+    }
+
+    return radiance;
 }
 
 // ---------------------------------------------------------------------------
@@ -249,75 +338,125 @@ extern "C" __global__ void __raygen__spectral()
 {
     const uint3 idx = optixGetLaunchIndex();
     const uint3 dim = optixGetLaunchDimensions();
-    const unsigned int px = idx.x, py = idx.y;
-    const unsigned int pixIdx = py * dim.x + px;
+    const unsigned int px=idx.x, py=idx.y;
+    const unsigned int pixIdx = py*dim.x+px;
     const int spp = params.spp;
-    const float W = float(dim.x), H = float(dim.y);
+    const float W=float(dim.x), H=float(dim.y);
 
     if (spp <= 1) {
+        // Normal-as-colour
         float3 origin, dir;
         makeRay(px+0.5f, py+0.5f, W, H, origin, dir);
-
         unsigned int p0=0,p1=0,p2=0,p3=__float_as_uint(1e30f),p4=0;
-        optixTrace(params.traversable, origin, dir,
-                   1e-4f, 1e30f, 0.f, OptixVisibilityMask(0xFF),
-                   OPTIX_RAY_FLAG_NONE, 0, 1, 0, p0,p1,p2,p3,p4);
-
+        optixTrace(params.traversable, origin, dir, 1e-4f,1e30f,0.f,
+                   OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0, p0,p1,p2,p3,p4);
         params.framebuffer[pixIdx] = make_float4(
-            __uint_as_float(p0), __uint_as_float(p1), __uint_as_float(p2), 1.f);
+            __uint_as_float(p0),__uint_as_float(p1),__uint_as_float(p2),1.f);
         if (params.depthbuffer) params.depthbuffer[pixIdx] = __uint_as_float(p3);
     } else {
+        // Spectral with BSDF + lights + bounces
         float X=0.f, Y=0.f, Z=0.f;
         float minDepth = 1e30f;
+        const int maxBounces = params.maxBounces;
 
         for (int s = 0; s < spp; ++s) {
             unsigned int seed = pixIdx*1031u + s*6571u;
-            float jx = hashRNG(seed);
-            float jy = hashRNG(seed+1u);
+            float jx = hashRNG(seed); float jy = hashRNG(seed+1u);
             float wu = (float(s)+hashRNG(seed+2u))/float(spp);
             float lambda = 380.f + wu*400.f;
 
             float3 origin, dir;
             makeRay(px+jx, py+jy, W, H, origin, dir);
 
+            // Primary ray
             unsigned int p0=0,p1=0,p2=0,p3=__float_as_uint(1e30f),p4=0;
-            optixTrace(params.traversable, origin, dir,
-                       1e-4f, 1e30f, 0.f, OptixVisibilityMask(0xFF),
-                       OPTIX_RAY_FLAG_NONE, 0, 1, 0, p0,p1,p2,p3,p4);
+            optixTrace(params.traversable, origin, dir, 1e-4f,1e30f,0.f,
+                       OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0, p0,p1,p2,p3,p4);
 
             float depth = __uint_as_float(p3);
-            unsigned int matIdRaw = p4;
-            bool isHit = (matIdRaw > 0u);
+            bool isHit = (p4 > 0u);
 
-            float radiance;
+            float radiance = 0.f;
+
             if (isHit) {
-                int matId = int(matIdRaw) - 1;
-                if (matId < 0 || matId >= int(params.materialCount)) matId = 0;
+                int matId = int(p4)-1;
+                if (matId<0||matId>=int(params.materialCount)) matId=0;
                 const GPUMaterial& mat = params.materials[matId];
 
-                float3 normal = normalize3(make_float3(
-                    __uint_as_float(p0), __uint_as_float(p1), __uint_as_float(p2)));
+                float3 N = normalize3(make_float3(
+                    __uint_as_float(p0),__uint_as_float(p1),__uint_as_float(p2)));
+                float3 V = normalize3(neg3(dir));
+                if (dot3raw(N,V)<0.f) N=neg3(N);
 
-                float3 V = normalize3(make_float3(-dir.x, -dir.y, -dir.z));
-                float NdV = normal.x*V.x + normal.y*V.y + normal.z*V.z;
-                if (NdV < 0.f) { normal.x=-normal.x; normal.y=-normal.y; normal.z=-normal.z; }
-
-                radiance = shadeSpectralBSDF(mat, normal, V, lambda);
+                float3 hitPos = make_float3(origin.x+depth*dir.x, origin.y+depth*dir.y, origin.z+depth*dir.z);
                 if (depth < minDepth) minDepth = depth;
+
+                // Direct lighting at primary hit
+                radiance = shadeHit(mat, N, V, hitPos, lambda);
+
+                // Bounce rays
+                float throughput = 1.f;
+                float3 bN=N, bV=V, bOrigin=hitPos;
+                const GPUMaterial* bMat = &mat;
+                unsigned int bSeed = seed + 100u;
+
+                for (int bounce = 0; bounce < maxBounces; ++bounce) {
+                    // Russian roulette after bounce 1
+                    if (bounce >= 1) {
+                        float rrProb = fminf(0.95f, throughput);
+                        if (hashRNG(bSeed++) > rrProb) break;
+                        throughput /= rrProb;
+                    }
+
+                    // Sample bounce direction
+                    float3 bounceDir = cosineSampleHemisphere(bN, hashRNG(bSeed++), hashRNG(bSeed++));
+                    float bNdL = dot3(bN, bounceDir);
+                    if (bNdL <= 0.f) break;
+
+                    // BSDF / pdf for cosine sampling: pdf = cos/pi, so throughput = bsdf*cos/pdf = bsdf*pi
+                    float bsdfVal = evalBSDF(*bMat, bN, bV, bounceDir, lambda);
+                    float pdf = bNdL / 3.14159f;
+                    float sampleThru = (pdf > 1e-7f) ? bsdfVal / pdf : 0.f;
+                    if (sampleThru <= 0.f) break;
+                    throughput *= sampleThru;
+
+                    // Trace bounce
+                    float3 bOrig = make_float3(bOrigin.x+bN.x*0.01f, bOrigin.y+bN.y*0.01f, bOrigin.z+bN.z*0.01f);
+                    unsigned int bp0=0,bp1=0,bp2=0,bp3=__float_as_uint(1e30f),bp4=0;
+                    optixTrace(params.traversable, bOrig, bounceDir, 1e-4f,1e30f,0.f,
+                               OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0, bp0,bp1,bp2,bp3,bp4);
+
+                    if (bp4 == 0u) {
+                        // Hit sky
+                        radiance += throughput * skySpectral(bounceDir, lambda);
+                        break;
+                    }
+
+                    // Hit surface
+                    float bDepth = __uint_as_float(bp3);
+                    int bMatId = int(bp4)-1;
+                    if (bMatId<0||bMatId>=int(params.materialCount)) bMatId=0;
+                    bMat = &params.materials[bMatId];
+
+                    bN = normalize3(make_float3(
+                        __uint_as_float(bp0),__uint_as_float(bp1),__uint_as_float(bp2)));
+                    bV = normalize3(neg3(bounceDir));
+                    if (dot3raw(bN,bV)<0.f) bN=neg3(bN);
+                    bOrigin = make_float3(bOrig.x+bounceDir.x*bDepth, bOrig.y+bounceDir.y*bDepth, bOrig.z+bounceDir.z*bDepth);
+
+                    // Direct lighting at bounce hit
+                    radiance += throughput * shadeHit(*bMat, bN, bV, bOrigin, lambda);
+                }
             } else {
                 radiance = skySpectral(dir, lambda);
             }
 
-            float cx,cy,cz;
-            cieXYZ(lambda, cx,cy,cz);
-            float scale = 400.f / 106.856895f;
-            X += radiance*cx*scale;
-            Y += radiance*cy*scale;
-            Z += radiance*cz*scale;
+            float cx,cy,cz; cieXYZ(lambda,cx,cy,cz);
+            float scale = 400.f/106.856895f;
+            X+=radiance*cx*scale; Y+=radiance*cy*scale; Z+=radiance*cz*scale;
         }
 
-        float inv = 1.f/float(spp);
-        X*=inv; Y*=inv; Z*=inv;
+        float inv=1.f/float(spp); X*=inv; Y*=inv; Z*=inv;
         float r= 3.2406f*X-1.5372f*Y-0.4986f*Z;
         float g=-0.9689f*X+1.8758f*Y+0.0415f*Z;
         float b= 0.0557f*X-0.2040f*Y+1.0570f*Z;
@@ -327,7 +466,7 @@ extern "C" __global__ void __raygen__spectral()
 }
 
 // ---------------------------------------------------------------------------
-// __closesthit__spectral
+// __closesthit__spectral — pass normal + materialId
 // ---------------------------------------------------------------------------
 extern "C" __global__ void __closesthit__spectral()
 {
@@ -336,17 +475,17 @@ extern "C" __global__ void __closesthit__spectral()
     int matId = getHitMaterialId();
 
     if (params.spp <= 1) {
-        float3 color = shadeNormal(normal);
-        optixSetPayload_0(__float_as_uint(color.x));
-        optixSetPayload_1(__float_as_uint(color.y));
-        optixSetPayload_2(__float_as_uint(color.z));
+        float3 c = shadeNormal(normal);
+        optixSetPayload_0(__float_as_uint(c.x));
+        optixSetPayload_1(__float_as_uint(c.y));
+        optixSetPayload_2(__float_as_uint(c.z));
     } else {
         optixSetPayload_0(__float_as_uint(normal.x));
         optixSetPayload_1(__float_as_uint(normal.y));
         optixSetPayload_2(__float_as_uint(normal.z));
     }
     optixSetPayload_3(__float_as_uint(tHit));
-    optixSetPayload_4(static_cast<unsigned int>(matId + 1));
+    optixSetPayload_4(static_cast<unsigned int>(matId+1));
 }
 
 // ---------------------------------------------------------------------------
@@ -356,14 +495,12 @@ extern "C" __global__ void __miss__spectral()
 {
     if (params.spp <= 1) {
         float3 dir = optixGetWorldRayDirection();
-        float3 color = skyColor(dir);
-        optixSetPayload_0(__float_as_uint(color.x));
-        optixSetPayload_1(__float_as_uint(color.y));
-        optixSetPayload_2(__float_as_uint(color.z));
+        float3 c = skyColor(dir);
+        optixSetPayload_0(__float_as_uint(c.x));
+        optixSetPayload_1(__float_as_uint(c.y));
+        optixSetPayload_2(__float_as_uint(c.z));
     } else {
-        optixSetPayload_0(0u);
-        optixSetPayload_1(0u);
-        optixSetPayload_2(0u);
+        optixSetPayload_0(0u); optixSetPayload_1(0u); optixSetPayload_2(0u);
     }
     optixSetPayload_3(__float_as_uint(1e30f));
     optixSetPayload_4(0u);

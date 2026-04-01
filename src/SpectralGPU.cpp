@@ -98,6 +98,7 @@ void SpectralGPU::_FreeBuffers()
     if (_d_normals)      { cudaFree(reinterpret_cast<void*>(_d_normals));      _d_normals = 0; }
     if (_d_materialIds)  { cudaFree(reinterpret_cast<void*>(_d_materialIds));  _d_materialIds = 0; }
     if (_d_materials)    { cudaFree(reinterpret_cast<void*>(_d_materials));    _d_materials = 0; }
+    if (_d_lights)       { cudaFree(reinterpret_cast<void*>(_d_lights));       _d_lights = 0; }
     if (_d_params)       { cudaFree(reinterpret_cast<void*>(_d_params));       _d_params = 0; }
     _allocW = _allocH = 0;
     _triCount = 0;
@@ -191,7 +192,7 @@ bool SpectralGPU::Initialize(const std::string& ptxSource)
     OptixProgramGroup programGroups[] = { _raygenPG, _missPG, _hitgroupPG };
 
     OptixPipelineLinkOptions linkOptions = {};
-    linkOptions.maxTraceDepth = 1;
+    linkOptions.maxTraceDepth = 8;  // bounces + shadow rays
 
     logSize = sizeof(log);
     OPTIX_CHECK(optixPipelineCreate(
@@ -323,6 +324,32 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
         _materialCount = static_cast<unsigned int>(gpuMats.size());
     }
 
+    // Upload lights
+    if (_d_lights) { cudaFree(reinterpret_cast<void*>(_d_lights)); _d_lights = 0; }
+    _lightCount = 0;
+    {
+        const auto& lights = scene.GetLights();
+        if (!lights.empty()) {
+            std::vector<spectral_gpu::GPULight> gpuLights(lights.size());
+            for (size_t i = 0; i < lights.size(); ++i) {
+                gpuLights[i].type      = static_cast<int>(lights[i].type);
+                gpuLights[i].position  = make_float3(lights[i].position[0], lights[i].position[1], lights[i].position[2]);
+                gpuLights[i].direction = make_float3(lights[i].direction[0], lights[i].direction[1], lights[i].direction[2]);
+                gpuLights[i].color     = make_float3(lights[i].color[0], lights[i].color[1], lights[i].color[2]);
+                gpuLights[i].intensity = lights[i].EffectiveIntensity();
+                gpuLights[i].colorTemperature = lights[i].colorTemperature;
+                gpuLights[i].useColorTemp = lights[i].enableColorTemperature ? 1 : 0;
+                gpuLights[i].radius    = lights[i].radius;
+            }
+            size_t lightBytes = gpuLights.size() * sizeof(spectral_gpu::GPULight);
+            CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_lights), lightBytes));
+            CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_lights), gpuLights.data(),
+                                  lightBytes, cudaMemcpyHostToDevice));
+            _lightCount = static_cast<unsigned int>(gpuLights.size());
+            fprintf(stderr, "SpectralGPU: uploaded %zu lights to device\n", gpuLights.size());
+        }
+    }
+
     // Build indices (trivial: 0,1,2, 3,4,5, ...)
     std::vector<unsigned int> indices(_triCount * 3);
     for (unsigned int i = 0; i < _triCount * 3; ++i) indices[i] = i;
@@ -405,7 +432,7 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
 // ---------------------------------------------------------------------------
 bool SpectralGPU::Render(const SpectralCamera& camera,
                           unsigned int width, unsigned int height,
-                          float* pixels, float* depth, int spp)
+                          float* pixels, float* depth, int spp, int maxBounces)
 {
     if (!_pipeline || !_gasHandle) return false;
     if (width == 0 || height == 0) return false;
@@ -448,6 +475,10 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     launchParams.triCount    = _triCount;
     launchParams.materials   = reinterpret_cast<spectral_gpu::GPUMaterial*>(_d_materials);
     launchParams.materialCount = _materialCount;
+
+    launchParams.lights     = reinterpret_cast<spectral_gpu::GPULight*>(_d_lights);
+    launchParams.lightCount = _lightCount;
+    launchParams.maxBounces = maxBounces;
 
     // projInverse: CPU uses M*v (column-vector), copy as-is
     // viewToWorld: CPU uses v*M (row-vector via Transform), so transpose for GPU
