@@ -19,11 +19,25 @@ PXR_NAMESPACE_OPEN_SCOPE
 // SpectralTriangle
 // ---------------------------------------------------------------------------
 struct SpectralTriangle {
-    GfVec3f v0, v1, v2;       // world-space vertices
+    GfVec3f v0, v1, v2;       // world-space vertices (shutter open / static)
     GfVec3f n0, n1, n2;       // per-vertex world-space normals
     GfVec3f faceNormal;        // geometric (flat) normal
     GfVec2f uv0, uv1, uv2;   // per-vertex texture coordinates
     SpectralMaterialId materialId = kDefaultMaterialId;
+
+    // Motion blur: vertex positions at shutter close
+    // If hasMotion is false, these are unused (static geometry)
+    GfVec3f v0_close, v1_close, v2_close;
+    bool    hasMotion = false;
+
+    // Interpolate vertices at time t in [0,1] (0=open, 1=close)
+    void LerpPositions(float t, GfVec3f& p0, GfVec3f& p1, GfVec3f& p2) const {
+        if (!hasMotion || t <= 0.f) { p0 = v0; p1 = v1; p2 = v2; return; }
+        if (t >= 1.f) { p0 = v0_close; p1 = v1_close; p2 = v2_close; return; }
+        p0 = v0 * (1.f - t) + v0_close * t;
+        p1 = v1 * (1.f - t) + v1_close * t;
+        p2 = v2 * (1.f - t) + v2_close * t;
+    }
 };
 
 // ---------------------------------------------------------------------------

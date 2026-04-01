@@ -94,8 +94,12 @@ void SpectralIntegrator::RenderFrame(
                         float wu = (float(s) + _Hash(seed + 2)) / float(spp);
                         float lambda = SpectralSpectrum::SampleWavelength(wu);
 
+                        // Random time for motion blur [shutterOpen, shutterClose]
+                        float rayTime = camera.shutterOpen +
+                            _Hash(seed + 3) * (camera.shutterClose - camera.shutterOpen);
+
                         GfRay ray = _MakeRay(camera, imageX, imageY, jx, jy);
-                        SpectralBVH::Hit hit = bvh.Intersect(ray);
+                        SpectralBVH::Hit hit = bvh.Intersect(ray, rayTime);
 
                         float radiance;
                         if (hit.valid()) {
@@ -109,7 +113,7 @@ void SpectralIntegrator::RenderFrame(
                                 static_cast<double>(hit.u),
                                 static_cast<double>(hit.v),
                                 lambda, mat, scene, hitPos, rayDir,
-                                maxBounces, bounceSeed, bvh);
+                                maxBounces, bounceSeed, bvh, rayTime);
                             // Camera-space Z for this sample
                             GfVec3d viewHit = worldToView.Transform(worldHit);
                             float camZ = static_cast<float>(-viewHit[2]);
@@ -381,7 +385,7 @@ float SpectralIntegrator::_ShadeSpectral(
     const SpectralTriangle& tri, double u, double v, float lambda,
     const SpectralMaterial& mat, const SpectralScene& scene,
     const GfVec3f& hitPos, const GfVec3f& rayDir, int maxBounces,
-    unsigned int& rngSeed, const SpectralBVH& bvh)
+    unsigned int& rngSeed, const SpectralBVH& bvh, float rayTime)
 {
     float w  = float(1.0 - u - v);
     float uf = float(u);
@@ -416,7 +420,7 @@ float SpectralIntegrator::_ShadeSpectral(
             GfRay shadowRay;
             shadowRay.SetEnds(GfVec3d(shadowOrigin),
                 GfVec3d(shadowOrigin) + GfVec3d(L) * 10000.0);
-            SpectralBVH::Hit shadowHit = bvh.Intersect(shadowRay);
+            SpectralBVH::Hit shadowHit = bvh.Intersect(shadowRay, rayTime);
 
             if (shadowHit.valid()) {
                 // Check if the shadow hit is a legitimate blocker:
@@ -495,7 +499,7 @@ float SpectralIntegrator::_ShadeSpectral(
             GfVec3d(bounceOrigin + bOffset),
             GfVec3d(bounceOrigin + bOffset) + GfVec3d(bounceDir) * 10000.0);
 
-        SpectralBVH::Hit bounceHit = bvh.Intersect(bounceRay);
+        SpectralBVH::Hit bounceHit = bvh.Intersect(bounceRay, rayTime);
 
         if (!bounceHit.valid()) {
             // Hit sky
@@ -541,7 +545,7 @@ float SpectralIntegrator::_ShadeSpectral(
                 GfRay shadowRay;
                 shadowRay.SetEnds(GfVec3d(sOrig),
                     GfVec3d(sOrig) + GfVec3d(L) * 10000.0);
-                SpectralBVH::Hit shadowHit = bvh.Intersect(shadowRay);
+                SpectralBVH::Hit shadowHit = bvh.Intersect(shadowRay, rayTime);
 
                 if (shadowHit.valid()) {
                     GfVec3f shadowN = shadowHit.tri->faceNormal;

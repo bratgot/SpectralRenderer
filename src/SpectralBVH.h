@@ -68,7 +68,7 @@ public:
     };
 
     /// Trace a single ray against the BVH. Thread-safe.
-    Hit Intersect(const GfRay& ray) const;
+    Hit Intersect(const GfRay& ray, float time = 0.f) const;
 
 private:
     RTCDevice _rtcDevice = nullptr;

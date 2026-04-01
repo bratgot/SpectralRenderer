@@ -102,6 +102,8 @@ private:
     int   _maxBounces = 4;
     int   _tileSize   = 64;
     int   _deviceMode = 0;         // 0=cpu, 1=gpu, 2=auto
+    float _shutterOpen  = -0.5f;   // shutter open  (relative to frame)
+    float _shutterClose =  0.5f;   // shutter close (relative to frame)
     const char* _cameraPath = "";
 
     FormatPair _outputFormat;

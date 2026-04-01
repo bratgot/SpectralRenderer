@@ -161,6 +161,14 @@ void SpectralRenderIop::knobs(Knob_Callback f)
     Int_knob(f, &_samples,    "samples",     "samples per pixel"); SetRange(f, 1, 256);
     Int_knob(f, &_maxBounces, "max_bounces", "max bounces");       SetRange(f, 1, 16);
     Int_knob(f, &_tileSize,   "tile_size",   "tile size");         SetRange(f, 16, 256);
+
+    Divider(f, "Motion blur");
+    Float_knob(f, &_shutterOpen,  "shutter_open",  "shutter open");  SetRange(f, -1.f, 0.f);
+    Float_knob(f, &_shutterClose, "shutter_close", "shutter close"); SetRange(f, 0.f, 1.f);
+    Tooltip(f, "Shutter interval relative to frame.\n"
+               "-0.5 / 0.5 = centered on frame (180 degree shutter)\n"
+               "0.0 / 0.5  = forward motion blur\n"
+               "0.0 / 0.0  = no motion blur");
 }
 
 int SpectralRenderIop::knob_changed(Knob* k)
@@ -412,6 +420,9 @@ void SpectralRenderIop::_LoadStage()
 void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
 {
     const UsdTimeCode timeCode(_frame);
+    const UsdTimeCode timeOpen(_frame + _shutterOpen);
+    const UsdTimeCode timeClose(_frame + _shutterClose);
+    const bool motionBlurEnabled = (_shutterOpen != _shutterClose);
     UsdGeomXformCache xfCache(timeCode);
 
     int meshCount = 0;
@@ -534,8 +545,40 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
         if (!mesh) continue;
 
         VtVec3fArray points;
-        mesh.GetPointsAttr().Get(&points, timeCode);
+        mesh.GetPointsAttr().Get(&points, timeOpen);
         if (points.empty()) continue;
+
+        // Read points at shutter close for motion blur
+        VtVec3fArray pointsClose;
+        bool meshHasMotion = false;
+        if (motionBlurEnabled) {
+            mesh.GetPointsAttr().Get(&pointsClose, timeClose);
+
+            // Check if local positions differ (vertex deformation)
+            if (pointsClose.size() == points.size()) {
+                for (size_t pi = 0; pi < points.size(); ++pi) {
+                    if ((points[pi] - pointsClose[pi]).GetLengthSq() > 1e-10f) {
+                        meshHasMotion = true;
+                        break;
+                    }
+                }
+            }
+
+            // Check if the world transform differs (rigid body motion)
+            if (!meshHasMotion) {
+                UsdGeomXformCache xfCacheOpen(timeOpen);
+                UsdGeomXformCache xfCacheClose(timeClose);
+                GfMatrix4d xfOpen  = xfCacheOpen.GetLocalToWorldTransform(prim);
+                GfMatrix4d xfClose = xfCacheClose.GetLocalToWorldTransform(prim);
+                if (xfOpen != xfClose) {
+                    meshHasMotion = true;
+                    // Use the same points but they'll get different transforms
+                    pointsClose = points;
+                }
+            }
+
+            if (!meshHasMotion) pointsClose.clear();
+        }
 
         VtIntArray faceVertexCounts;
         VtIntArray faceVertexIndices;
@@ -738,14 +781,36 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                     // UVs don't survive subdivision yet — clear them
                     // (OpenSubdiv UV refinement is a future enhancement)
                     uvs.clear();
+
+                    // Motion blur: pointsClose must match subdivided topology.
+                    // For transform-only motion, the local points are identical
+                    // at both times — just use the subdivided points for both.
+                    // For vertex deformation blur, we'd need to subdivide both
+                    // sets independently (future enhancement).
+                    if (meshHasMotion) {
+                        pointsClose = points;  // same refined local points
+                    }
                 }
             }
         }
 #endif // SPECTRAL_HAS_OSD
 
-        // World transform
-        GfMatrix4d worldXf = xfCache.GetLocalToWorldTransform(prim);
+        // World transform (at shutter open if motion blur, else at frame)
+        GfMatrix4d worldXf;
+        if (motionBlurEnabled) {
+            UsdGeomXformCache xfCacheOpen(timeOpen);
+            worldXf = xfCacheOpen.GetLocalToWorldTransform(prim);
+        } else {
+            worldXf = xfCache.GetLocalToWorldTransform(prim);
+        }
         GfMatrix4d normalXf = worldXf.GetInverse().GetTranspose();
+
+        // Close-time transform for motion blur
+        GfMatrix4d worldXfClose = worldXf;
+        if (meshHasMotion) {
+            UsdGeomXformCache xfCacheClose(timeClose);
+            worldXfClose = xfCacheClose.GetLocalToWorldTransform(prim);
+        }
 
         const int numPoints = static_cast<int>(points.size());
 
@@ -757,6 +822,9 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
 
         auto xfPoint = [&](const GfVec3f& p) -> GfVec3f {
             return GfVec3f(worldXf.Transform(GfVec3d(p)));
+        };
+        auto xfPointClose = [&](const GfVec3f& p) -> GfVec3f {
+            return GfVec3f(worldXfClose.Transform(GfVec3d(p)));
         };
         auto xfNormal = [&](const GfVec3f& n) -> GfVec3f {
             GfVec3f xn = GfVec3f(normalXf.TransformDir(GfVec3d(n)));
@@ -796,6 +864,14 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                 tri.v0 = xfPoint(points[pi0]);
                 tri.v1 = xfPoint(points[pi1]);
                 tri.v2 = xfPoint(points[pi2]);
+
+                // Motion blur: close-time positions
+                if (meshHasMotion && !pointsClose.empty()) {
+                    tri.v0_close = xfPointClose(pointsClose[pi0]);
+                    tri.v1_close = xfPointClose(pointsClose[pi1]);
+                    tri.v2_close = xfPointClose(pointsClose[pi2]);
+                    tri.hasMotion = true;
+                }
 
                 GfVec3f e0 = tri.v1 - tri.v0;
                 GfVec3f e1 = tri.v2 - tri.v0;
@@ -1020,6 +1096,17 @@ void SpectralRenderIop::_EnsureFrameRendered()
     cam.imageWidth  = W;
     cam.imageHeight = H;
     cam.pixelAspect = fmtPtr->pixel_aspect();
+
+    // Motion blur shutter — normalize to [0,1] for Embree
+    // shutterOpen/Close are relative to frame (e.g. -0.5/0.5)
+    // Embree expects [0,1] where 0=first vertex buffer, 1=second
+    if (_shutterOpen != _shutterClose) {
+        cam.shutterOpen  = 0.f;
+        cam.shutterClose = 1.f;
+    } else {
+        cam.shutterOpen  = 0.f;
+        cam.shutterClose = 0.f;
+    }
 
     // Determine render device
     bool useGPU = false;

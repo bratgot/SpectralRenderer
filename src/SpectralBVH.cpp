@@ -69,7 +69,6 @@ void SpectralBVH::Build(const SpectralScene& scene)
 {
     Release();
 
-    // Collect triangle pointers (we need these for shading after hit)
     _triangles.clear();
     _triangles.reserve(scene.TotalTriangles());
     for (auto& kv : scene.GetMeshes()) {
@@ -84,7 +83,12 @@ void SpectralBVH::Build(const SpectralScene& scene)
         return;
     }
 
-    // Create Embree device
+    // Check if any triangles have motion
+    bool hasMotion = false;
+    for (auto* tri : _triangles) {
+        if (tri->hasMotion) { hasMotion = true; break; }
+    }
+
     _rtcDevice = rtcNewDevice(nullptr);
     if (!_rtcDevice) {
         fprintf(stderr, "SpectralBVH: rtcNewDevice failed\n");
@@ -92,47 +96,73 @@ void SpectralBVH::Build(const SpectralScene& scene)
     }
     rtcSetDeviceErrorFunction(_rtcDevice, _EmbreeErrorFunc, nullptr);
 
-    // Create scene
     _rtcScene = rtcNewScene(_rtcDevice);
     rtcSetSceneFlags(_rtcScene, RTC_SCENE_FLAG_COMPACT);
     rtcSetSceneBuildQuality(_rtcScene, RTC_BUILD_QUALITY_HIGH);
 
-    // Create a single triangle mesh geometry
     RTCGeometry geom = rtcNewGeometry(_rtcDevice, RTC_GEOMETRY_TYPE_TRIANGLE);
 
     const size_t numTris = _triangles.size();
 
-    // Vertex buffer: 3 vertices per triangle (non-indexed, fully expanded)
-    // Embree needs float[3] per vertex, 16-byte stride is fine for float[3]
-    float* verts = (float*)rtcSetNewGeometryBuffer(
+    if (hasMotion) {
+        // Two time steps for motion blur
+        rtcSetGeometryTimeStepCount(geom, 2);
+    }
+
+    // Vertex buffer at time 0 (shutter open)
+    float* verts0 = (float*)rtcSetNewGeometryBuffer(
         geom, RTC_BUFFER_TYPE_VERTEX, 0,
         RTC_FORMAT_FLOAT3, sizeof(float) * 3,
         numTris * 3);
 
-    // Index buffer: trivial 0,1,2, 3,4,5, ...
+    // Vertex buffer at time 1 (shutter close) — only if motion
+    float* verts1 = nullptr;
+    if (hasMotion) {
+        verts1 = (float*)rtcSetNewGeometryBuffer(
+            geom, RTC_BUFFER_TYPE_VERTEX, 1,
+            RTC_FORMAT_FLOAT3, sizeof(float) * 3,
+            numTris * 3);
+    }
+
     unsigned* indices = (unsigned*)rtcSetNewGeometryBuffer(
         geom, RTC_BUFFER_TYPE_INDEX, 0,
         RTC_FORMAT_UINT3, sizeof(unsigned) * 3,
         numTris);
 
-    if (!verts || !indices) {
+    if (!verts0 || !indices || (hasMotion && !verts1)) {
         fprintf(stderr, "SpectralBVH: failed to allocate Embree buffers\n");
         rtcReleaseGeometry(geom);
         Release();
         return;
     }
 
-    // Fill buffers
     for (size_t i = 0; i < numTris; ++i) {
         const SpectralTriangle* tri = _triangles[i];
 
-        float* v0 = verts + i * 9;      // 3 verts * 3 floats
+        // Time 0 (shutter open)
+        float* v0 = verts0 + i * 9;
         float* v1 = v0 + 3;
         float* v2 = v0 + 6;
-
         v0[0] = tri->v0[0]; v0[1] = tri->v0[1]; v0[2] = tri->v0[2];
         v1[0] = tri->v1[0]; v1[1] = tri->v1[1]; v1[2] = tri->v1[2];
         v2[0] = tri->v2[0]; v2[1] = tri->v2[1]; v2[2] = tri->v2[2];
+
+        // Time 1 (shutter close)
+        if (verts1) {
+            float* c0 = verts1 + i * 9;
+            float* c1 = c0 + 3;
+            float* c2 = c0 + 6;
+            if (tri->hasMotion) {
+                c0[0] = tri->v0_close[0]; c0[1] = tri->v0_close[1]; c0[2] = tri->v0_close[2];
+                c1[0] = tri->v1_close[0]; c1[1] = tri->v1_close[1]; c1[2] = tri->v1_close[2];
+                c2[0] = tri->v2_close[0]; c2[1] = tri->v2_close[1]; c2[2] = tri->v2_close[2];
+            } else {
+                // Static geometry — same positions at both times
+                c0[0] = tri->v0[0]; c0[1] = tri->v0[1]; c0[2] = tri->v0[2];
+                c1[0] = tri->v1[0]; c1[1] = tri->v1[1]; c1[2] = tri->v1[2];
+                c2[0] = tri->v2[0]; c2[1] = tri->v2[1]; c2[2] = tri->v2[2];
+            }
+        }
 
         unsigned* idx = indices + i * 3;
         idx[0] = static_cast<unsigned>(i * 3);
@@ -142,17 +172,18 @@ void SpectralBVH::Build(const SpectralScene& scene)
 
     rtcCommitGeometry(geom);
     rtcAttachGeometry(_rtcScene, geom);
-    rtcReleaseGeometry(geom);  // scene holds a reference
+    rtcReleaseGeometry(geom);
 
     rtcCommitScene(_rtcScene);
 
-    fprintf(stderr, "SpectralBVH: built BVH for %zu triangles\n", numTris);
+    fprintf(stderr, "SpectralBVH: built BVH for %zu triangles%s\n",
+            numTris, hasMotion ? " (motion blur)" : "");
 }
 
 // ---------------------------------------------------------------------------
 // Intersect — single ray query, thread-safe
 // ---------------------------------------------------------------------------
-SpectralBVH::Hit SpectralBVH::Intersect(const GfRay& ray) const
+SpectralBVH::Hit SpectralBVH::Intersect(const GfRay& ray, float time) const
 {
     Hit result;
     if (!_rtcScene || _triangles.empty()) return result;
@@ -171,6 +202,7 @@ SpectralBVH::Hit SpectralBVH::Intersect(const GfRay& ray) const
     rayhit.ray.dir_z = static_cast<float>(dir[2]);
     rayhit.ray.tnear  = 1e-4f;
     rayhit.ray.tfar   = 1e30f;
+    rayhit.ray.time   = time;  // motion blur time [0,1]
     rayhit.ray.mask   = 0xFFFFFFFF;
     rayhit.hit.geomID = RTC_INVALID_GEOMETRY_ID;
 

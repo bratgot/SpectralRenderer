@@ -49,6 +49,8 @@ struct SpectralCamera {
     unsigned int imageWidth  = 1920;
     unsigned int imageHeight = 1080;
     double pixelAspect       = 1.0;   // pixel aspect ratio from format
+    float  shutterOpen       = 0.f;   // motion blur shutter [0,1] for Embree
+    float  shutterClose      = 0.f;   // 0,0 = no motion blur
 };
 
 // ---------------------------------------------------------------------------
@@ -146,7 +148,8 @@ private:
                                  const GfVec3f& rayDir,
                                  int maxBounces,
                                  unsigned int& rngSeed,
-                                 const SpectralBVH& bvh);
+                                 const SpectralBVH& bvh,
+                                 float rayTime = 0.f);
     static float _SkySpectral(const GfVec3f& dir, float lambda);
 
     // Simple hash-based RNG for per-pixel, per-sample jitter
