@@ -16,6 +16,12 @@
 #include <pxr/usd/usdShade/materialBindingAPI.h>
 #include <pxr/usd/usdShade/shader.h>
 #include <pxr/usd/usdShade/tokens.h>
+#include <pxr/usd/usdLux/distantLight.h>
+#include <pxr/usd/usdLux/sphereLight.h>
+#include <pxr/usd/usdLux/rectLight.h>
+#include <pxr/usd/usdLux/domeLight.h>
+#include <pxr/usd/usdLux/lightAPI.h>
+#include <pxr/usd/usdLux/tokens.h>
 #include <pxr/usd/sdf/path.h>
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/vec3f.h>
@@ -427,6 +433,96 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
             cameraPrim = prim;
             fprintf(stderr, "SpectralRender: auto-found camera: %s\n",
                     prim.GetPath().GetText());
+        }
+
+        // ----------------------------------------------------------
+        // Process lights (Phase 4c)
+        // ----------------------------------------------------------
+        if (prim.HasAPI<UsdLuxLightAPI>()) {
+            UsdLuxLightAPI lightAPI(prim);
+            SpectralLight light;
+            light.name = prim.GetPath().GetString();
+
+            // Determine light type
+            if (prim.IsA<UsdLuxDistantLight>()) {
+                light.type = SpectralLight::Type::Distant;
+                // Direction from transform: distant light points down its -Z axis
+                GfMatrix4d xf = xfCache.GetLocalToWorldTransform(prim);
+                GfVec3d fwd = xf.TransformDir(GfVec3d(0, 0, -1));
+                fwd.Normalize();
+                light.direction = GfVec3f(fwd);
+            } else if (prim.IsA<UsdLuxSphereLight>()) {
+                light.type = SpectralLight::Type::Sphere;
+                GfMatrix4d xf = xfCache.GetLocalToWorldTransform(prim);
+                light.position = GfVec3f(xf.ExtractTranslation());
+                UsdLuxSphereLight sph(prim);
+                float r = 0.5f;
+                sph.GetRadiusAttr().Get(&r, timeCode);
+                light.radius = r;
+            } else if (prim.IsA<UsdLuxRectLight>()) {
+                light.type = SpectralLight::Type::Rect;
+                GfMatrix4d xf = xfCache.GetLocalToWorldTransform(prim);
+                light.position = GfVec3f(xf.ExtractTranslation());
+                GfVec3d fwd = xf.TransformDir(GfVec3d(0, 0, -1));
+                fwd.Normalize();
+                light.direction = GfVec3f(fwd);
+                UsdLuxRectLight rect(prim);
+                float w = 1.f, h = 1.f;
+                rect.GetWidthAttr().Get(&w, timeCode);
+                rect.GetHeightAttr().Get(&h, timeCode);
+                light.width = w;
+                light.height = h;
+            } else if (prim.IsA<UsdLuxDomeLight>()) {
+                light.type = SpectralLight::Type::Dome;
+            }
+
+            // Common light properties via LightAPI
+            {
+                VtValue v;
+                GfVec3f col(1.f);
+                if (lightAPI.GetColorAttr().Get(&v, timeCode) && v.IsHolding<GfVec3f>())
+                    col = v.UncheckedGet<GfVec3f>();
+                light.color = col;
+
+                float intensity = 1.f;
+                if (lightAPI.GetIntensityAttr().Get(&v, timeCode) && v.IsHolding<float>())
+                    intensity = v.UncheckedGet<float>();
+                light.intensity = intensity;
+
+                float exposure = 0.f;
+                if (lightAPI.GetExposureAttr().Get(&v, timeCode) && v.IsHolding<float>())
+                    exposure = v.UncheckedGet<float>();
+                light.exposure = exposure;
+
+                bool enableTemp = false;
+                if (lightAPI.GetEnableColorTemperatureAttr().Get(&v, timeCode) && v.IsHolding<bool>())
+                    enableTemp = v.UncheckedGet<bool>();
+                light.enableColorTemperature = enableTemp;
+
+                float temp = 6500.f;
+                if (lightAPI.GetColorTemperatureAttr().Get(&v, timeCode) && v.IsHolding<float>())
+                    temp = v.UncheckedGet<float>();
+                light.colorTemperature = temp;
+            }
+
+            // Determine illuminant type
+            if (light.enableColorTemperature) {
+                light.illuminant = SpectralLight::Illuminant::Blackbody;
+            } else {
+                // Check if colour is close to white → D65, otherwise RGB
+                float sum = light.color[0] + light.color[1] + light.color[2];
+                float maxC = std::max({light.color[0], light.color[1], light.color[2]});
+                float minC = std::min({light.color[0], light.color[1], light.color[2]});
+                if (sum > 2.5f && (maxC - minC) < 0.1f)
+                    light.illuminant = SpectralLight::Illuminant::D65;
+                else
+                    light.illuminant = SpectralLight::Illuminant::RGB;
+            }
+
+            _scene->AddLight(light);
+            fprintf(stderr, "SpectralRender: light '%s' — type=%d color=(%.2f,%.2f,%.2f) intensity=%.2f\n",
+                    light.name.c_str(), static_cast<int>(light.type),
+                    light.color[0], light.color[1], light.color[2], light.EffectiveIntensity());
         }
 
         // Process meshes

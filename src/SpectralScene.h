@@ -6,6 +6,7 @@
 #include <pxr/usd/sdf/path.h>
 
 #include "SpectralMaterial.h"
+#include "SpectralLight.h"
 
 #include <vector>
 #include <mutex>
@@ -91,10 +92,30 @@ public:
     /// All materials
     const std::vector<SpectralMaterial>& GetMaterials() const { return _materials; }
 
+    // ---- Lights ----
+
+    void AddLight(const SpectralLight& light) {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _lights.push_back(light);
+    }
+
+    void ClearLights() {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _lights.clear();
+    }
+
+    const std::vector<SpectralLight>& GetLights() const { return _lights; }
+    size_t LightCount() const { return _lights.size(); }
+
+    /// True if there are explicit lights in the scene.
+    /// If false, the integrator falls back to sky-only lighting.
+    bool HasLights() const { return !_lights.empty(); }
+
 private:
     mutable std::mutex _mutex;
     std::unordered_map<SdfPath, SpectralMeshData, SdfPath::Hash> _meshes;
     std::vector<SpectralMaterial> _materials;
+    std::vector<SpectralLight> _lights;
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

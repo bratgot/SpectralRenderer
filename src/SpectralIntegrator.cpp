@@ -99,13 +99,14 @@ void SpectralIntegrator::RenderFrame(
                         float radiance;
                         if (hit.valid()) {
                             const SpectralMaterial& mat = scene.GetMaterial(hit.tri->materialId);
+                            GfVec3d worldHit = ray.GetStartPoint() + hit.t * ray.GetDirection();
+                            GfVec3f hitPos = GfVec3f(worldHit);
                             radiance = _ShadeSpectral(
                                 *hit.tri,
                                 static_cast<double>(hit.u),
                                 static_cast<double>(hit.v),
-                                lambda, mat);
+                                lambda, mat, scene, hitPos);
                             // Camera-space Z for this sample
-                            GfVec3d worldHit = ray.GetStartPoint() + hit.t * ray.GetDirection();
                             GfVec3d viewHit = worldToView.Transform(worldHit);
                             float camZ = static_cast<float>(-viewHit[2]);
                             if (camZ < minDepth) minDepth = camZ;
@@ -327,15 +328,15 @@ GfVec3f SpectralIntegrator::_SkyColor(const GfVec3f& dir)
 }
 
 // ---------------------------------------------------------------------------
-// _ShadeSpectral — spectral Disney BSDF + sky lighting
+// _ShadeSpectral — spectral Disney BSDF + lighting
 //
-//   Evaluates the spectral Disney BSDF (diffuse + GGX specular)
-//   against a 6-direction sky quadrature.
-//   Metals use baseColor as spectral F0; dielectrics use ior.
+//   If scene has explicit lights, shade against them.
+//   Otherwise fall back to sky quadrature.
 // ---------------------------------------------------------------------------
 float SpectralIntegrator::_ShadeSpectral(
     const SpectralTriangle& tri, double u, double v, float lambda,
-    const SpectralMaterial& mat)
+    const SpectralMaterial& mat, const SpectralScene& scene,
+    const GfVec3f& hitPos)
 {
     float w  = float(1.0 - u - v);
     float uf = float(u);
@@ -345,16 +346,37 @@ float SpectralIntegrator::_ShadeSpectral(
     float len = N.GetLength();
     if (len > 1e-6f) N /= len;
 
-    // View direction — for direct sky lighting, approximate as normal
-    // (proper V from camera comes with bounce rays in Phase 4d)
-    GfVec3f V = N;
+    GfVec3f V = N;  // approximate — proper V from camera in Phase 4d
 
-    // Sky function wrapper (static member → function pointer)
-    auto skyFn = [](const GfVec3f& dir, float lam) -> float {
-        return _SkySpectral(dir, lam);
-    };
+    float radiance = 0.f;
 
-    return SpectralBSDF::EvaluateSkylighting(mat, N, V, lambda, skyFn);
+    if (scene.HasLights()) {
+        // Shade against explicit lights
+        for (const SpectralLight& light : scene.GetLights()) {
+            GfVec3f L = light.DirectionFrom(hitPos);
+            float bsdf = SpectralBSDF::Evaluate(mat, N, V, L, lambda);
+            float lightRad = light.SpectralEmission(lambda);
+            float atten = light.Attenuation(hitPos);
+            radiance += bsdf * lightRad * atten;
+        }
+
+        // Always add a small sky fill so objects aren't pitch black in shadows
+        auto skyFn = [](const GfVec3f& dir, float lam) -> float {
+            return _SkySpectral(dir, lam);
+        };
+        radiance += SpectralBSDF::EvaluateSkylighting(mat, N, V, lambda, skyFn) * 0.15f;
+    } else {
+        // No explicit lights — full sky lighting
+        auto skyFn = [](const GfVec3f& dir, float lam) -> float {
+            return _SkySpectral(dir, lam);
+        };
+        radiance = SpectralBSDF::EvaluateSkylighting(mat, N, V, lambda, skyFn);
+    }
+
+    // Emission from the surface material itself
+    radiance += mat.SpectralEmission(lambda);
+
+    return radiance;
 }
 
 // ---------------------------------------------------------------------------
