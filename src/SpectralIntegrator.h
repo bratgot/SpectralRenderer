@@ -23,6 +23,10 @@
 #include "SpectralBVH.h"
 #endif
 
+#ifdef SPECTRAL_HAS_OPTIX
+#include "SpectralGPU.h"
+#endif
+
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/gf/ray.h>
@@ -88,7 +92,21 @@ public:
         const SpectralCamera& camera,
         float* pixels,
         int spp = 1,
-        float* depthOut = nullptr);  // optional per-pixel depth output
+        float* depthOut = nullptr);
+
+#ifdef SPECTRAL_HAS_OPTIX
+    /// GPU render path using OptiX.
+    /// Falls back to CPU if GPU init fails.
+    static void RenderFrameGPU(
+        const SpectralScene& scene,
+        const SpectralCamera& camera,
+        float* pixels,
+        int spp = 1,
+        float* depthOut = nullptr);
+
+    /// Check if GPU rendering is available.
+    static bool IsGPUAvailable();
+#endif  // optional per-pixel depth output
 
 private:
     // Ray generation

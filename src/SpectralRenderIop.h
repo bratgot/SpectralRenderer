@@ -101,6 +101,7 @@ private:
     int   _samples    = 1;
     int   _maxBounces = 4;
     int   _tileSize   = 64;
+    int   _deviceMode = 0;         // 0=cpu, 1=gpu, 2=auto
     const char* _cameraPath = "";
 
     FormatPair _outputFormat;

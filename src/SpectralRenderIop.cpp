@@ -141,6 +141,11 @@ void SpectralRenderIop::knobs(Knob_Callback f)
     Format_knob(f, &_outputFormat, "format", "format");
 
     Divider(f, "Render settings");
+    static const char* const deviceNames[] = { "cpu", "gpu", "auto", nullptr };
+    Enumeration_knob(f, &_deviceMode, deviceNames, "device", "device");
+    Tooltip(f, "cpu: Embree CPU ray tracing\n"
+               "gpu: OptiX RTX GPU ray tracing\n"
+               "auto: GPU if available, else CPU");
     Int_knob(f, &_samples,    "samples",     "samples per pixel"); SetRange(f, 1, 256);
     Int_knob(f, &_maxBounces, "max_bounces", "max bounces");       SetRange(f, 1, 16);
     Int_knob(f, &_tileSize,   "tile_size",   "tile size");         SetRange(f, 16, 256);
@@ -770,20 +775,30 @@ void SpectralRenderIop::_EnsureFrameRendered()
     cam.imageHeight = H;
     cam.pixelAspect = fmtPtr->pixel_aspect();
 
-    // Diagnostic: show the values that _MakeRay will use for aspect correction
-    double screenAspect = (W * cam.pixelAspect) / double(H);
-    double projAspectInv = std::abs(cam.projInverse[0][0] / cam.projInverse[1][1]);
-    fprintf(stderr, "SpectralRender: rendering %dx%d pa=%.4f screenAspect=%.4f projAspect=%.4f correction=%.4f\n",
-            W, H, cam.pixelAspect, screenAspect, projAspectInv,
-            projAspectInv > 1e-6 ? screenAspect / projAspectInv : 1.0);
-    fprintf(stderr, "SpectralRender: projInverse diag: [%.4f, %.4f, %.4f, %.4f]\n",
-            cam.projInverse[0][0], cam.projInverse[1][1], cam.projInverse[2][2], cam.projInverse[3][3]);
-    fprintf(stderr, "SpectralRender: %zu triangles, %d spp%s\n",
-            _scene->TotalTriangles(), _samples,
-            _samples > 1 ? " (spectral)" : " (normal-as-colour)");
+    // Determine render device
+    bool useGPU = false;
+#ifdef SPECTRAL_HAS_OPTIX
+    if (_deviceMode == 1) {          // gpu
+        useGPU = true;
+    } else if (_deviceMode == 2) {   // auto
+        useGPU = SpectralIntegrator::IsGPUAvailable();
+    }
+#endif
 
-    SpectralIntegrator::RenderFrame(*_scene, cam, _frameBuffer.data(), _samples,
-                                     _depthBuffer.data());
+    const char* deviceStr = useGPU ? "GPU" : "CPU";
+    fprintf(stderr, "SpectralRender: rendering %dx%d, %zu tris, %d spp, device=%s\n",
+            W, H, _scene->TotalTriangles(), _samples, deviceStr);
+
+#ifdef SPECTRAL_HAS_OPTIX
+    if (useGPU) {
+        SpectralIntegrator::RenderFrameGPU(*_scene, cam, _frameBuffer.data(),
+                                            _samples, _depthBuffer.data());
+    } else
+#endif
+    {
+        SpectralIntegrator::RenderFrame(*_scene, cam, _frameBuffer.data(),
+                                         _samples, _depthBuffer.data());
+    }
     _frameReady.store(true);
 
     fprintf(stderr, "SpectralRender: render complete\n");

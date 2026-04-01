@@ -408,4 +408,72 @@ float SpectralIntegrator::_Hash(unsigned int seed)
     return float(seed) / float(0xFFFFFFFFu);
 }
 
+// ---------------------------------------------------------------------------
+// GPU render path (Phase 3)
+// ---------------------------------------------------------------------------
+#ifdef SPECTRAL_HAS_OPTIX
+
+#include "SpectralGPUKernel_ptx.h"   // embedded PTX string
+
+// Lazy-initialized singleton GPU context
+static SpectralGPU* _GetGPU()
+{
+    static SpectralGPU* s_gpu = nullptr;
+    static bool s_tried = false;
+
+    if (!s_tried) {
+        s_tried = true;
+        s_gpu = new SpectralGPU();
+        if (!s_gpu->Initialize(std::string(kSpectralGPUKernelPTX))) {
+            fprintf(stderr, "SpectralIntegrator: GPU init failed, falling back to CPU\n");
+            delete s_gpu;
+            s_gpu = nullptr;
+        } else {
+            fprintf(stderr, "SpectralIntegrator: GPU initialized successfully\n");
+        }
+    }
+    return s_gpu;
+}
+
+bool SpectralIntegrator::IsGPUAvailable()
+{
+    return _GetGPU() != nullptr;
+}
+
+void SpectralIntegrator::RenderFrameGPU(
+    const SpectralScene&  scene,
+    const SpectralCamera& camera,
+    float*                pixels,
+    int                   spp,
+    float*                depthOut)
+{
+    SpectralGPU* gpu = _GetGPU();
+    if (!gpu) {
+        // Fallback to CPU
+        fprintf(stderr, "SpectralIntegrator: GPU unavailable, using CPU\n");
+        RenderFrame(scene, camera, pixels, spp, depthOut);
+        return;
+    }
+
+    // Build acceleration structure
+    if (!gpu->BuildAccel(scene)) {
+        fprintf(stderr, "SpectralIntegrator: GPU accel build failed, using CPU\n");
+        RenderFrame(scene, camera, pixels, spp, depthOut);
+        return;
+    }
+
+    // Launch GPU render
+    if (!gpu->Render(camera, camera.imageWidth, camera.imageHeight,
+                     pixels, depthOut, spp)) {
+        fprintf(stderr, "SpectralIntegrator: GPU render failed, using CPU\n");
+        RenderFrame(scene, camera, pixels, spp, depthOut);
+        return;
+    }
+
+    fprintf(stderr, "SpectralIntegrator: GPU render complete (%dx%d)\n",
+            camera.imageWidth, camera.imageHeight);
+}
+
+#endif // SPECTRAL_HAS_OPTIX
+
 PXR_NAMESPACE_CLOSE_SCOPE

@@ -5,6 +5,59 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# ---------------------------------------------------------------------------
+# CUDA + OptiX (Phase 3)
+# ---------------------------------------------------------------------------
+set(CUDA_TOOLKIT_ROOT "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6" CACHE PATH "CUDA toolkit")
+set(OPTIX_ROOT "C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.1.0" CACHE PATH "OptiX SDK")
+
+set(HAS_OPTIX FALSE)
+if(EXISTS "${OPTIX_ROOT}/include/optix.h" AND EXISTS "${CUDA_TOOLKIT_ROOT}/bin/nvcc.exe")
+    message(STATUS "OptiX found: ${OPTIX_ROOT}")
+    message(STATUS "CUDA found: ${CUDA_TOOLKIT_ROOT}")
+    set(HAS_OPTIX TRUE)
+
+    find_library(LIB_CUDA cuda PATHS "${CUDA_TOOLKIT_ROOT}/lib/x64" NO_DEFAULT_PATH)
+    find_library(LIB_CUDART cudart PATHS "${CUDA_TOOLKIT_ROOT}/lib/x64" NO_DEFAULT_PATH)
+
+    # Compile .cu to PTX at build time
+    set(PTX_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/SpectralGPUKernel.cu")
+    set(PTX_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/SpectralGPUKernel.ptx")
+    set(PTX_HEADER "${CMAKE_CURRENT_BINARY_DIR}/SpectralGPUKernel_ptx.h")
+
+    add_custom_command(
+        OUTPUT "${PTX_OUTPUT}"
+        COMMAND "${CUDA_TOOLKIT_ROOT}/bin/nvcc.exe"
+            -ptx
+            -O3
+            --use_fast_math
+            -I "${OPTIX_ROOT}/include"
+            -I "${CUDA_TOOLKIT_ROOT}/include"
+            -I "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            -o "${PTX_OUTPUT}"
+            "${PTX_SOURCE}"
+        DEPENDS "${PTX_SOURCE}" "${CMAKE_CURRENT_SOURCE_DIR}/src/SpectralGPUParams.h"
+        COMMENT "Compiling OptiX PTX kernel"
+        VERBATIM
+    )
+
+    # Convert PTX to an embeddable C header
+    add_custom_command(
+        OUTPUT "${PTX_HEADER}"
+        COMMAND "${CMAKE_COMMAND}"
+            -DPTX_FILE=${PTX_OUTPUT}
+            -DHEADER_FILE=${PTX_HEADER}
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedPTX.cmake"
+        DEPENDS "${PTX_OUTPUT}"
+        COMMENT "Embedding PTX as C header"
+        VERBATIM
+    )
+
+    add_custom_target(SpectralPTX DEPENDS "${PTX_HEADER}")
+else()
+    message(STATUS "OptiX or CUDA not found — GPU rendering disabled")
+endif()
+
 set(NUKE_ROOT "C:/Program Files/Nuke17.0v1" CACHE PATH "Nuke 17.0v1 install root")
 
 if(NOT EXISTS "${NUKE_ROOT}/DDImage.lib")
@@ -108,6 +161,9 @@ endif()
 if(HAS_OSD)
     list(APPEND SPECTRAL_CORE_SOURCES src/SpectralSubdiv.cpp)
 endif()
+if(HAS_OPTIX)
+    list(APPEND SPECTRAL_CORE_SOURCES src/SpectralGPU.cpp)
+endif()
 
 add_library(SpectralCore STATIC ${SPECTRAL_CORE_SOURCES})
 target_include_directories(SpectralCore PUBLIC ${SPECTRAL_INCLUDES})
@@ -125,6 +181,17 @@ if(HAS_OSD)
     target_include_directories(SpectralCore PUBLIC "${OSD_INCLUDE_DIR}")
     target_link_libraries(SpectralCore PUBLIC "${LIB_OSD_CPU}")
     target_compile_definitions(SpectralCore PUBLIC SPECTRAL_HAS_OSD=1)
+endif()
+
+if(HAS_OPTIX)
+    target_include_directories(SpectralCore PUBLIC
+        "${OPTIX_ROOT}/include"
+        "${CUDA_TOOLKIT_ROOT}/include"
+        "${CMAKE_CURRENT_BINARY_DIR}"    # for SpectralGPUKernel_ptx.h
+    )
+    target_link_libraries(SpectralCore PUBLIC "${LIB_CUDA}" "${LIB_CUDART}")
+    target_compile_definitions(SpectralCore PUBLIC SPECTRAL_HAS_OPTIX=1)
+    add_dependencies(SpectralCore SpectralPTX)
 endif()
 
 # ---------------------------------------------------------------------------
