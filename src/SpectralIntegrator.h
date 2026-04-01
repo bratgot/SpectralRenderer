@@ -51,6 +51,7 @@ struct SpectralCamera {
     double pixelAspect       = 1.0;   // pixel aspect ratio from format
     float  shutterOpen       = 0.f;   // motion blur shutter [0,1] for Embree
     float  shutterClose      = 0.f;   // 0,0 = no motion blur
+    float  adaptiveThreshold = 0.05f; // 0 = disabled, 0.05 = default
 };
 
 // ---------------------------------------------------------------------------

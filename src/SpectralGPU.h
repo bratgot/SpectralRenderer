@@ -103,6 +103,9 @@ private:
     CUdeviceptr            _d_materialIds  = 0;
     CUdeviceptr            _d_materials    = 0;
     CUdeviceptr            _d_lights       = 0;
+    CUdeviceptr            _d_uvs          = 0;
+    CUdeviceptr            _d_textures     = 0;   // GPUTexture array
+    std::vector<CUdeviceptr> _d_texPixels;         // per-texture pixel data
     CUdeviceptr            _d_params       = 0;
 
     // Current allocation sizes
@@ -111,6 +114,7 @@ private:
     unsigned int           _triCount = 0;
     unsigned int           _materialCount = 0;
     unsigned int           _lightCount = 0;
+    unsigned int           _textureCount = 0;
 
     void _FreeAccel();
     void _FreeBuffers();

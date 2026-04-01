@@ -99,6 +99,10 @@ void SpectralGPU::_FreeBuffers()
     if (_d_materialIds)  { cudaFree(reinterpret_cast<void*>(_d_materialIds));  _d_materialIds = 0; }
     if (_d_materials)    { cudaFree(reinterpret_cast<void*>(_d_materials));    _d_materials = 0; }
     if (_d_lights)       { cudaFree(reinterpret_cast<void*>(_d_lights));       _d_lights = 0; }
+    if (_d_uvs)          { cudaFree(reinterpret_cast<void*>(_d_uvs));          _d_uvs = 0; }
+    for (auto& dp : _d_texPixels) { if (dp) cudaFree(reinterpret_cast<void*>(dp)); }
+    _d_texPixels.clear();
+    if (_d_textures)     { cudaFree(reinterpret_cast<void*>(_d_textures));     _d_textures = 0; }
     if (_d_params)       { cudaFree(reinterpret_cast<void*>(_d_params));       _d_params = 0; }
     _allocW = _allocH = 0;
     _triCount = 0;
@@ -139,7 +143,7 @@ bool SpectralGPU::Initialize(const std::string& ptxSource)
     OptixPipelineCompileOptions pipelineOptions = {};
     pipelineOptions.usesMotionBlur        = false;
     pipelineOptions.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
-    pipelineOptions.numPayloadValues      = 5;
+    pipelineOptions.numPayloadValues      = 7;  // nx,ny,nz,t,matId,uvX,uvY
     pipelineOptions.numAttributeValues    = 2;  // barycentrics
     pipelineOptions.pipelineLaunchParamsVariableName = "params";
 
@@ -261,9 +265,11 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
     std::vector<float3> vertices;
     std::vector<float3> normals;
     std::vector<int>    matIds;
+    std::vector<float2> uvs;
     vertices.reserve(scene.TotalTriangles() * 3);
     normals.reserve(scene.TotalTriangles() * 3);
     matIds.reserve(scene.TotalTriangles());
+    uvs.reserve(scene.TotalTriangles() * 3);
 
     for (auto& kv : scene.GetMeshes()) {
         if (!kv.second.visible) continue;
@@ -275,6 +281,9 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
             normals.push_back(make_float3(tri.n1[0], tri.n1[1], tri.n1[2]));
             normals.push_back(make_float3(tri.n2[0], tri.n2[1], tri.n2[2]));
             matIds.push_back(tri.materialId);
+            uvs.push_back(make_float2(tri.uv0[0], tri.uv0[1]));
+            uvs.push_back(make_float2(tri.uv1[0], tri.uv1[1]));
+            uvs.push_back(make_float2(tri.uv2[0], tri.uv2[1]));
         }
     }
 
@@ -303,6 +312,13 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
     CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_materialIds), matIds.data(),
                           matIdBytes, cudaMemcpyHostToDevice));
 
+    // Upload UVs (3 float2 per triangle)
+    if (_d_uvs) { cudaFree(reinterpret_cast<void*>(_d_uvs)); _d_uvs = 0; }
+    const size_t uvBytes = uvs.size() * sizeof(float2);
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_uvs), uvBytes));
+    CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_uvs), uvs.data(),
+                          uvBytes, cudaMemcpyHostToDevice));
+
     // Upload material table
     {
         const auto& mats = scene.GetMaterials();
@@ -316,6 +332,7 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
             gpuMats[i].emissiveColor = make_float3(mats[i].emissiveColor[0], mats[i].emissiveColor[1], mats[i].emissiveColor[2]);
             gpuMats[i].abbeNumber        = mats[i].abbeNumber;
             gpuMats[i].thinFilmThickness = mats[i].thinFilmThickness;
+            gpuMats[i].baseColorTexId    = mats[i].baseColorTexId;
         }
         const size_t matBytes = gpuMats.size() * sizeof(spectral_gpu::GPUMaterial);
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_materials), matBytes));
@@ -349,6 +366,45 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
                                   lightBytes, cudaMemcpyHostToDevice));
             _lightCount = static_cast<unsigned int>(gpuLights.size());
             fprintf(stderr, "SpectralGPU: uploaded %zu lights to device\n", gpuLights.size());
+        }
+    }
+
+    // Upload textures
+    for (auto& dp : _d_texPixels) { if (dp) cudaFree(reinterpret_cast<void*>(dp)); }
+    _d_texPixels.clear();
+    if (_d_textures) { cudaFree(reinterpret_cast<void*>(_d_textures)); _d_textures = 0; }
+    _textureCount = 0;
+    {
+        size_t numTex = scene.TextureCount();
+        if (numTex > 0) {
+            std::vector<spectral_gpu::GPUTexture> gpuTextures(numTex);
+            _d_texPixels.resize(numTex, 0);
+
+            for (size_t i = 0; i < numTex; ++i) {
+                const auto* tex = scene.GetTexture(static_cast<int>(i));
+                if (!tex || !tex->IsValid()) {
+                    gpuTextures[i].pixels = nullptr;
+                    gpuTextures[i].width = 0;
+                    gpuTextures[i].height = 0;
+                    gpuTextures[i].channels = 0;
+                    continue;
+                }
+                size_t pixelBytes = tex->_pixels.size() * sizeof(float);
+                CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_texPixels[i]), pixelBytes));
+                CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_texPixels[i]),
+                                      tex->_pixels.data(), pixelBytes, cudaMemcpyHostToDevice));
+                gpuTextures[i].pixels = reinterpret_cast<float*>(_d_texPixels[i]);
+                gpuTextures[i].width = tex->GetWidth();
+                gpuTextures[i].height = tex->GetHeight();
+                gpuTextures[i].channels = tex->_channels;
+            }
+
+            size_t texHdrBytes = gpuTextures.size() * sizeof(spectral_gpu::GPUTexture);
+            CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_textures), texHdrBytes));
+            CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_textures),
+                                  gpuTextures.data(), texHdrBytes, cudaMemcpyHostToDevice));
+            _textureCount = static_cast<unsigned int>(numTex);
+            fprintf(stderr, "SpectralGPU: uploaded %zu textures to device\n", numTex);
         }
     }
 
@@ -416,6 +472,7 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
     HitGroupSbtRecord hitRec = {};
     hitRec.data.normals = reinterpret_cast<float3*>(_d_normals);
     hitRec.data.materialIds = reinterpret_cast<int*>(_d_materialIds);
+    hitRec.data.uvs = reinterpret_cast<float2*>(_d_uvs);
     OPTIX_CHECK(optixSbtRecordPackHeader(_hitgroupPG, &hitRec));
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_sbtHitgroupRecord), sizeof(HitGroupSbtRecord)));
     CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_sbtHitgroupRecord), &hitRec,
@@ -481,6 +538,9 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     launchParams.lights     = reinterpret_cast<spectral_gpu::GPULight*>(_d_lights);
     launchParams.lightCount = _lightCount;
     launchParams.maxBounces = maxBounces;
+    launchParams.uvs          = reinterpret_cast<float2*>(_d_uvs);
+    launchParams.textures     = reinterpret_cast<spectral_gpu::GPUTexture*>(_d_textures);
+    launchParams.textureCount = _textureCount;
 
     // projInverse: CPU uses M*v (column-vector), copy as-is
     // viewToWorld: CPU uses v*M (row-vector via Transform), so transpose for GPU

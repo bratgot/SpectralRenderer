@@ -407,6 +407,50 @@ static __forceinline__ __device__ int getHitMaterialId()
     return d->materialIds[optixGetPrimitiveIndex()];
 }
 
+static __forceinline__ __device__ float2 getHitUV()
+{
+    unsigned int pi = optixGetPrimitiveIndex();
+    float2 bary = optixGetTriangleBarycentrics();
+    float u=bary.x, v=bary.y, w=1.f-u-v;
+    const HitGroupData* d = reinterpret_cast<const HitGroupData*>(optixGetSbtDataPointer());
+    float2 uv0=d->uvs[pi*3], uv1=d->uvs[pi*3+1], uv2=d->uvs[pi*3+2];
+    return make_float2(uv0.x*w+uv1.x*u+uv2.x*v, uv0.y*w+uv1.y*u+uv2.y*v);
+}
+
+// Bilinear texture sampling on GPU
+static __forceinline__ __device__ float3 sampleTextureGPU(int texId, float2 uv)
+{
+    if (texId < 0 || texId >= (int)params.textureCount) return make_float3(1,0,1);
+    const GPUTexture& tex = params.textures[texId];
+    if (!tex.pixels || tex.width <= 0 || tex.height <= 0) return make_float3(1,0,1);
+
+    // Repeat wrap
+    float su = uv.x - floorf(uv.x);
+    float sv = 1.f - (uv.y - floorf(uv.y)); // flip V
+
+    float fx = su * (tex.width - 1);
+    float fy = sv * (tex.height - 1);
+    int x0 = max(0, min(int(fx), tex.width-1));
+    int y0 = max(0, min(int(fy), tex.height-1));
+    int x1 = min(x0+1, tex.width-1);
+    int y1 = min(y0+1, tex.height-1);
+    float dx = fx - x0, dy = fy - y0;
+
+    int ch = tex.channels;
+    auto px = [&](int x, int y) -> float3 {
+        int idx = (y * tex.width + x) * ch;
+        float r = tex.pixels[idx];
+        float g = ch >= 2 ? tex.pixels[idx+1] : r;
+        float b = ch >= 3 ? tex.pixels[idx+2] : r;
+        return make_float3(r,g,b);
+    };
+
+    float3 c00=px(x0,y0), c10=px(x1,y0), c01=px(x0,y1), c11=px(x1,y1);
+    float3 top = make_float3(c00.x*(1-dx)+c10.x*dx, c00.y*(1-dx)+c10.y*dx, c00.z*(1-dx)+c10.z*dx);
+    float3 bot = make_float3(c01.x*(1-dx)+c11.x*dx, c01.y*(1-dx)+c11.y*dx, c01.z*(1-dx)+c11.z*dx);
+    return make_float3(top.x*(1-dy)+bot.x*dy, top.y*(1-dy)+bot.y*dy, top.z*(1-dy)+bot.z*dy);
+}
+
 // ---------------------------------------------------------------------------
 // Shade one hit — direct lights + sky fill
 // ---------------------------------------------------------------------------
@@ -423,11 +467,11 @@ static __forceinline__ __device__ float shadeHit(
             // Shadow ray — cull backfaces so rays through convex objects pass through
             bool inShadow = false;
             float3 sOrig = make_float3(hitPos.x+N.x*0.01f, hitPos.y+N.y*0.01f, hitPos.z+N.z*0.01f);
-            unsigned int sp0=0,sp1=0,sp2=0,sp3=__float_as_uint(1e30f),sp4=0;
+            unsigned int sp0=0,sp1=0,sp2=0,sp3=__float_as_uint(1e30f),sp4=0,sp5=0,sp6=0;
             optixTrace(params.traversable, sOrig, L,
                        1e-4f, 1e30f, 0.f, OptixVisibilityMask(0xFF),
                        OPTIX_RAY_FLAG_CULL_BACK_FACING_TRIANGLES | OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
-                       0, 1, 0, sp0,sp1,sp2,sp3,sp4);
+                       0, 1, 0, sp0,sp1,sp2,sp3,sp4,sp5,sp6);
 
             if (sp4 > 0u) {
                 if (light.type == 0 || light.type == 3) {
@@ -465,9 +509,9 @@ extern "C" __global__ void __raygen__spectral()
         // Normal-as-colour
         float3 origin, dir;
         makeRay(px+0.5f, py+0.5f, W, H, origin, dir);
-        unsigned int p0=0,p1=0,p2=0,p3=__float_as_uint(1e30f),p4=0;
+        unsigned int p0=0,p1=0,p2=0,p3=__float_as_uint(1e30f),p4=0,p5=0,p6=0;
         optixTrace(params.traversable, origin, dir, 1e-4f,1e30f,0.f,
-                   OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0, p0,p1,p2,p3,p4);
+                   OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0, p0,p1,p2,p3,p4,p5,p6);
         params.framebuffer[pixIdx] = make_float4(
             __uint_as_float(p0),__uint_as_float(p1),__uint_as_float(p2),1.f);
         if (params.depthbuffer) params.depthbuffer[pixIdx] = __uint_as_float(p3);
@@ -487,9 +531,9 @@ extern "C" __global__ void __raygen__spectral()
             makeRay(px+jx, py+jy, W, H, origin, dir);
 
             // Primary ray
-            unsigned int p0=0,p1=0,p2=0,p3=__float_as_uint(1e30f),p4=0;
+            unsigned int p0=0,p1=0,p2=0,p3=__float_as_uint(1e30f),p4=0,p5=0,p6=0;
             optixTrace(params.traversable, origin, dir, 1e-4f,1e30f,0.f,
-                       OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0, p0,p1,p2,p3,p4);
+                       OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0, p0,p1,p2,p3,p4,p5,p6);
 
             float depth = __uint_as_float(p3);
             bool isHit = (p4 > 0u);
@@ -499,7 +543,13 @@ extern "C" __global__ void __raygen__spectral()
             if (isHit) {
                 int matId = int(p4)-1;
                 if (matId<0||matId>=int(params.materialCount)) matId=0;
-                const GPUMaterial& mat = params.materials[matId];
+                GPUMaterial mat = params.materials[matId];
+
+                // Resolve texture at hit UV
+                if (mat.baseColorTexId >= 0) {
+                    float2 hitUV = make_float2(__uint_as_float(p5), __uint_as_float(p6));
+                    mat.baseColor = sampleTextureGPU(mat.baseColorTexId, hitUV);
+                }
 
                 float3 N = normalize3(make_float3(
                     __uint_as_float(p0),__uint_as_float(p1),__uint_as_float(p2)));
@@ -516,6 +566,7 @@ extern "C" __global__ void __raygen__spectral()
                 float throughput = 1.f;
                 float3 bN=N, bV=V, bOrigin=hitPos;
                 const GPUMaterial* bMat = &mat;
+                GPUMaterial resolvedMat = mat;  // mutable copy for texture resolution
                 unsigned int bSeed = seed + 100u;
                 bool isEntering = true;
 
@@ -536,16 +587,21 @@ extern "C" __global__ void __raygen__spectral()
                     // Offset: along -N for transmission, +N for reflection
                     float bOff = bTransmitted ? -0.1f : 0.01f;
                     float3 bOrig = make_float3(bOrigin.x+bN.x*bOff, bOrigin.y+bN.y*bOff, bOrigin.z+bN.z*bOff);
-                    unsigned int bp0=0,bp1=0,bp2=0,bp3=__float_as_uint(1e30f),bp4=0;
+                    unsigned int bp0=0,bp1=0,bp2=0,bp3=__float_as_uint(1e30f),bp4=0,bp5=0,bp6=0;
                     optixTrace(params.traversable, bOrig, bounceDir, 1e-4f,1e30f,0.f,
-                               OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0, bp0,bp1,bp2,bp3,bp4);
+                               OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0, bp0,bp1,bp2,bp3,bp4,bp5,bp6);
 
                     if (bp4 == 0u) break;  // miss — no sky
 
                     float bDepth = __uint_as_float(bp3);
                     int bMatId = int(bp4)-1;
                     if (bMatId<0||bMatId>=int(params.materialCount)) bMatId=0;
-                    bMat = &params.materials[bMatId];
+                    resolvedMat = params.materials[bMatId];  // copy for texture resolution
+                    if (resolvedMat.baseColorTexId >= 0) {
+                        float2 bUV = make_float2(__uint_as_float(bp5), __uint_as_float(bp6));
+                        resolvedMat.baseColor = sampleTextureGPU(resolvedMat.baseColorTexId, bUV);
+                    }
+                    bMat = &resolvedMat;
 
                     float3 rawN = normalize3(make_float3(
                         __uint_as_float(bp0),__uint_as_float(bp1),__uint_as_float(bp2)));
@@ -586,6 +642,7 @@ extern "C" __global__ void __closesthit__spectral()
     float3 normal = getHitNormal();
     float tHit = optixGetRayTmax();
     int matId = getHitMaterialId();
+    float2 hitUV = getHitUV();
 
     if (params.spp <= 1) {
         float3 c = shadeNormal(normal);
@@ -599,6 +656,8 @@ extern "C" __global__ void __closesthit__spectral()
     }
     optixSetPayload_3(__float_as_uint(tHit));
     optixSetPayload_4(static_cast<unsigned int>(matId+1));
+    optixSetPayload_5(__float_as_uint(hitUV.x));
+    optixSetPayload_6(__float_as_uint(hitUV.y));
 }
 
 // ---------------------------------------------------------------------------
@@ -610,4 +669,6 @@ extern "C" __global__ void __miss__spectral()
     optixSetPayload_0(0u); optixSetPayload_1(0u); optixSetPayload_2(0u);
     optixSetPayload_3(__float_as_uint(1e30f));
     optixSetPayload_4(0u);
+    optixSetPayload_5(0u);
+    optixSetPayload_6(0u);
 }

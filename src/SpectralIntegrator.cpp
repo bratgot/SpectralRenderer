@@ -85,75 +85,144 @@ void SpectralIntegrator::RenderFrame(
 
                 } else {
                     // ---- SPP>1: hero wavelength spectral mode ----
-                    float X = 0.f, Y = 0.f, Z = 0.f;
-                    float minDepth = 1e30f;
-                    int firstObjectId = 0, firstMaterialId = 0;
-                    bool gotFirstHit = false;
-
-                    for (int s = 0; s < spp; ++s) {
-                        unsigned int seed = (imageY * W + imageX) * 1031 + s * 6571;
-
-                        float jx = _Hash(seed);
-                        float jy = _Hash(seed + 1);
-
-                        float wu = (float(s) + _Hash(seed + 2)) / float(spp);
-                        float lambda = SpectralSpectrum::SampleWavelength(wu);
-
-                        // Random time for motion blur [shutterOpen, shutterClose]
-                        float rayTime = camera.shutterOpen +
-                            _Hash(seed + 3) * (camera.shutterClose - camera.shutterOpen);
-
-                        GfRay ray = _MakeRay(camera, imageX, imageY, jx, jy);
-                        SpectralBVH::Hit hit = bvh.Intersect(ray, rayTime);
-
-                        float radiance;
-                        if (hit.valid()) {
-                            const SpectralMaterial& mat = scene.GetMaterial(hit.tri->materialId);
-                            GfVec3d worldHit = ray.GetStartPoint() + hit.t * ray.GetDirection();
-                            GfVec3f hitPos = GfVec3f(worldHit);
-                            GfVec3f rayDir = GfVec3f(ray.GetDirection());
-                            unsigned int bounceSeed = seed + 100u;
-                            radiance = _ShadeSpectral(
-                                *hit.tri,
-                                static_cast<double>(hit.u),
-                                static_cast<double>(hit.v),
-                                lambda, mat, scene, hitPos, rayDir,
-                                maxBounces, bounceSeed, bvh, rayTime);
-                            // Camera-space Z for this sample
-                            GfVec3d viewHit = worldToView.Transform(worldHit);
-                            float camZ = static_cast<float>(-viewHit[2]);
-                            if (camZ < minDepth) minDepth = camZ;
-                            if (!gotFirstHit) {
-                                firstObjectId = hit.tri->objectId;
-                                firstMaterialId = hit.tri->materialId;
-                                gotFirstHit = true;
-                            }
-                        } else {
-                            radiance = 0.f;
-                        }
-
-                        GfVec3f xyz = SpectralSpectrum::RadianceToXYZ(radiance, lambda);
-                        X += xyz[0];
-                        Y += xyz[1];
-                        Z += xyz[2];
-                    }
-
-                    float invSpp = 1.f / float(spp);
-                    GfVec3f rgb = SpectralSpectrum::XYZtoLinearRGB(
-                        X * invSpp, Y * invSpp, Z * invSpp);
-
-                    float* px = pixels + pixIdx * 4;
-                    px[0] = std::max(0.f, rgb[0]);
-                    px[1] = std::max(0.f, rgb[1]);
-                    px[2] = std::max(0.f, rgb[2]);
-                    px[3] = 1.0f;
-
-                    if (depthOut) depthOut[pixIdx] = minDepth;
-                    if (objectIdOut) objectIdOut[pixIdx] = static_cast<float>(firstObjectId);
-                    if (materialIdOut) materialIdOut[pixIdx] = static_cast<float>(firstMaterialId);
+                    // Handled below in adaptive sampling pass
                 }
             }
         });
+
+    // ---- Adaptive spectral rendering ----
+    if (spectral) {
+        const size_t numPixels = size_t(W) * H;
+
+        // Per-pixel accumulators
+        std::vector<float> accX(numPixels, 0.f);
+        std::vector<float> accY(numPixels, 0.f);
+        std::vector<float> accZ(numPixels, 0.f);
+        std::vector<float> accLumSum(numPixels, 0.f);   // for variance
+        std::vector<float> accLumSqSum(numPixels, 0.f); // for variance
+        std::vector<int>   accCount(numPixels, 0);
+        std::vector<bool>  converged(numPixels, false);
+        std::vector<float> depthBuf(numPixels, 1e30f);
+        std::vector<int>   objIdBuf(numPixels, 0);
+        std::vector<int>   matIdBuf(numPixels, 0);
+
+        // Split into adaptive passes
+        const int batchSize = std::max(4, spp / 4);
+        const float adaptThreshold = camera.adaptiveThreshold;
+        int totalSampled = 0;
+
+        for (int passStart = 0; passStart < spp; passStart += batchSize) {
+            const int passEnd = std::min(passStart + batchSize, spp);
+            const int passSpp = passEnd - passStart;
+
+            std::for_each(
+                std::execution::par_unseq,
+                rows.begin(), rows.end(),
+                [&](unsigned int imageY)
+                {
+                    for (unsigned int imageX = 0; imageX < W; ++imageX) {
+                        const size_t pixIdx = imageY * W + imageX;
+
+                        // Skip converged pixels (after first pass)
+                        if (converged[pixIdx]) continue;
+
+                        for (int s = passStart; s < passEnd; ++s) {
+                            unsigned int seed = (imageY * W + imageX) * 1031 + s * 6571;
+
+                            float jx = _Hash(seed);
+                            float jy = _Hash(seed + 1);
+                            float wu = (float(s) + _Hash(seed + 2)) / float(spp);
+                            float lambda = SpectralSpectrum::SampleWavelength(wu);
+
+                            float rayTime = camera.shutterOpen +
+                                _Hash(seed + 3) * (camera.shutterClose - camera.shutterOpen);
+
+                            GfRay ray = _MakeRay(camera, imageX, imageY, jx, jy);
+                            SpectralBVH::Hit hit = bvh.Intersect(ray, rayTime);
+
+                            float radiance;
+                            if (hit.valid()) {
+                                const SpectralMaterial& mat = scene.GetMaterial(hit.tri->materialId);
+                                GfVec3d worldHit = ray.GetStartPoint() + hit.t * ray.GetDirection();
+                                GfVec3f hitPos = GfVec3f(worldHit);
+                                GfVec3f rayDir = GfVec3f(ray.GetDirection());
+                                unsigned int bounceSeed = seed + 100u;
+                                radiance = _ShadeSpectral(
+                                    *hit.tri,
+                                    static_cast<double>(hit.u),
+                                    static_cast<double>(hit.v),
+                                    lambda, mat, scene, hitPos, rayDir,
+                                    maxBounces, bounceSeed, bvh, rayTime);
+
+                                GfVec3d viewHit = worldToView.Transform(worldHit);
+                                float camZ = static_cast<float>(-viewHit[2]);
+                                if (camZ < depthBuf[pixIdx]) depthBuf[pixIdx] = camZ;
+                                if (objIdBuf[pixIdx] == 0) {
+                                    objIdBuf[pixIdx] = hit.tri->objectId;
+                                    matIdBuf[pixIdx] = hit.tri->materialId;
+                                }
+                            } else {
+                                radiance = 0.f;
+                            }
+
+                            GfVec3f xyz = SpectralSpectrum::RadianceToXYZ(radiance, lambda);
+                            accX[pixIdx] += xyz[0];
+                            accY[pixIdx] += xyz[1];
+                            accZ[pixIdx] += xyz[2];
+                            accCount[pixIdx]++;
+
+                            // Track luminance variance (Y channel ≈ luminance)
+                            float lum = xyz[1];
+                            accLumSum[pixIdx] += lum;
+                            accLumSqSum[pixIdx] += lum * lum;
+                        }
+                    }
+                });
+
+            totalSampled += passSpp;
+
+            // After first pass, check convergence
+            if (passStart > 0 && adaptThreshold > 0.f) {
+                int convergedCount = 0;
+                for (size_t i = 0; i < numPixels; ++i) {
+                    if (converged[i]) { convergedCount++; continue; }
+                    int n = accCount[i];
+                    if (n < 8) continue;  // need minimum samples for stable variance
+                    float mean = accLumSum[i] / float(n);
+                    float var = accLumSqSum[i] / float(n) - mean * mean;
+                    float stddev = std::sqrt(std::max(0.f, var));
+                    if (stddev < adaptThreshold * std::max(mean, 0.001f)) {
+                        converged[i] = true;
+                        convergedCount++;
+                    }
+                }
+                if (passStart + batchSize < spp) {
+                    fprintf(stderr, "SpectralRender: adaptive pass %d/%d — %d/%zu pixels converged (%.0f%%)\n",
+                            passStart / batchSize + 1, (spp + batchSize - 1) / batchSize,
+                            convergedCount, numPixels,
+                            100.f * convergedCount / numPixels);
+                }
+            }
+        }
+
+        // Write final pixel values
+        for (size_t i = 0; i < numPixels; ++i) {
+            int n = accCount[i];
+            if (n == 0) n = 1;
+            float invN = 1.f / float(n);
+            GfVec3f rgb = SpectralSpectrum::XYZtoLinearRGB(
+                accX[i] * invN, accY[i] * invN, accZ[i] * invN);
+            float* px = pixels + i * 4;
+            px[0] = std::max(0.f, rgb[0]);
+            px[1] = std::max(0.f, rgb[1]);
+            px[2] = std::max(0.f, rgb[2]);
+            px[3] = 1.0f;
+
+            if (depthOut) depthOut[i] = depthBuf[i];
+            if (objectIdOut) objectIdOut[i] = static_cast<float>(objIdBuf[i]);
+            if (materialIdOut) materialIdOut[i] = static_cast<float>(matIdBuf[i]);
+        }
+    }
 
 #else
     // Brute-force fallback

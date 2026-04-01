@@ -163,6 +163,14 @@ void SpectralRenderIop::knobs(Knob_Callback f)
     Int_knob(f, &_maxBounces, "max_bounces", "max bounces");       SetRange(f, 1, 16);
     Int_knob(f, &_tileSize,   "tile_size",   "tile size");         SetRange(f, 16, 256);
 
+    Float_knob(f, &_adaptiveThreshold, "adaptive_threshold", "adaptive threshold");
+    SetRange(f, 0.f, 0.5f);
+    Tooltip(f, "Adaptive sampling convergence threshold.\n"
+               "Pixels with noise below this level stop receiving samples.\n"
+               "0.0 = disabled (all pixels get equal samples)\n"
+               "0.05 = default (saves 30-60% render time)\n"
+               "0.1 = aggressive (faster, slightly noisier dark areas)");
+
     Divider(f, "Lighting");
     Float_knob(f, &_lightIntensity, "light_intensity", "light intensity");
     SetRange(f, 0.01f, 10.f);
@@ -1376,6 +1384,7 @@ void SpectralRenderIop::_EnsureFrameRendered()
         cam.shutterClose = 0.f;
     }
 
+    cam.adaptiveThreshold = _adaptiveThreshold;
 
     // Determine render device
     bool useGPU = false;

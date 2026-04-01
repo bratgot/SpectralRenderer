@@ -30,6 +30,15 @@ struct GPUMaterial {
     float3 emissiveColor;
     float  abbeNumber;
     float  thinFilmThickness;
+    int    baseColorTexId;   // -1 = no texture
+};
+
+// GPU-side texture (header only — pixel data is a separate device buffer)
+struct GPUTexture {
+    float* pixels;        // device pointer to RGBA float data
+    int    width;
+    int    height;
+    int    channels;
 };
 
 // GPU-side light
@@ -70,6 +79,13 @@ struct LaunchParams {
 
     GPULight*          lights;
     unsigned int       lightCount;
+
+    // Per-triangle UVs (2 floats * 3 verts = 6 floats per tri)
+    float2*            uvs;           // 3 per triangle (uv0, uv1, uv2)
+
+    // Texture table
+    GPUTexture*        textures;
+    unsigned int       textureCount;
 };
 
 // Per-ray payload — carried through the trace
@@ -86,6 +102,7 @@ struct MissData {};
 struct HitGroupData {
     float3* normals;      // pointer to normals array (3 per triangle)
     int*    materialIds;  // pointer to material IDs (1 per triangle)
+    float2* uvs;          // pointer to UVs (3 per triangle)
 };
 
 } // namespace spectral_gpu
