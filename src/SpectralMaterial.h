@@ -46,6 +46,7 @@ struct SpectralMaterial
     // Spectral-specific properties
     float   abbeNumber       = 0.0f;   // dispersion (0=none, ~60=crown glass, ~30=flint)
     float   thinFilmThickness = 0.0f;  // thin-film interference thickness in nm (0=disabled)
+    int     metalType        = 0;      // 0=none, 1=gold, 2=copper, 3=silver, 4=aluminium, 5=iron, 6=titanium
 
     // Identifier
     std::string name = "default";

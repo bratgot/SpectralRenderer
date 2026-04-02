@@ -1269,6 +1269,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                                 mat.thinFilmThickness = entry.second.thinFilmThickness;
                                 mat.displacementScale = entry.second.displacementScale;
                                 mat.displacementMidpoint = entry.second.displacementMidpoint;
+                                mat.metalType = entry.second.metalType;
                                 // Load displacement texture from file path
                                 if (!entry.second.displacementFile.empty()
                                     && mat.displacementScale > 0.f) {

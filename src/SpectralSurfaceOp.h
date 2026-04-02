@@ -73,6 +73,7 @@ private:
     float _thinFilmThickness = 0.0f;  // nm (0=disabled, 200-800nm for interference)
     float _displacementScale = 0.0f;    // world units (0=disabled)
     float _displacementMidpoint = 0.0f; // 0.5=centered, 0=outward only
+    int   _metalType = 0;                // 0=none, 1=gold, 2=copper, 3=silver, 4=alu, 5=iron, 6=ti
     const char* _displacementFile = "";  // displacement map path
 
     void _ApplyPreset(int preset);
@@ -87,6 +88,7 @@ public:
         float displacementScale = 0.f;
         float displacementMidpoint = 0.0f;
         std::string displacementFile;
+        int metalType = 0;
         Op* dispIop = nullptr;  // displacement Iop input (if connected)
     };
     static std::unordered_map<std::string, SpectralParams>& GetRegistry();

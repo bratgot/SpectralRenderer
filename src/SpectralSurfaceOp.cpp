@@ -125,31 +125,37 @@ void SpectralSurfaceOp::_ApplyPreset(int preset)
             _diffuseColor[0] = _diffuseColor[1] = _diffuseColor[2] = 0.95f;
             _metallic = 0.0f; _roughness = 0.0f; _ior = 1.52f;
             _opacity = 0.3f; _abbeNumber = 58.f; _thinFilmThickness = 0.f;
+            _metalType = 0;
             break;
         case 2: // diamond
             _diffuseColor[0] = _diffuseColor[1] = _diffuseColor[2] = 0.97f;
             _metallic = 0.0f; _roughness = 0.0f; _ior = 2.42f;
             _opacity = 0.1f; _abbeNumber = 55.f; _thinFilmThickness = 0.f;
+            _metalType = 0;
             break;
         case 3: // copper
             _diffuseColor[0] = 0.95f; _diffuseColor[1] = 0.64f; _diffuseColor[2] = 0.54f;
             _metallic = 1.0f; _roughness = 0.2f; _ior = 1.1f;
             _opacity = 1.0f; _abbeNumber = 0.f; _thinFilmThickness = 0.f;
+            _metalType = 2;  // copper spectral IOR
             break;
         case 4: // gold
             _diffuseColor[0] = 1.0f; _diffuseColor[1] = 0.76f; _diffuseColor[2] = 0.33f;
             _metallic = 1.0f; _roughness = 0.1f; _ior = 0.47f;
             _opacity = 1.0f; _abbeNumber = 0.f; _thinFilmThickness = 0.f;
+            _metalType = 1;  // gold spectral IOR
             break;
         case 5: // silver
             _diffuseColor[0] = 0.97f; _diffuseColor[1] = 0.96f; _diffuseColor[2] = 0.91f;
             _metallic = 1.0f; _roughness = 0.05f; _ior = 0.18f;
             _opacity = 1.0f; _abbeNumber = 0.f; _thinFilmThickness = 0.f;
+            _metalType = 3;  // silver spectral IOR
             break;
         case 6: // aluminium
             _diffuseColor[0] = 0.91f; _diffuseColor[1] = 0.92f; _diffuseColor[2] = 0.92f;
             _metallic = 1.0f; _roughness = 0.15f; _ior = 1.39f;
             _opacity = 1.0f; _abbeNumber = 0.f; _thinFilmThickness = 0.f;
+            _metalType = 4;  // aluminium spectral IOR
             break;
         default: // custom — don't change anything
             break;
@@ -203,6 +209,7 @@ void SpectralSurfaceOp::RegisterParams()
     p.displacementScale = _displacementScale;
     p.displacementMidpoint = _displacementMidpoint;
     p.displacementFile = (_displacementFile && _displacementFile[0]) ? _displacementFile : "";
+    p.metalType = _metalType;
     // Store displacement Iop if connected
     if (inputs() > 0 && input(0)) {
         Op* dispOp = input(0);

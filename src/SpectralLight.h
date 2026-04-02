@@ -248,6 +248,44 @@ struct SpectralLight
     }
 
     // ------------------------------------------------------------------
+    // PDF of the light sampling strategy for MIS
+    //   Returns the probability density of sampling direction L
+    // ------------------------------------------------------------------
+    float SamplePdf(const GfVec3f& surfacePos, const GfVec3f& L,
+                    const GfVec3f& surfaceNormal) const
+    {
+        if (type == Type::Distant) {
+            return 0.f;  // delta distribution — no MIS
+        }
+        if (type == Type::Dome) {
+            // Cosine-weighted hemisphere sampling
+            float NdotL = L[0]*surfaceNormal[0] + L[1]*surfaceNormal[1] + L[2]*surfaceNormal[2];
+            return std::max(0.f, NdotL) / 3.14159f;
+        }
+        if (type == Type::Sphere || type == Type::Spot) {
+            if (radius <= 0.f) return 0.f;  // point light = delta
+            // Uniform cone sampling: pdf = 1 / solid_angle
+            GfVec3f toLight = position - surfacePos;
+            float dist = toLight.GetLength();
+            if (dist < 1e-6f) return 0.f;
+            float sinThetaMax = std::min(1.f, radius / dist);
+            float cosThetaMax = std::sqrt(std::max(0.f, 1.f - sinThetaMax * sinThetaMax));
+            float solidAngle = 2.f * 3.14159f * (1.f - cosThetaMax);
+            return (solidAngle > 1e-7f) ? 1.f / solidAngle : 0.f;
+        }
+        if (type == Type::Rect) {
+            // Area sampling: pdf = dist² / (area * cos_theta_light)
+            float area = width * height;
+            if (area < 1e-7f) return 0.f;
+            GfVec3f toLight = position - surfacePos;
+            float dist2 = toLight[0]*toLight[0] + toLight[1]*toLight[1] + toLight[2]*toLight[2];
+            float cosLight = std::abs(L[0]*direction[0] + L[1]*direction[1] + L[2]*direction[2]);
+            return dist2 / (area * std::max(cosLight, 1e-6f));
+        }
+        return 0.f;
+    }
+
+    // ------------------------------------------------------------------
     // Distance attenuation for point/sphere/rect lights
     //   Returns 1.0 for distant/dome lights (no falloff)
     // ------------------------------------------------------------------

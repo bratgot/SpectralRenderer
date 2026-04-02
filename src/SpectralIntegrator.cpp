@@ -236,7 +236,16 @@ void SpectralIntegrator::RenderFrame(
                                     }
                                 }
                             } else {
+                                // Primary ray miss — show dome light environment
                                 radiance = 0.f;
+                                GfVec3f missDir = GfVec3f(ray.GetDirection());
+                                float mLen = missDir.GetLength();
+                                if (mLen > 1e-6f) missDir /= mLen;
+                                for (const SpectralLight& light : scene.GetLights()) {
+                                    if (light.type == SpectralLight::Type::Dome) {
+                                        radiance += light.EnvironmentEmission(missDir, lambda);
+                                    }
+                                }
                             }
 
                             GfVec3f xyz = SpectralSpectrum::RadianceToXYZ(radiance, lambda);
@@ -700,15 +709,15 @@ float SpectralIntegrator::_ShadeSpectral(
 
     float radiance = 0.f;
 
-    // ---- Direct lighting from explicit lights ----
+    // ---- Direct lighting with MIS ----
     if (scene.HasLights()) {
         for (const SpectralLight& light : scene.GetLights()) {
-            // Soft shadows: jitter light sample position for area lights
+            // Strategy 1: Light sampling (NEE)
             float su1 = _Hash(rngSeed++);
             float su2 = _Hash(rngSeed++);
             GfVec3f L = light.SampleDirection(hitPos, su1, su2, N);
 
-            // Shadow ray — offset origin along normal to clear surface
+            // Shadow ray
             bool inShadow = false;
             GfVec3f shadowOrigin = hitPos + N * 0.01f;
             GfRay shadowRay;
@@ -716,14 +725,8 @@ float SpectralIntegrator::_ShadeSpectral(
             SpectralBVH::Hit shadowHit = bvh.Intersect(shadowRay, rayTime);
 
             if (shadowHit.valid()) {
-                // Check if the shadow hit is a legitimate blocker:
-                // Skip backface hits (ray passing through the same convex object)
                 GfVec3f shadowN = shadowHit.tri->faceNormal;
                 float hitFacing = shadowN[0]*L[0] + shadowN[1]*L[1] + shadowN[2]*L[2];
-
-                // If the shadow hit's normal faces toward the light (hitFacing > 0),
-                // it's a backface of the same object — skip it.
-                // A real blocker's face normal points against the light direction.
                 if (hitFacing < 0.f) {
                     if (light.type == SpectralLight::Type::Distant ||
                         light.type == SpectralLight::Type::Dome) {
@@ -737,19 +740,24 @@ float SpectralIntegrator::_ShadeSpectral(
 
             if (!inShadow) {
                 float bsdf = SpectralBSDF::Evaluate(resolvedMat, N, V, L, lambda);
-                // Use environment emission for dome lights, regular for others
                 float lightRad = (light.type == SpectralLight::Type::Dome)
                     ? light.EnvironmentEmission(L, lambda)
                     : light.SpectralEmission(lambda);
                 float atten = light.Attenuation(hitPos);
-                float contrib = bsdf * lightRad * atten;
+
+                // MIS weight: light sampling strategy
+                float pdfLight = light.SamplePdf(hitPos, L, N);
+                float pdfBsdf  = SpectralBSDF::Pdf(resolvedMat, N, V, L);
+                float misW = (pdfLight > 0.f)
+                    ? SpectralBSDF::MISWeight(pdfLight, pdfBsdf)
+                    : 1.f;  // delta lights (distant, point) get full weight
+
+                float contrib = bsdf * lightRad * atten * misW;
                 radiance += contrib;
                 if (comps) comps->direct += contrib;
             }
         }
-        // No ambient fill — pure direct lighting
     }
-    // No sky fill — pure direct + bounce lighting only
 
     float emitVal = resolvedMat.SpectralEmission(lambda);
     radiance += emitVal;
@@ -796,7 +804,23 @@ float SpectralIntegrator::_ShadeSpectral(
         SpectralBVH::Hit bounceHit = bvh.Intersect(bounceRay, rayTime);
 
         if (!bounceHit.valid()) {
-            // Miss — no sky contribution
+            // Miss — check dome lights for BSDF-side MIS contribution
+            if (!scene.GetLights().empty()) {
+                for (const SpectralLight& light : scene.GetLights()) {
+                    if (light.type != SpectralLight::Type::Dome) continue;
+                    float domeRad = light.EnvironmentEmission(bounceDir, lambda);
+                    if (domeRad > 0.f) {
+                        float pdfBsdf  = SpectralBSDF::Pdf(*bounceMat, bounceN, bounceV, bounceDir);
+                        float pdfLight = light.SamplePdf(bounceOrigin, bounceDir, bounceN);
+                        float misW = (pdfBsdf > 0.f && pdfLight > 0.f)
+                            ? SpectralBSDF::MISWeight(pdfBsdf, pdfLight)
+                            : 1.f;
+                        float contrib = pathThroughput * domeRad * misW;
+                        radiance += contrib;
+                        if (comps) comps->indirect += contrib;
+                    }
+                }
+            }
             break;
         }
 
@@ -862,10 +886,16 @@ float SpectralIntegrator::_ShadeSpectral(
                         ? light.EnvironmentEmission(L, lambda)
                         : light.SpectralEmission(lambda);
                     float atten = light.Attenuation(bounceOrigin);
-                    bounceRadiance += bsdf * lightRad * atten;
+
+                    float pdfLight = light.SamplePdf(bounceOrigin, L, bounceN);
+                    float pdfBsdf  = SpectralBSDF::Pdf(*bounceMat, bounceN, bounceV, L);
+                    float misW = (pdfLight > 0.f)
+                        ? SpectralBSDF::MISWeight(pdfLight, pdfBsdf)
+                        : 1.f;
+
+                    bounceRadiance += bsdf * lightRad * atten * misW;
                 }
             }
-
         }
 
         if (!insideTransparent) {

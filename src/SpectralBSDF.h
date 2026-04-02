@@ -77,13 +77,19 @@ public:
         }
 
         // ----------------------------------------------------------
-        // Fresnel F0 — metallic uses base colour, dielectric uses ior
+        // Fresnel — conductor (spectral n,k) or dielectric (Schlick)
         // ----------------------------------------------------------
-        float iorF0 = _IorToF0(ior);
-        float F0 = _Lerp(iorF0, baseRefl, mat.metallic);
-
-        // Schlick Fresnel
-        float F = _FresnelSchlick(F0, VdotH);
+        float F;
+        if (mat.metallic > 0.5f && mat.metalType > 0) {
+            // Spectral conductor Fresnel with measured (n, k)
+            float n_metal, k_metal;
+            _GetMetalIOR(mat.metalType, lambda, n_metal, k_metal);
+            F = _FresnelConductor(VdotH, n_metal, k_metal);
+        } else {
+            float iorF0 = _IorToF0(ior);
+            float F0 = _Lerp(iorF0, baseRefl, mat.metallic);
+            F = _FresnelSchlick(F0, VdotH);
+        }
 
         // ----------------------------------------------------------
         // Thin-film interference modulation
@@ -298,6 +304,45 @@ public:
         return L;
     }
 
+    // ------------------------------------------------------------------
+    // Pdf — compute sampling PDF for a given direction
+    // Used by MIS to weight light vs BSDF samples
+    // ------------------------------------------------------------------
+    static float Pdf(
+        const SpectralMaterial& mat,
+        const GfVec3f& N,
+        const GfVec3f& V,
+        const GfVec3f& L)
+    {
+        float NdotL = _Dot(N, L);
+        float NdotV = _Dot(N, V);
+        if (NdotL <= 0.f || NdotV <= 0.f) return 0.f;
+
+        float roughness = std::max(0.01f, mat.roughness);
+        float alpha = roughness * roughness;
+        float specProb = std::max(0.25f, 0.5f * (1.f - roughness) + 0.5f * mat.metallic);
+
+        GfVec3f H = _Normalize(V + L);
+        float NdotH = _Dot(N, H);
+        float VdotH = _Dot(V, H);
+
+        float D = _GGX_D(alpha, NdotH);
+        float pdfGGX = (VdotH > 1e-7f) ? D * NdotH / (4.f * VdotH) : 0.f;
+        float pdfCos = NdotL / 3.14159f;
+
+        return specProb * pdfGGX + (1.f - specProb) * pdfCos;
+    }
+
+    // ------------------------------------------------------------------
+    // Power heuristic (beta=2) for MIS
+    // ------------------------------------------------------------------
+    static float MISWeight(float pdfA, float pdfB)
+    {
+        float a2 = pdfA * pdfA;
+        float b2 = pdfB * pdfB;
+        return a2 / (a2 + b2 + 1e-10f);
+    }
+
 private:
     static float _Dot(const GfVec3f& a, const GfVec3f& b)
     {
@@ -463,6 +508,81 @@ private:
             a[1]*b[2] - a[2]*b[1],
             a[2]*b[0] - a[0]*b[2],
             a[0]*b[1] - a[1]*b[0]);
+    }
+
+    // ------------------------------------------------------------------
+    // Fresnel conductor — exact unpolarized reflectance for metals
+    //   n = refractive index, k = extinction coefficient
+    //   Both vary with wavelength for real metals
+    // ------------------------------------------------------------------
+    static float _FresnelConductor(float cosTheta, float n, float k)
+    {
+        float cos2 = cosTheta * cosTheta;
+        float n2 = n * n;
+        float k2 = k * k;
+        float n2k2 = n2 + k2;
+
+        // s-polarization
+        float Rs = (n2k2 - 2.f * n * cosTheta + cos2)
+                 / (n2k2 + 2.f * n * cosTheta + cos2);
+
+        // p-polarization
+        float Rp = (n2k2 * cos2 - 2.f * n * cosTheta + 1.f)
+                 / (n2k2 * cos2 + 2.f * n * cosTheta + 1.f);
+
+        return std::max(0.f, std::min(1.f, 0.5f * (Rs + Rp)));
+    }
+
+    // ------------------------------------------------------------------
+    // Spectral (n, k) data for metals — measured optical constants
+    //   Sampled at 9 wavelengths from 380nm to 780nm (50nm steps)
+    //   Interpolated linearly for intermediate wavelengths
+    //   Sources: Palik, Handbook of Optical Constants of Solids
+    // ------------------------------------------------------------------
+    struct MetalIOR {
+        float n[9];  // refractive index at 380,430,480,530,580,630,680,730,780nm
+        float k[9];  // extinction coefficient
+    };
+
+    static void _GetMetalIOR(int metalType, float lambda, float& n, float& k)
+    {
+        // Measured data: {380, 430, 480, 530, 580, 630, 680, 730, 780} nm
+        static const MetalIOR metals[] = {
+            // 0: none (unused)
+            {{1,1,1,1,1,1,1,1,1}, {0,0,0,0,0,0,0,0,0}},
+            // 1: Gold (Au)
+            {{1.66, 1.47, 1.29, 0.64, 0.28, 0.17, 0.16, 0.16, 0.17},
+             {1.94, 1.95, 1.85, 2.20, 2.81, 3.24, 3.62, 4.00, 4.38}},
+            // 2: Copper (Cu)
+            {{1.27, 1.21, 1.14, 1.08, 0.47, 0.23, 0.21, 0.21, 0.24},
+             {2.14, 2.37, 2.56, 2.60, 2.65, 2.98, 3.32, 3.67, 4.01}},
+            // 3: Silver (Ag)
+            {{0.05, 0.04, 0.04, 0.04, 0.05, 0.06, 0.07, 0.10, 0.12},
+             {1.95, 2.35, 2.82, 3.29, 3.59, 3.92, 4.25, 4.58, 4.90}},
+            // 4: Aluminium (Al)
+            {{0.51, 0.57, 0.63, 0.72, 0.96, 1.24, 1.55, 1.80, 2.08},
+             {4.40, 4.84, 5.30, 5.74, 6.18, 6.62, 7.04, 7.48, 7.90}},
+            // 5: Iron (Fe)
+            {{1.72, 1.86, 2.01, 2.18, 2.39, 2.56, 2.68, 2.78, 2.86},
+             {2.88, 2.94, 3.01, 3.08, 3.16, 3.27, 3.39, 3.50, 3.60}},
+            // 6: Titanium (Ti)
+            {{1.60, 1.72, 1.86, 2.00, 2.14, 2.30, 2.48, 2.64, 2.76},
+             {2.37, 2.48, 2.58, 2.68, 2.78, 2.90, 3.03, 3.14, 3.24}},
+        };
+
+        const int numMetals = sizeof(metals) / sizeof(metals[0]);
+        if (metalType < 0 || metalType >= numMetals) { n = 1.f; k = 0.f; return; }
+
+        const MetalIOR& m = metals[metalType];
+
+        // Interpolate — wavelength to array index
+        float t = (lambda - 380.f) / 50.f;  // 0..8
+        t = std::max(0.f, std::min(7.99f, t));
+        int i = static_cast<int>(t);
+        float frac = t - float(i);
+
+        n = m.n[i] * (1.f - frac) + m.n[i + 1] * frac;
+        k = m.k[i] * (1.f - frac) + m.k[i + 1] * frac;
     }
 };
 
