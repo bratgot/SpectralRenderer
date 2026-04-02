@@ -195,6 +195,19 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                "Smaller values give tighter contact shadows.\n"
                "Larger values give broader ambient darkening.");
 
+    Newline(f);
+    Bool_knob(f, &_aovNormals,  "aov_normals",  "N (normals)");
+    Bool_knob(f, &_aovPosition, "aov_position", "P (position)");
+    Bool_knob(f, &_aovUV,       "aov_uv",       "UV");
+    Bool_knob(f, &_aovAlbedo,   "aov_albedo",   "albedo");
+    Newline(f);
+    Bool_knob(f, &_aovDirect,   "aov_direct",   "direct");
+    Bool_knob(f, &_aovIndirect, "aov_indirect",  "indirect");
+    Bool_knob(f, &_aovEmission, "aov_emission",  "emission");
+    Tooltip(f, "Enable individual AOV output channels.\n"
+               "Shading AOVs (direct/indirect/emission) require\n"
+               "extra computation — disable if not needed.");
+
     Bool_knob(f, &_denoise, "denoise", "denoise (GPU)");
     Tooltip(f, "Apply OptiX AI denoiser after GPU rendering.\n"
                "Dramatically cleans up low-spp renders.\n"
@@ -279,23 +292,38 @@ void SpectralRenderIop::_validate(bool forReal)
     _chanObjectId   = getChannel("other.objectId");
     _chanMaterialId = getChannel("other.materialId");
     _chanAO         = getChannel("other.ao");
-    _chanNx = getChannel("N.red");   _chanNy = getChannel("N.green");   _chanNz = getChannel("N.blue");
-    _chanPx = getChannel("P.red");   _chanPy = getChannel("P.green");   _chanPz = getChannel("P.blue");
-    _chanUu = getChannel("uv.red");  _chanUv = getChannel("uv.green");
-    _chanAlbedoR = getChannel("albedo.red"); _chanAlbedoG = getChannel("albedo.green"); _chanAlbedoB = getChannel("albedo.blue");
-    _chanDirectR = getChannel("direct.red"); _chanDirectG = getChannel("direct.green"); _chanDirectB = getChannel("direct.blue");
-    _chanIndirectR = getChannel("indirect.red"); _chanIndirectG = getChannel("indirect.green"); _chanIndirectB = getChannel("indirect.blue");
-    _chanEmissionR = getChannel("emission.red"); _chanEmissionG = getChannel("emission.green"); _chanEmissionB = getChannel("emission.blue");
     channels += _chanObjectId;
     channels += _chanMaterialId;
     if (_aoSamples > 0) channels += _chanAO;
-    channels += _chanNx; channels += _chanNy; channels += _chanNz;
-    channels += _chanPx; channels += _chanPy; channels += _chanPz;
-    channels += _chanUu; channels += _chanUv;
-    channels += _chanAlbedoR; channels += _chanAlbedoG; channels += _chanAlbedoB;
-    channels += _chanDirectR; channels += _chanDirectG; channels += _chanDirectB;
-    channels += _chanIndirectR; channels += _chanIndirectG; channels += _chanIndirectB;
-    channels += _chanEmissionR; channels += _chanEmissionG; channels += _chanEmissionB;
+
+    if (_aovNormals) {
+        _chanNx = getChannel("N.red"); _chanNy = getChannel("N.green"); _chanNz = getChannel("N.blue");
+        channels += _chanNx; channels += _chanNy; channels += _chanNz;
+    }
+    if (_aovPosition) {
+        _chanPx = getChannel("P.red"); _chanPy = getChannel("P.green"); _chanPz = getChannel("P.blue");
+        channels += _chanPx; channels += _chanPy; channels += _chanPz;
+    }
+    if (_aovUV) {
+        _chanUu = getChannel("uv.red"); _chanUv = getChannel("uv.green");
+        channels += _chanUu; channels += _chanUv;
+    }
+    if (_aovAlbedo) {
+        _chanAlbedoR = getChannel("albedo.red"); _chanAlbedoG = getChannel("albedo.green"); _chanAlbedoB = getChannel("albedo.blue");
+        channels += _chanAlbedoR; channels += _chanAlbedoG; channels += _chanAlbedoB;
+    }
+    if (_aovDirect) {
+        _chanDirectR = getChannel("direct.red"); _chanDirectG = getChannel("direct.green"); _chanDirectB = getChannel("direct.blue");
+        channels += _chanDirectR; channels += _chanDirectG; channels += _chanDirectB;
+    }
+    if (_aovIndirect) {
+        _chanIndirectR = getChannel("indirect.red"); _chanIndirectG = getChannel("indirect.green"); _chanIndirectB = getChannel("indirect.blue");
+        channels += _chanIndirectR; channels += _chanIndirectG; channels += _chanIndirectB;
+    }
+    if (_aovEmission) {
+        _chanEmissionR = getChannel("emission.red"); _chanEmissionG = getChannel("emission.green"); _chanEmissionB = getChannel("emission.blue");
+        channels += _chanEmissionR; channels += _chanEmissionG; channels += _chanEmissionB;
+    }
     info_.channels(channels);
     info_.black_outside(true);
 
@@ -1549,14 +1577,14 @@ void SpectralRenderIop::_EnsureFrameRendered()
     _depthBuffer.assign(size_t(W) * H, 1e30f);
     _objectIdBuffer.assign(size_t(W) * H, 0.f);
     _materialIdBuffer.assign(size_t(W) * H, 0.f);
-    _aoBuffer.assign(size_t(W) * H, 1.f);  // default white (no occlusion)
-    _normalBuffer.assign(size_t(W) * H * 3, 0.f);
-    _posBuffer.assign(size_t(W) * H * 3, 0.f);
-    _uvBuffer.assign(size_t(W) * H * 2, 0.f);
-    _albedoBuffer.assign(size_t(W) * H * 3, 0.f);
-    _directBuffer.assign(size_t(W) * H * 3, 0.f);
-    _indirectBuffer.assign(size_t(W) * H * 3, 0.f);
-    _emissionBuffer.assign(size_t(W) * H * 3, 0.f);
+    _aoBuffer.assign(size_t(W) * H, 1.f);
+    if (_aovNormals)  _normalBuffer.assign(size_t(W) * H * 3, 0.f); else _normalBuffer.clear();
+    if (_aovPosition) _posBuffer.assign(size_t(W) * H * 3, 0.f);    else _posBuffer.clear();
+    if (_aovUV)       _uvBuffer.assign(size_t(W) * H * 2, 0.f);     else _uvBuffer.clear();
+    if (_aovAlbedo)   _albedoBuffer.assign(size_t(W) * H * 3, 0.f); else _albedoBuffer.clear();
+    if (_aovDirect)   _directBuffer.assign(size_t(W) * H * 3, 0.f); else _directBuffer.clear();
+    if (_aovIndirect) _indirectBuffer.assign(size_t(W) * H * 3, 0.f); else _indirectBuffer.clear();
+    if (_aovEmission) _emissionBuffer.assign(size_t(W) * H * 3, 0.f); else _emissionBuffer.clear();
 
     SpectralCamera cam = _camera;
     cam.imageWidth  = W;
@@ -1606,13 +1634,13 @@ void SpectralRenderIop::_EnsureFrameRendered()
 #endif
     {
         SpectralIntegrator::AOVBuffers aovBufs;
-        aovBufs.normal   = _normalBuffer.data();
-        aovBufs.position = _posBuffer.data();
-        aovBufs.uv       = _uvBuffer.data();
-        aovBufs.albedo   = _albedoBuffer.data();
-        aovBufs.direct   = _directBuffer.data();
-        aovBufs.indirect = _indirectBuffer.data();
-        aovBufs.emission = _emissionBuffer.data();
+        aovBufs.normal   = _aovNormals  ? _normalBuffer.data()   : nullptr;
+        aovBufs.position = _aovPosition ? _posBuffer.data()      : nullptr;
+        aovBufs.uv       = _aovUV       ? _uvBuffer.data()       : nullptr;
+        aovBufs.albedo   = _aovAlbedo   ? _albedoBuffer.data()   : nullptr;
+        aovBufs.direct   = _aovDirect   ? _directBuffer.data()   : nullptr;
+        aovBufs.indirect = _aovIndirect ? _indirectBuffer.data() : nullptr;
+        aovBufs.emission = _aovEmission ? _emissionBuffer.data() : nullptr;
 
         SpectralIntegrator::RenderFrame(*_scene, cam, _frameBuffer.data(),
                                          renderSpp, _depthBuffer.data(), _maxBounces,
@@ -1624,6 +1652,41 @@ void SpectralRenderIop::_EnsureFrameRendered()
 #ifdef SPECTRAL_HAS_OPTIX
     if (_denoise) {
         SpectralIntegrator::DenoiseGPU(W, H, _frameBuffer.data());
+    }
+#endif
+
+    // Geometry AOV pass for GPU (CPU fills them during RenderFrame)
+#ifdef SPECTRAL_HAS_OPTIX
+    if (useGPU) {
+        bool needGeomPass = _aovNormals || _aovPosition || _aovUV || _aovAlbedo;
+        if (needGeomPass) {
+            SpectralIntegrator::ComputeGeometryAOVs(
+                *_scene, cam,
+                _aovNormals  ? _normalBuffer.data() : nullptr,
+                _aovPosition ? _posBuffer.data()    : nullptr,
+                _aovUV       ? _uvBuffer.data()     : nullptr,
+                _aovAlbedo   ? _albedoBuffer.data() : nullptr,
+                _objectIdBuffer.data(), _materialIdBuffer.data(),
+                nullptr);
+        }
+
+        // Shading AOV pass: quick CPU render for direct/indirect/emission
+        bool needShadingPass = _aovDirect || _aovIndirect || _aovEmission;
+        if (needShadingPass) {
+            const int aovSpp = std::min(8, renderSpp);
+            std::vector<float> dummyPixels(size_t(W) * H * 4, 0.f);
+
+            SpectralIntegrator::AOVBuffers aovBufs;
+            aovBufs.direct   = _aovDirect   ? _directBuffer.data()   : nullptr;
+            aovBufs.indirect = _aovIndirect ? _indirectBuffer.data() : nullptr;
+            aovBufs.emission = _aovEmission ? _emissionBuffer.data() : nullptr;
+
+            SpectralIntegrator::RenderFrame(*_scene, cam, dummyPixels.data(),
+                                             aovSpp, nullptr, _maxBounces,
+                                             nullptr, nullptr, &aovBufs);
+
+            fprintf(stderr, "SpectralRender: shading AOVs computed (%d spp CPU pass)\n", aovSpp);
+        }
     }
 #endif
 

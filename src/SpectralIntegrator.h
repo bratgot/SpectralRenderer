@@ -141,6 +141,19 @@ public:
         float* aoOut,           // W*H floats, 0=occluded, 1=open
         int    aoSamples,       // rays per pixel
         float  aoRadius);       // max ray distance
+
+    /// Quick single-ray pass for geometry AOVs (N, P, UV, albedo, IDs, depth).
+    /// Used after GPU render which doesn't fill these.
+    static void ComputeGeometryAOVs(
+        const SpectralScene& scene,
+        const SpectralCamera& camera,
+        float* normalOut,       // 3 floats per pixel
+        float* posOut,          // 3 floats per pixel
+        float* uvOut,           // 2 floats per pixel
+        float* albedoOut,       // 3 floats per pixel
+        float* objectIdOut,     // 1 float per pixel
+        float* materialIdOut,   // 1 float per pixel
+        float* depthOut);       // 1 float per pixel
 #endif  // optional per-pixel depth output
 
 private:

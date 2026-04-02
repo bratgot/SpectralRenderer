@@ -975,6 +975,102 @@ void SpectralIntegrator::ComputeAO(
 }
 
 // ---------------------------------------------------------------------------
+// ComputeGeometryAOVs — quick single-ray pass for N, P, UV, albedo, IDs
+// ---------------------------------------------------------------------------
+void SpectralIntegrator::ComputeGeometryAOVs(
+    const SpectralScene& scene,
+    const SpectralCamera& camera,
+    float* normalOut, float* posOut, float* uvOut, float* albedoOut,
+    float* objectIdOut, float* materialIdOut, float* depthOut)
+{
+#ifdef SPECTRAL_HAS_EMBREE
+    SpectralBVH bvh;
+    bvh.Build(scene);
+
+    const unsigned int W = camera.imageWidth;
+    const unsigned int H = camera.imageHeight;
+    const GfMatrix4d worldToView = camera.viewToWorld.GetInverse();
+
+    std::vector<unsigned int> rows(H);
+    std::iota(rows.begin(), rows.end(), 0u);
+
+    std::for_each(
+        std::execution::par_unseq,
+        rows.begin(), rows.end(),
+        [&](unsigned int imageY)
+        {
+            for (unsigned int imageX = 0; imageX < W; ++imageX) {
+                const size_t pixIdx = imageY * W + imageX;
+
+                GfRay ray = _MakeRay(camera, imageX, imageY, 0.5f, 0.5f);
+                SpectralBVH::Hit hit = bvh.Intersect(ray, 0.f);
+
+                if (!hit.valid()) {
+                    if (depthOut) depthOut[pixIdx] = 1e30f;
+                    if (objectIdOut) objectIdOut[pixIdx] = 0.f;
+                    if (materialIdOut) materialIdOut[pixIdx] = 0.f;
+                    continue;
+                }
+
+                float w = 1.f - float(hit.u) - float(hit.v);
+
+                // Normal
+                GfVec3f N = hit.tri->n0 * w + hit.tri->n1 * float(hit.u) + hit.tri->n2 * float(hit.v);
+                float nlen = N.GetLength();
+                if (nlen > 1e-6f) N /= nlen;
+                GfVec3f V = GfVec3f(-ray.GetDirection());
+                float vlen = V.GetLength();
+                if (vlen > 1e-6f) V /= vlen;
+                if (N[0]*V[0]+N[1]*V[1]+N[2]*V[2] < 0.f) N = -N;
+
+                if (normalOut) {
+                    normalOut[pixIdx*3+0] = N[0];
+                    normalOut[pixIdx*3+1] = N[1];
+                    normalOut[pixIdx*3+2] = N[2];
+                }
+
+                // Position
+                GfVec3d worldHit = ray.GetStartPoint() + hit.t * ray.GetDirection();
+                GfVec3f hitPos = GfVec3f(worldHit);
+                if (posOut) {
+                    posOut[pixIdx*3+0] = hitPos[0];
+                    posOut[pixIdx*3+1] = hitPos[1];
+                    posOut[pixIdx*3+2] = hitPos[2];
+                }
+
+                // UV
+                if (uvOut) {
+                    GfVec2f uv = hit.tri->uv0 * w + hit.tri->uv1 * float(hit.u) + hit.tri->uv2 * float(hit.v);
+                    uvOut[pixIdx*2+0] = uv[0];
+                    uvOut[pixIdx*2+1] = uv[1];
+                }
+
+                // Albedo
+                if (albedoOut) {
+                    const SpectralMaterial& mat = scene.GetMaterial(hit.tri->materialId);
+                    SpectralMaterial resolved = _ResolveMaterial(mat, *hit.tri, w, float(hit.u), float(hit.v), scene);
+                    albedoOut[pixIdx*3+0] = resolved.baseColor[0];
+                    albedoOut[pixIdx*3+1] = resolved.baseColor[1];
+                    albedoOut[pixIdx*3+2] = resolved.baseColor[2];
+                }
+
+                // Depth
+                if (depthOut) {
+                    GfVec3d viewHit = worldToView.Transform(worldHit);
+                    depthOut[pixIdx] = static_cast<float>(-viewHit[2]);
+                }
+
+                // IDs
+                if (objectIdOut) objectIdOut[pixIdx] = static_cast<float>(hit.tri->objectId);
+                if (materialIdOut) materialIdOut[pixIdx] = static_cast<float>(hit.tri->materialId);
+            }
+        });
+
+    fprintf(stderr, "SpectralIntegrator: geometry AOV pass complete (%dx%d)\n", W, H);
+#endif
+}
+
+// ---------------------------------------------------------------------------
 // GPU render path (Phase 3)
 // ---------------------------------------------------------------------------
 #ifdef SPECTRAL_HAS_OPTIX

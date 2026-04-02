@@ -107,6 +107,13 @@ private:
     bool  _blueNoise = true;            // R2 quasi-random sampling
     int   _aoSamples = 0;              // AO samples per pixel (0 = disabled)
     float _aoRadius  = 5.f;            // AO max ray distance
+    bool  _aovNormals  = true;
+    bool  _aovPosition = true;
+    bool  _aovUV       = true;
+    bool  _aovAlbedo   = true;
+    bool  _aovDirect   = false;
+    bool  _aovIndirect = false;
+    bool  _aovEmission = false;
     int   _progressiveSppDone = 0;      // samples accumulated so far
     bool  _denoise = false;             // OptiX AI denoiser
     float _shutterOpen  = -0.5f;   // shutter open  (relative to frame)
