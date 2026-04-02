@@ -717,6 +717,47 @@ float SpectralIntegrator::_ShadeSpectral(
     len = V.GetLength();
     if (len > 1e-6f) V /= len;
 
+    // Bump mapping: perturb normal from height map
+    if (mat.bumpMapTexId >= 0 && mat.bumpStrength > 0.f) {
+        const SpectralTexture* bumpTex = scene.GetTexture(mat.bumpMapTexId);
+        if (bumpTex && bumpTex->IsValid()) {
+            GfVec2f hitUV = tri.uv0 * w + tri.uv1 * uf + tri.uv2 * vf;
+
+            // Tangent frame from UV gradients
+            GfVec3f edge1 = tri.v1 - tri.v0;
+            GfVec3f edge2 = tri.v2 - tri.v0;
+            GfVec2f dUV1 = tri.uv1 - tri.uv0;
+            GfVec2f dUV2 = tri.uv2 - tri.uv0;
+            float det = dUV1[0]*dUV2[1] - dUV1[1]*dUV2[0];
+            GfVec3f T, B;
+            if (std::abs(det) > 1e-8f) {
+                float invDet = 1.f / det;
+                T = (edge1 * dUV2[1] - edge2 * dUV1[1]) * invDet;
+                B = (edge2 * dUV1[0] - edge1 * dUV2[0]) * invDet;
+            } else {
+                GfVec3f up = (std::abs(N[1]) < 0.999f) ? GfVec3f(0,1,0) : GfVec3f(1,0,0);
+                T = GfCross(up, N); B = GfCross(N, T);
+            }
+            float tl = T.GetLength(); if (tl > 1e-6f) T /= tl;
+            float bl = B.GetLength(); if (bl > 1e-6f) B /= bl;
+
+            // Central differences on height map
+            float eps = 0.002f;
+            float hC = bumpTex->Sample(hitUV)[0];
+            float hR = bumpTex->Sample(hitUV + GfVec2f(eps, 0.f))[0];
+            float hU = bumpTex->Sample(hitUV + GfVec2f(0.f, eps))[0];
+            float dhdU = (hR - hC) / eps * mat.bumpStrength;
+            float dhdV = (hU - hC) / eps * mat.bumpStrength;
+
+            // Perturb normal
+            N = GfVec3f(N[0] - dhdU*T[0] - dhdV*B[0],
+                        N[1] - dhdU*T[1] - dhdV*B[1],
+                        N[2] - dhdU*T[2] - dhdV*B[2]);
+            len = N.GetLength();
+            if (len > 1e-6f) N /= len;
+        }
+    }
+
     // Ensure N faces the camera (flip if back-facing)
     float NdotV = N[0]*V[0] + N[1]*V[1] + N[2]*V[2];
     if (NdotV < 0.f) N = -N;
@@ -802,6 +843,140 @@ float SpectralIntegrator::_ShadeSpectral(
     float emitVal = resolvedMat.SpectralEmission(lambda);
     radiance += emitVal;
     if (comps) comps->emission += emitVal;
+
+    // ---- Diffraction grating ----
+    // Grating equation: d(sinθ_i + sinθ_m) = mλ
+    // Creates rainbow iridescence from periodic surface structure.
+    if (resolvedMat.gratingSpacing > 0.f && resolvedMat.gratingStrength > 0.f) {
+        float d = resolvedMat.gratingSpacing;  // μm
+        float lambdaUm = lambda * 0.001f;      // nm → μm
+
+        // Incident angle
+        float cosI = std::abs(N[0]*V[0] + N[1]*V[1] + N[2]*V[2]);
+        float sinI = std::sqrt(std::max(0.f, 1.f - cosI*cosI));
+
+        // Sum first 3 diffraction orders
+        float diffracted = 0.f;
+        for (int m = 1; m <= 3; ++m) {
+            float sinM = sinI - float(m) * lambdaUm / d;
+            if (sinM > -1.f && sinM < 1.f) {
+                float cosM = std::sqrt(1.f - sinM*sinM);
+                // Intensity falls with order
+                float orderIntensity = 1.f / float(m * m);
+                diffracted += cosM * orderIntensity;
+            }
+        }
+
+        // Blend with direct lighting
+        float gratingContrib = diffracted * resolvedMat.gratingStrength;
+        if (scene.HasLights()) {
+            for (const SpectralLight& light : scene.GetLights()) {
+                float lightRad = (light.type == SpectralLight::Type::Dome)
+                    ? light.EnvironmentEmission(V, lambda)
+                    : light.SpectralEmission(lambda);
+                float atten = light.Attenuation(hitPos);
+                radiance += gratingContrib * lightRad * atten * 0.2f;
+                if (comps) comps->direct += gratingContrib * lightRad * atten * 0.2f;
+            }
+        }
+    }
+
+    // ---- Fluorescence ----
+    // Material absorbs at UV/blue wavelength, re-emits at visible wavelength.
+    // Only contributes when the ray's wavelength is near the absorption band.
+    if (resolvedMat.fluorStrength > 0.f && resolvedMat.fluorAbsorb > 0.f) {
+        float absCenter = resolvedMat.fluorAbsorb;
+        float emCenter = resolvedMat.fluorEmit;
+        float strength = resolvedMat.fluorStrength;
+
+        // Absorption probability: Gaussian around absorption center (30nm bandwidth)
+        float dAbs = lambda - absCenter;
+        float absProb = std::exp(-dAbs * dAbs / (2.f * 30.f * 30.f));
+
+        // Emission spectrum: Gaussian around emission center (40nm bandwidth)
+        float dEm = lambda - emCenter;
+        float emSpectrum = std::exp(-dEm * dEm / (2.f * 40.f * 40.f));
+
+        // Fluorescence adds emission at the emission wavelength
+        // weighted by how much absorption happens at this ray's wavelength
+        // Stokes shift: emCenter > absCenter (energy loss)
+        float fluorContrib = absProb * emSpectrum * strength * 0.5f;
+
+        // Add ambient light absorption driving the fluorescence
+        if (scene.HasLights()) {
+            for (const SpectralLight& light : scene.GetLights()) {
+                float lightRad = light.SpectralEmission(absCenter);
+                float atten = light.Attenuation(hitPos);
+                radiance += fluorContrib * lightRad * atten;
+                if (comps) comps->emission += fluorContrib * lightRad * atten;
+            }
+        }
+    }
+
+    // ---- Subsurface scattering (spectral random walk) ----
+    // Light enters the surface, scatters inside, exits nearby.
+    // Wavelength-dependent mean free path: red scatters further in skin.
+    if (resolvedMat.sssRadius > 0.f && resolvedMat.sssColor[0] + resolvedMat.sssColor[1] + resolvedMat.sssColor[2] > 0.f) {
+        // Spectral mean free path from scatter colour
+        auto gauss = [](float l, float c, float s) { return std::exp(-(l-c)*(l-c)/(2.f*s*s)); };
+        float rB = gauss(lambda, 630.f, 30.f);
+        float gB = gauss(lambda, 532.f, 30.f);
+        float bB = gauss(lambda, 460.f, 25.f);
+        float scatterAtLambda = resolvedMat.sssColor[0]*rB + resolvedMat.sssColor[1]*gB + resolvedMat.sssColor[2]*bB;
+        scatterAtLambda = std::max(0.01f, scatterAtLambda);
+        float mfp = resolvedMat.sssRadius * scatterAtLambda;
+
+        // Random walk: scatter below surface, exit nearby
+        GfVec3f walkPos = hitPos;
+        float walkThroughput = 1.f;
+        const int maxWalkSteps = 16;
+
+        for (int step = 0; step < maxWalkSteps; ++step) {
+            // Random direction (isotropic)
+            float wu1 = _Hash(rngSeed++);
+            float wu2 = _Hash(rngSeed++);
+            float wz = 1.f - 2.f * wu1;
+            float wr = std::sqrt(std::max(0.f, 1.f - wz*wz));
+            float wphi = 6.28318f * wu2;
+            GfVec3f walkDir(wr*std::cos(wphi), wr*std::sin(wphi), wz);
+
+            // Step distance: exponential distribution with mean = mfp
+            float stepDist = -mfp * std::log(std::max(1e-8f, _Hash(rngSeed++)));
+
+            walkPos = GfVec3f(walkPos[0] + walkDir[0]*stepDist,
+                              walkPos[1] + walkDir[1]*stepDist,
+                              walkPos[2] + walkDir[2]*stepDist);
+
+            // Check if we've exited the surface
+            GfRay exitRay;
+            exitRay.SetPointAndDirection(GfVec3d(walkPos), GfVec3d(N));
+            SpectralBVH::Hit exitHit = bvh.Intersect(exitRay, rayTime);
+
+            if (!exitHit.valid() || exitHit.t > mfp * 0.5f) {
+                // Exited — add diffuse lighting at exit point
+                if (scene.HasLights()) {
+                    for (const SpectralLight& light : scene.GetLights()) {
+                        float su1 = _Hash(rngSeed++);
+                        float su2 = _Hash(rngSeed++);
+                        GfVec3f L = light.SampleDirection(walkPos, su1, su2, N);
+                        float NdotL = std::max(0.f, N[0]*L[0] + N[1]*L[1] + N[2]*L[2]);
+                        if (NdotL > 0.f) {
+                            float lightRad = light.SpectralEmission(lambda);
+                            float atten = light.Attenuation(walkPos);
+                            float sssContrib = walkThroughput * NdotL * lightRad * atten / 3.14159f;
+                            radiance += sssContrib;
+                            if (comps) comps->indirect += sssContrib;
+                        }
+                    }
+                }
+                break;
+            }
+
+            // Attenuate per step
+            walkThroughput *= 0.85f;
+            if (walkThroughput < 0.01f) break;
+        }
+    }
 
     // ---- Bounce rays ----
     if (maxBounces <= 0) return radiance;

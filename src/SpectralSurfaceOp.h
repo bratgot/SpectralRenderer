@@ -27,12 +27,13 @@ class HDSPECTRAL_API SpectralSurfaceOp : public ShaderOp
 public:
     explicit SpectralSurfaceOp(Node* node);
 
-    int minimum_inputs() const override { return 2; }
-    int maximum_inputs() const override { return 2; }
+    int minimum_inputs() const override { return 3; }
+    int maximum_inputs() const override { return 3; }
     const char* input_label(int idx, char*) const override {
         switch(idx) {
             case 0: return "tex";
-            case 1: return "disp";
+            case 1: return "bump";
+            case 2: return "disp";
             default: return "";
         }
     }
@@ -83,6 +84,14 @@ private:
     float _textureBlend = 1.0f;          // 0=base color only, 1=full texture
     float _absorptionColor[3] = {1.f, 1.f, 1.f}; // volume color (white=clear)
     float _absorptionDensity = 0.f;       // 0=clear, higher=darker
+    float _bumpStrength = 1.0f;              // bump map intensity
+    float _gratingSpacing = 0.f;
+    float _gratingStrength = 1.f;
+    float _fluorAbsorb = 0.f;
+    float _fluorEmit = 0.f;
+    float _fluorStrength = 0.f;
+    float _sssColor[3] = {0.f, 0.f, 0.f};
+    float _sssRadius = 0.f;
     const char* _displacementFile = "";  // displacement map path
 
     void _ApplyPreset(int preset);
@@ -101,8 +110,17 @@ public:
         float textureBlend = 1.0f;
         float absorptionColor[3] = {1.f, 1.f, 1.f};
         float absorptionDensity = 0.f;
+        float bumpStrength = 1.0f;
+        float gratingSpacing = 0.f;
+        float gratingStrength = 1.f;
+        float fluorAbsorb = 0.f;
+        float fluorEmit = 0.f;
+        float fluorStrength = 0.f;
+        float sssColor[3] = {0.f, 0.f, 0.f};
+        float sssRadius = 0.f;
         Op* dispIop = nullptr;
         Op* texIop  = nullptr;   // base color texture Iop
+        Op* bumpIop = nullptr;   // bump map Iop
     };
     static std::unordered_map<std::string, SpectralParams>& GetRegistry();
     void RegisterParams();

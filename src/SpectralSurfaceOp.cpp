@@ -146,6 +146,15 @@ void SpectralSurfaceOp::knobs(Knob_Callback f)
                "1 = full texture (default)\n"
                "0.5 = 50/50 mix of base color and texture");
 
+    Divider(f, "Bump");
+    Float_knob(f, &_bumpStrength, "bump_strength", "bump strength");
+    SetRange(f, 0.f, 5.f);
+    Tooltip(f, "Strength of the bump map connected to the bump input.\n"
+               "0 = no bump, 1 = normal strength, 2+ = exaggerated.\n"
+               "The bump map perturbs the surface normal to add\n"
+               "fine surface detail without changing geometry.\n"
+               "Connect any greyscale image to the bump pipe.");
+
     Divider(f, "Volume absorption");
     Color_knob(f, _absorptionColor, "absorption_color", "volume color");
     Tooltip(f, "What colour the glass/liquid transmits.\n"
@@ -159,6 +168,51 @@ void SpectralSurfaceOp::knobs(Knob_Callback f)
                "0.5 = lightly tinted\n"
                "2.0 = deeply coloured\n"
                "5+ = very dark / opaque looking");
+
+    Divider(f, "Diffraction");
+    Float_knob(f, &_gratingSpacing, "grating_spacing", "grating spacing");
+    SetRange(f, 0.f, 5.f);
+    Tooltip(f, "Diffraction grating line spacing in micrometers.\n"
+               "0 = disabled (default)\n"
+               "1.6 = CD/DVD\n"
+               "0.5 = butterfly wing / peacock feather\n"
+               "Creates rainbow iridescence from surface structure.");
+    Float_knob(f, &_gratingStrength, "grating_strength", "strength");
+    SetRange(f, 0.f, 1.f);
+    Tooltip(f, "Blend between regular BSDF (0) and diffraction (1).");
+
+    Divider(f, "Fluorescence");
+    Float_knob(f, &_fluorAbsorb, "fluor_absorb", "absorb wavelength");
+    SetRange(f, 300.f, 500.f);
+    Tooltip(f, "UV/blue wavelength absorbed by the material (nm).\n"
+               "0 = disabled\n"
+               "350 = UV (highlighter pen)\n"
+               "400 = violet (laundry whitener)\n"
+               "450 = blue (some minerals)");
+    Float_knob(f, &_fluorEmit, "fluor_emit", "emit wavelength");
+    SetRange(f, 400.f, 700.f);
+    Tooltip(f, "Visible wavelength re-emitted (nm).\n"
+               "520 = green (highlighter)\n"
+               "580 = yellow\n"
+               "610 = orange/red (some corals)");
+    Float_knob(f, &_fluorStrength, "fluor_strength", "strength");
+    SetRange(f, 0.f, 5.f);
+    Tooltip(f, "Fluorescence intensity.\n"
+               "0 = off, 1 = natural, 2+ = exaggerated.");
+
+    Divider(f, "Subsurface scattering");
+    Color_knob(f, _sssColor, "sss_color", "scatter color");
+    Tooltip(f, "Colour of light scattered beneath the surface.\n"
+               "Black = disabled. Red = skin/wax.\n"
+               "White = milk/marble. Green = jade.");
+    Float_knob(f, &_sssRadius, "sss_radius", "radius");
+    SetRange(f, 0.f, 10.f);
+    Tooltip(f, "Mean free path in world units.\n"
+               "0 = disabled\n"
+               "0.1 = dense material (stone)\n"
+               "0.5 = skin\n"
+               "2.0 = wax/milk\n"
+               "Larger = more translucent.");
 
     Divider(f, "Displacement");
     Float_knob(f, &_displacementScale, "displacement_scale", "scale");
@@ -181,7 +235,7 @@ void SpectralSurfaceOp::knobs(Knob_Callback f)
                "Leave empty to disable displacement.");
 
     Divider(f);
-    BeginClosedGroup(f, "spectral_surface_info", "Spectral material &mdash; how it works");
+    BeginClosedGroup(f, "spectral_surface_info", "Spectral material - how it works");
     {
         Text_knob(f,
             "<b>Surface shading model</b><br>"
@@ -405,15 +459,27 @@ void SpectralSurfaceOp::RegisterParams()
         if (texIop) p.texIop = input(0);
     }
     if (inputs() > 1 && input(1)) {
-        Iop* dispIop = dynamic_cast<Iop*>(input(1));
-        if (dispIop) p.dispIop = input(1);
+        Iop* bumpIop = dynamic_cast<Iop*>(input(1));
+        if (bumpIop) p.bumpIop = input(1);
     }
+    if (inputs() > 2 && input(2)) {
+        Iop* dispIop = dynamic_cast<Iop*>(input(2));
+        if (dispIop) p.dispIop = input(2);
+    }
+    p.bumpStrength = _bumpStrength;
+    p.gratingSpacing = _gratingSpacing;
+    p.gratingStrength = _gratingStrength;
+    p.fluorAbsorb = _fluorAbsorb;
+    p.fluorEmit = _fluorEmit;
+    p.fluorStrength = _fluorStrength;
+    p.sssColor[0] = _sssColor[0]; p.sssColor[1] = _sssColor[1]; p.sssColor[2] = _sssColor[2];
+    p.sssRadius = _sssRadius;
     GetRegistry()[node_name()] = p;
 }
 
 bool SpectralSurfaceOp::test_input(int idx, Op* op) const
 {
-    if (idx == 0 || idx == 1) {
+    if (idx >= 0 && idx <= 2) {
         if (!op) return true;
         return dynamic_cast<Iop*>(op) != nullptr;
     }

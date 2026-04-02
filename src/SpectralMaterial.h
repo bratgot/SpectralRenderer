@@ -39,6 +39,8 @@ struct SpectralMaterial
     int     roughnessTexId = -1;   // roughness texture
     int     metallicTexId  = -1;   // metallic texture
     int     normalMapTexId = -1;   // normal map
+    int     bumpMapTexId   = -1;   // bump/height map from Iop pipe
+    float   bumpStrength   = 1.0f; // bump map intensity multiplier
     int     displacementTexId = -1; // displacement map
     float   displacementScale = 0.f; // world units, 0 = disabled
     float   displacementMidpoint = 0.0f; // 0.5 = centered, 0 = outward only
@@ -50,6 +52,19 @@ struct SpectralMaterial
     float   textureBlend     = 1.0f;   // 0=base color only, 1=full texture
     GfVec3f absorptionColor  = GfVec3f(1.f, 1.f, 1.f);  // volume color (white=clear)
     float   absorptionDensity = 0.f;   // 0=clear, higher=more absorption
+
+    // Diffraction grating
+    float   gratingSpacing = 0.f;   // μm (0=off, 1.6=CD, 0.5=butterfly)
+    float   gratingStrength = 1.f;  // blend factor
+
+    // Fluorescence
+    float   fluorAbsorb    = 0.f;   // UV absorption center nm (0=off, ~350=highlighter)
+    float   fluorEmit      = 0.f;   // visible emission center nm (~520=green)
+    float   fluorStrength  = 0.f;   // intensity (0=off, 1=strong)
+
+    // Subsurface scattering
+    GfVec3f sssColor       = GfVec3f(0.f);  // scattering colour (0=disabled)
+    float   sssRadius      = 0.f;   // mean free path (world units, 0=disabled)
 
     // Identifier
     std::string name = "default";

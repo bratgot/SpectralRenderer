@@ -1323,6 +1323,15 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                                                                entry.second.absorptionColor[1],
                                                                entry.second.absorptionColor[2]);
                                 mat.absorptionDensity = entry.second.absorptionDensity;
+                                mat.gratingSpacing = entry.second.gratingSpacing;
+                                mat.gratingStrength = entry.second.gratingStrength;
+                                mat.fluorAbsorb = entry.second.fluorAbsorb;
+                                mat.fluorEmit = entry.second.fluorEmit;
+                                mat.fluorStrength = entry.second.fluorStrength;
+                                mat.sssColor = GfVec3f(entry.second.sssColor[0],
+                                                        entry.second.sssColor[1],
+                                                        entry.second.sssColor[2]);
+                                mat.sssRadius = entry.second.sssRadius;
                                 // Load displacement texture from file path
                                 if (!entry.second.displacementFile.empty()
                                     && mat.displacementScale > 0.f) {
@@ -1412,6 +1421,47 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                                             }
                                         } catch (...) {
                                             fprintf(stderr, "SpectralRender: failed to read texture Iop\n");
+                                        }
+                                    }
+                                }
+
+                                // Read bump map from bump Iop pipe
+                                if (mat.bumpMapTexId < 0 && entry.second.bumpIop) {
+                                    Iop* bumpIop = dynamic_cast<Iop*>(entry.second.bumpIop);
+                                    if (bumpIop) {
+                                        try {
+                                            bumpIop->validate(true);
+                                            const int bW = bumpIop->info().format().width();
+                                            const int bH = bumpIop->info().format().height();
+                                            if (bW > 0 && bH > 0) {
+                                                pxr::SpectralTexture tex;
+                                                tex._width = bW;
+                                                tex._height = bH;
+                                                tex._channels = 3;
+                                                tex._pixels.resize(size_t(bW) * bH * 3);
+                                                tex._path = "bump_iop";
+                                                bumpIop->request(0, 0, bW, bH, Mask_RGB, 1);
+                                                for (int y = 0; y < bH; ++y) {
+                                                    Row row(0, bW);
+                                                    bumpIop->get(y, 0, bW, Mask_RGB, row);
+                                                    const float* rp = row[Chan_Red];
+                                                    const float* gp = row[Chan_Green];
+                                                    const float* bp = row[Chan_Blue];
+                                                    int storeY = bH - 1 - y;
+                                                    for (int x = 0; x < bW; ++x) {
+                                                        size_t idx = (size_t(storeY) * bW + x) * 3;
+                                                        tex._pixels[idx+0] = rp ? rp[x] : 0.f;
+                                                        tex._pixels[idx+1] = gp ? gp[x] : 0.f;
+                                                        tex._pixels[idx+2] = bp ? bp[x] : 0.f;
+                                                    }
+                                                }
+                                                mat.bumpMapTexId = _scene->AddTexture(std::move(tex));
+                                                mat.bumpStrength = entry.second.bumpStrength;
+                                                fprintf(stderr, "SpectralRender: bump map from pipe '%s' (%dx%d, id=%d, strength=%.2f)\n",
+                                                        bumpIop->node_name(), bW, bH, mat.bumpMapTexId, mat.bumpStrength);
+                                            }
+                                        } catch (...) {
+                                            fprintf(stderr, "SpectralRender: failed to read bump Iop\n");
                                         }
                                     }
                                 }
