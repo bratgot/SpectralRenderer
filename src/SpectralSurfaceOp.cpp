@@ -151,8 +151,6 @@ void SpectralSurfaceOp::knobs(Knob_Callback f)
         Tooltip(f, "Vertex offset in world units (displacement mode).");
         Float_knob(f, &_displacementMidpoint, "displacement_midpoint", "midpoint");
         SetRange(f, -1.f, 1.f);
-        File_knob(f, &_displacementFile, "displacement_file", "file");
-        Tooltip(f, "Displacement map image file (overrides pipe).");
     }
     EndGroup(f);
 
@@ -166,7 +164,7 @@ void SpectralSurfaceOp::knobs(Knob_Callback f)
     }
     EndGroup(f);
 
-    BeginClosedGroup(f, "diffraction_grp", "Diffraction <font color='#888' size='-2'>CPU</font>");
+    BeginClosedGroup(f, "diffraction_grp", "Diffraction (CPU)");
     {
         Float_knob(f, &_gratingSpacing, "grating_spacing", "grating spacing");
         SetRange(f, 0.f, 5.f);
@@ -177,7 +175,7 @@ void SpectralSurfaceOp::knobs(Knob_Callback f)
     }
     EndGroup(f);
 
-    BeginClosedGroup(f, "fluor_grp", "Fluorescence <font color='#888' size='-2'>CPU</font>");
+    BeginClosedGroup(f, "fluor_grp", "Fluorescence (CPU)");
     {
         Float_knob(f, &_fluorAbsorb, "fluor_absorb", "absorb (nm)");
         SetRange(f, 300.f, 500.f);
@@ -190,7 +188,7 @@ void SpectralSurfaceOp::knobs(Knob_Callback f)
     }
     EndGroup(f);
 
-    BeginClosedGroup(f, "sss_grp", "Subsurface scattering <font color='#888' size='-2'>CPU</font>");
+    BeginClosedGroup(f, "sss_grp", "Subsurface scattering (CPU)");
     {
         Color_knob(f, _sssColor, "sss_color", "scatter color");
         Tooltip(f, "Black=off. Red=skin/wax. White=milk/marble. Green=jade.");
@@ -384,7 +382,7 @@ void SpectralSurfaceOp::_ApplyPreset(int preset)
         case 13: // CD/DVD
             _diffuseColor[0]=0.1f; _diffuseColor[1]=0.1f; _diffuseColor[2]=0.12f;
             _metallic=0.8f; _roughness=0.05f; _ior=1.5f; _opacity=1.0f;
-            _gratingSpacing=1.6f; _gratingStrength=0.8f;
+            _gratingSpacing=0.46f; _gratingStrength=0.25f;
             break;
         case 14: // soap bubble
             _diffuseColor[0]=0.95f; _diffuseColor[1]=0.95f; _diffuseColor[2]=0.98f;
