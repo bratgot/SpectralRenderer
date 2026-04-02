@@ -22,6 +22,7 @@
 
 #ifdef SPECTRAL_HAS_EMBREE
 #include "SpectralBVH.h"
+#include "SpectralPhotonMap.h"
 #endif
 
 #ifdef SPECTRAL_HAS_OPTIX
@@ -119,11 +120,12 @@ public:
         float* objectIdOut = nullptr,
         float* materialIdOut = nullptr,
         const AOVBuffers* aovs = nullptr,
-        float* aoOut = nullptr);
+        float* aoOut = nullptr,
+        const SpectralPhotonMap* photonMap = nullptr,
+        float gatherRadius = 0.5f);
 
 #ifdef SPECTRAL_HAS_OPTIX
     /// GPU render path using OptiX.
-    /// Falls back to CPU if GPU init fails.
     static void RenderFrameGPU(
         const SpectralScene& scene,
         const SpectralCamera& camera,
@@ -132,11 +134,20 @@ public:
         float* depthOut = nullptr,
         int maxBounces = 4);
 
-    /// Check if GPU rendering is available.
     static bool IsGPUAvailable();
-
-    /// Denoise a framebuffer using OptiX AI denoiser (GPU only).
     static void DenoiseGPU(unsigned int width, unsigned int height, float* pixels);
+#endif
+
+    /// Build a photon map for spectral caustics.
+    /// Traces photons from lights through specular surfaces,
+    /// storing them where they hit diffuse geometry.
+    /// Each photon carries a single wavelength — dispersion
+    /// naturally separates the rainbow in the photon map.
+    static void BuildPhotonMap(
+        const SpectralScene& scene,
+        SpectralPhotonMap& photonMap,
+        int numPhotons = 100000,
+        int maxBounces = 8);
 
     /// Compute ambient occlusion into a separate buffer.
     static void ComputeAO(
@@ -159,7 +170,6 @@ public:
         float* objectIdOut,     // 1 float per pixel
         float* materialIdOut,   // 1 float per pixel
         float* depthOut);       // 1 float per pixel
-#endif  // optional per-pixel depth output
 
 private:
     // Ray generation
@@ -205,7 +215,9 @@ private:
                                  unsigned int& rngSeed,
                                  const SpectralBVH& bvh,
                                  float rayTime = 0.f,
-                                 ShadeComponents* comps = nullptr);
+                                 ShadeComponents* comps = nullptr,
+                                 const SpectralPhotonMap* photonMap = nullptr,
+                                 float gatherRadius = 0.5f);
     static float _SkySpectral(const GfVec3f& dir, float lambda);
 
     // Simple hash-based RNG for per-pixel, per-sample jitter

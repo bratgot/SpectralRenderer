@@ -224,6 +224,13 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         Tooltip(f, "Distance from camera to the focal plane<br>"
                    "in world units. Objects at this distance<br>"
                    "will be sharp; nearer and farther objects blur.");
+        Divider(f, "Caustics");
+        Bool_knob(f, &_caustics, "caustics", "enable caustics");
+        Tooltip(f, "Manifold Next Event Estimation (MNEE).<br>"
+                   "Finds specular refraction paths from lights<br>"
+                   "through glass surfaces to the shading point.<br>"
+                   "Each wavelength refracts differently via dispersion,<br>"
+                   "producing sharp rainbow caustic patterns.");
     }
     EndGroup(f);
 
@@ -368,7 +375,9 @@ int SpectralRenderIop::knob_changed(Knob* k)
         char buf[128];
         static const char* const proxyLabels[] = { "1/4", "1/2", "3/4", "full" };
         const char* proxyStr = (_proxyMode >= 0 && _proxyMode <= 3) ? proxyLabels[_proxyMode] : "full";
-        snprintf(buf, sizeof(buf), "%s\n%d spp\n%d bounces\n%s", device, _samples, _maxBounces, proxyStr);
+        snprintf(buf, sizeof(buf), "%s\n%d spp\n%d bounces\n%s%s",
+                 device, _samples, _maxBounces, proxyStr,
+                 _caustics ? "\ncaustics" : "");
         lk->set_text(buf);
     }
 
@@ -1956,10 +1965,15 @@ void SpectralRenderIop::_EnsureFrameRendered()
         fprintf(stderr, "SpectralRender: rendering %dx%d, %zu tris, %d spp, device=%s%s\n",
                 W, H, _scene->TotalTriangles(), renderSpp, deviceStr, passStr);
 
+    // Build caustic photon map / enable MNEE if caustics on
+    pxr::SpectralPhotonMap causticFlag;  // used as enable flag for MNEE
+    const pxr::SpectralPhotonMap* pmap = _caustics ? &causticFlag : nullptr;
+
 #ifdef SPECTRAL_HAS_OPTIX
     if (useGPU) {
         SpectralIntegrator::RenderFrameGPU(*_scene, cam, _frameBuffer.data(),
                                             renderSpp, _depthBuffer.data(), _maxBounces);
+        // Note: GPU caustics use CPU gathering pass below
     } else
 #endif
     {
@@ -1976,7 +1990,7 @@ void SpectralRenderIop::_EnsureFrameRendered()
         SpectralIntegrator::RenderFrame(*_scene, cam, _frameBuffer.data(),
                                          renderSpp, _depthBuffer.data(), _maxBounces,
                                          _objectIdBuffer.data(), _materialIdBuffer.data(),
-                                         &aovBufs);
+                                         &aovBufs, nullptr, pmap, _causticRadius);
     }
 
     // Denoise — works for both GPU and CPU renders
@@ -2015,7 +2029,8 @@ void SpectralRenderIop::_EnsureFrameRendered()
 
             SpectralIntegrator::RenderFrame(*_scene, cam, dummyPixels.data(),
                                              aovSpp, nullptr, _maxBounces,
-                                             nullptr, nullptr, &aovBufs);
+                                             nullptr, nullptr, &aovBufs, nullptr,
+                                             pmap, _causticRadius);
 
             fprintf(stderr, "SpectralRender: shading AOVs computed (%d spp CPU pass)\n", aovSpp);
         }
