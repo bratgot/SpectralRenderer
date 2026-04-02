@@ -1426,8 +1426,8 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                                 }
 
                                 // Read bump map from bump Iop pipe
-                                if (mat.bumpMapTexId < 0 && entry.second.bumpIop) {
-                                    Iop* bumpIop = dynamic_cast<Iop*>(entry.second.bumpIop);
+                                if (mat.bumpMapTexId < 0 && entry.second.mapIop && entry.second.mapMode == 0) {
+                                    Iop* bumpIop = dynamic_cast<Iop*>(entry.second.mapIop);
                                     if (bumpIop) {
                                         try {
                                             bumpIop->validate(true);

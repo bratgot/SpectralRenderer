@@ -254,9 +254,16 @@ static __forceinline__ __device__ float lightAttenuation(const GPULight& light, 
 static __forceinline__ __device__ float dispersedIOR(float ior_d, float abbe, float lambda)
 {
     if (abbe <= 0.f) return ior_d;
-    float disp = (ior_d - 1.f) / abbe;
-    float dL = (587.6f - lambda) / (656.3f - 486.1f);
-    return ior_d + disp * dL;
+    // Sellmeier single-term dispersion
+    float lum = lambda * 0.001f;  // nm → μm
+    float ld = 0.5876f;
+    float resonance = 0.08f + (60.f - fminf(60.f, abbe)) / 60.f * 0.20f;
+    float C = resonance * resonance;
+    float nd2 = ior_d * ior_d;
+    float B = (nd2 - 1.f) * (ld*ld - C) / (ld*ld);
+    float n2 = 1.f + B * lum*lum / (lum*lum - C);
+    if (n2 < 1.f) n2 = 1.f;
+    return sqrtf(n2);
 }
 
 static __forceinline__ __device__ float thinFilmFresnel(float F, float ior, float thick, float lambda, float cosT)
@@ -675,6 +682,26 @@ extern "C" __global__ void __raygen__spectral()
 
                 float3 N = normalize3(make_float3(
                     __uint_as_float(p0),__uint_as_float(p1),__uint_as_float(p2)));
+
+                // GPU bump mapping
+                if (mat.bumpMapTexId >= 0 && mat.bumpStrength > 0.f) {
+                    float2 hitUV = make_float2(__uint_as_float(p5), __uint_as_float(p6));
+                    float eps = 0.002f;
+                    float hC = sampleTextureGPU(mat.bumpMapTexId, hitUV).x;
+                    float hR = sampleTextureGPU(mat.bumpMapTexId, make_float2(hitUV.x+eps, hitUV.y)).x;
+                    float hU = sampleTextureGPU(mat.bumpMapTexId, make_float2(hitUV.x, hitUV.y+eps)).x;
+                    float dhdU = (hR - hC) / eps * mat.bumpStrength;
+                    float dhdV = (hU - hC) / eps * mat.bumpStrength;
+                    // Build tangent frame from normal
+                    float3 up = (fabsf(N.y) < 0.999f) ? make_float3(0,1,0) : make_float3(1,0,0);
+                    float3 T = normalize3(cross3(up, N));
+                    float3 B = cross3(N, T);
+                    N = normalize3(make_float3(
+                        N.x - dhdU*T.x - dhdV*B.x,
+                        N.y - dhdU*T.y - dhdV*B.y,
+                        N.z - dhdU*T.z - dhdV*B.z));
+                }
+
                 float3 V = normalize3(neg3(dir));
                 if (dot3raw(N,V)<0.f) N=neg3(N);
 

@@ -32,6 +32,8 @@ struct GPUMaterial {
     float  thinFilmThickness;
     int    baseColorTexId;   // -1 = no texture
     float  textureBlend;     // 0=base color, 1=full texture
+    int    bumpMapTexId;     // -1 = no bump map
+    float  bumpStrength;     // bump intensity
     float3 absorptionColor;  // volume color (white=clear)
     float  absorptionDensity; // 0=clear, higher=darker
 };

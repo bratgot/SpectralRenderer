@@ -335,6 +335,8 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
             gpuMats[i].thinFilmThickness = mats[i].thinFilmThickness;
             gpuMats[i].baseColorTexId    = mats[i].baseColorTexId;
             gpuMats[i].textureBlend      = mats[i].textureBlend;
+            gpuMats[i].bumpMapTexId      = mats[i].bumpMapTexId;
+            gpuMats[i].bumpStrength      = mats[i].bumpStrength;
             gpuMats[i].absorptionColor   = make_float3(mats[i].absorptionColor[0], mats[i].absorptionColor[1], mats[i].absorptionColor[2]);
             gpuMats[i].absorptionDensity = mats[i].absorptionDensity;
         }
