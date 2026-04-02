@@ -548,16 +548,37 @@ static __forceinline__ __device__ float shadeHit(
             // Jittered light direction for soft shadows
             float3 L = sampleLightDir(light, hitPos, hashRNG(rngSeed++), hashRNG(rngSeed++), N);
 
-            // Shadow ray
+            // Shadow ray — trace through glass (transparent shadows)
             bool inShadow = false;
+            float shadowTransmit = 1.f;
             float3 sOrig = make_float3(hitPos.x+N.x*0.01f, hitPos.y+N.y*0.01f, hitPos.z+N.z*0.01f);
-            unsigned int sp0=0,sp1=0,sp2=0,sp3=__float_as_uint(1e30f),sp4=0,sp5=0,sp6=0;
-            optixTrace(params.traversable, sOrig, L,
-                       1e-4f, 1e30f, 0.f, OptixVisibilityMask(0xFF),
-                       OPTIX_RAY_FLAG_CULL_BACK_FACING_TRIANGLES | OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
-                       0, 1, 0, sp0,sp1,sp2,sp3,sp4,sp5,sp6);
 
-            if (sp4 > 0u) {
+            for (int sb = 0; sb < 8; ++sb) {
+                unsigned int sp0=0,sp1=0,sp2=0,sp3=__float_as_uint(1e30f),sp4=0,sp5=0,sp6=0;
+                optixTrace(params.traversable, sOrig, L,
+                           1e-4f, 1e30f, 0.f, OptixVisibilityMask(0xFF),
+                           OPTIX_RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+                           0, 1, 0, sp0,sp1,sp2,sp3,sp4,sp5,sp6);
+
+                if (sp4 == 0u) break;  // no hit — reached light
+
+                // Check if hit is glass
+                int sMatId = int(sp4) - 1;
+                if (sMatId >= 0 && sMatId < int(params.materialCount)) {
+                    const GPUMaterial& sMat = params.materials[sMatId];
+                    if (sMat.opacity < 0.99f && sMat.metallic < 0.5f) {
+                        // Glass: transmit through
+                        shadowTransmit *= (1.f - sMat.opacity) * 0.95f;
+                        if (shadowTransmit < 0.01f) { inShadow = true; break; }
+                        float sDist = __uint_as_float(sp3);
+                        sOrig = make_float3(sOrig.x+L.x*(sDist+0.02f),
+                                            sOrig.y+L.y*(sDist+0.02f),
+                                            sOrig.z+L.z*(sDist+0.02f));
+                        continue;  // trace past the glass
+                    }
+                }
+
+                // Opaque blocker
                 if (light.type == 0 || light.type == 3) {
                     inShadow = true;
                 } else {
@@ -565,11 +586,12 @@ static __forceinline__ __device__ float shadeHit(
                         light.position.y-hitPos.y, light.position.z-hitPos.z);
                     if (__uint_as_float(sp3) < len3(toLight)) inShadow = true;
                 }
+                break;
             }
 
             if (!inShadow) {
                 float bsdf = evalBSDF(mat, N, V, L, lambda);
-                radiance += bsdf * lightEmission(light, lambda) * lightAttenuation(light, hitPos);
+                radiance += bsdf * lightEmission(light, lambda) * lightAttenuation(light, hitPos) * shadowTransmit;
             }
         }
     }
@@ -671,7 +693,8 @@ extern "C" __global__ void __raygen__spectral()
                 unsigned int bSeed = seed + 100u;
                 bool isEntering = true;
                 bool insideVolume = false;
-                GPUMaterial volumeMat;  // material of current volume
+                GPUMaterial volumeMat;
+                float pathMinRough = 0.f;  // path regularization
 
                 for (int bounce = 0; bounce < maxBounces; ++bounce) {
                     if (bounce >= 1) {
@@ -680,12 +703,27 @@ extern "C" __global__ void __raygen__spectral()
                         throughput /= rrProb;
                     }
 
+                    // Path regularization
+                    GPUMaterial regMat = *bMat;
+                    if (pathMinRough > regMat.roughness) regMat.roughness = pathMinRough;
+
                     float bounceThroughput;
                     bool bTransmitted = false;
-                    float3 bounceDir = sampleBounce(*bMat, bN, bV, lambda,
+                    float3 bounceDir = sampleBounce(regMat, bN, bV, lambda,
                         hashRNG(bSeed++), hashRNG(bSeed++), bounceThroughput, bTransmitted, isEntering);
                     if (bounceThroughput <= 0.f) break;
                     throughput *= bounceThroughput;
+
+                    // Volume tracking on transmission
+                    if (bTransmitted) {
+                        if (bMat->roughness > 0.05f)
+                            pathMinRough = fmaxf(pathMinRough, bMat->roughness * 0.5f);
+                        if (isEntering && bMat->absorptionDensity > 0.f) {
+                            insideVolume = true; volumeMat = *bMat;
+                        } else if (!isEntering) {
+                            insideVolume = false;
+                        }
+                    }
 
                     // Offset: along -N for transmission, +N for reflection
                     float bOff = bTransmitted ? -0.1f : 0.01f;
@@ -717,9 +755,8 @@ extern "C" __global__ void __raygen__spectral()
                     float bNdV = dot3raw(rawN, bV);
                     isEntering = (bNdV > 0.f);
 
-                    // Beer-Lambert: absorption inside glass volume
+                    // Beer-Lambert: absorption for distance traveled inside volume
                     if (insideVolume && bDepth > 0.f && volumeMat.absorptionDensity > 0.f) {
-                        // Spectral transmittance via Gaussian basis
                         float rB = expf(-((lambda-630.f)*(lambda-630.f))/(2.f*30.f*30.f));
                         float gB = expf(-((lambda-532.f)*(lambda-532.f))/(2.f*30.f*30.f));
                         float bB = expf(-((lambda-460.f)*(lambda-460.f))/(2.f*25.f*25.f));
@@ -728,12 +765,6 @@ extern "C" __global__ void __raygen__spectral()
                         float sigma = -logf(colAtL) * volumeMat.absorptionDensity;
                         throughput *= expf(-sigma * bDepth);
                         if (throughput < 1e-6f) break;
-                    }
-
-                    // Track entering/exiting glass
-                    if (resolvedMat.opacity < 0.99f && resolvedMat.metallic < 0.5f) {
-                        if (isEntering) { insideVolume = true; volumeMat = resolvedMat; }
-                        else { insideVolume = false; }
                     }
 
                     bN = (bNdV < 0.f) ? neg3(rawN) : rawN;

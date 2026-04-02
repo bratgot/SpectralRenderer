@@ -251,6 +251,17 @@ void SpectralIntegrator::RenderFrame(
                                 }
                             }
 
+                            // Firefly clamp: limit extreme spectral outliers
+                            // Rough glass + dispersion can produce very bright
+                            // single-wavelength pixels. Clamping at 100x average
+                            // removes these without affecting normal renders.
+                            if (radiance > 0.f && accCount[pixIdx] > 0) {
+                                float avg = (accX[pixIdx] + accY[pixIdx] + accZ[pixIdx])
+                                          / (3.f * accCount[pixIdx] + 1e-6f);
+                                float maxVal = std::max(100.f, avg * 100.f);
+                                radiance = std::min(radiance, maxVal);
+                            }
+
                             GfVec3f xyz = SpectralSpectrum::RadianceToXYZ(radiance, lambda);
                             accX[pixIdx] += xyz[0];
                             accY[pixIdx] += xyz[1];
@@ -724,36 +735,33 @@ float SpectralIntegrator::_ShadeSpectral(
             GfVec3f L = light.SampleDirection(hitPos, su1, su2, N);
 
             // Shadow ray — trace through glass (transparent shadows)
+            // Matches GPU: skip glass, block on opaque, check light distance
             bool inShadow = false;
             float shadowTransmit = 1.f;
             GfVec3f shadowOrigin = hitPos + N * 0.01f;
-            for (int shadowBounce = 0; shadowBounce < 8; ++shadowBounce) {
+            for (int sb = 0; sb < 8; ++sb) {
                 GfRay shadowRay;
                 shadowRay.SetPointAndDirection(GfVec3d(shadowOrigin), GfVec3d(L));
                 SpectralBVH::Hit shadowHit = bvh.Intersect(shadowRay, rayTime);
                 if (!shadowHit.valid()) break;  // reached light
 
-                const SpectralMaterial& shadowMat = scene.GetMaterial(shadowHit.tri->materialId);
+                const SpectralMaterial& sMat = scene.GetMaterial(shadowHit.tri->materialId);
 
-                // Glass: transmit through with Fresnel loss
-                if (shadowMat.opacity < 0.99f && shadowMat.metallic < 0.5f) {
-                    shadowTransmit *= (1.f - shadowMat.opacity) * 0.95f;
+                // Glass: pass through
+                if (sMat.opacity < 0.99f && sMat.metallic < 0.5f) {
+                    shadowTransmit *= (1.f - sMat.opacity) * 0.95f;
                     if (shadowTransmit < 0.01f) { inShadow = true; break; }
                     shadowOrigin = GfVec3f(GfVec3d(shadowOrigin) + shadowHit.t * GfVec3d(L)) + L * 0.02f;
-                    continue;  // keep tracing
+                    continue;
                 }
 
-                // Opaque blocker
-                GfVec3f shadowN = shadowHit.tri->faceNormal;
-                float hitFacing = shadowN[0]*L[0] + shadowN[1]*L[1] + shadowN[2]*L[2];
-                if (hitFacing < 0.f) {
-                    if (light.type == SpectralLight::Type::Distant ||
-                        light.type == SpectralLight::Type::Dome) {
-                        inShadow = true;
-                    } else {
-                        float lightDist = (light.position - hitPos).GetLength();
-                        inShadow = (shadowHit.t < lightDist);
-                    }
+                // Opaque: check distance
+                if (light.type == SpectralLight::Type::Distant ||
+                    light.type == SpectralLight::Type::Dome) {
+                    inShadow = true;
+                } else {
+                    float lightDist = (light.position - hitPos).GetLength();
+                    inShadow = (shadowHit.t < lightDist);
                 }
                 break;
             }
@@ -806,6 +814,7 @@ float SpectralIntegrator::_ShadeSpectral(
     const SpectralMaterial* bounceMat = &resolvedBounceMat;
     bool isEntering = true;
     const SpectralMaterial* insideVolumeMat = nullptr;  // Beer-Lambert tracking
+    float pathMinRoughness = 0.f;  // path regularization for rough glass
 
     for (int bounce = 0; bounce < maxBounces; ++bounce) {
         // Russian roulette after bounce 1
@@ -815,19 +824,38 @@ float SpectralIntegrator::_ShadeSpectral(
             pathThroughput /= rrProb;
         }
 
+        // Path regularization: enforce minimum roughness from previous rough transmissions
+        // Prevents sharp specular paths after rough refractions (firefly reduction)
+        SpectralMaterial regularizedMat = *bounceMat;
+        if (pathMinRoughness > regularizedMat.roughness)
+            regularizedMat.roughness = pathMinRoughness;
+
         // Sample bounce direction
         float u1 = _Hash(rngSeed++);
         float u2 = _Hash(rngSeed++);
         float bounceThroughput;
         bool transmitted = false;
         GfVec3f bounceDir = SpectralBSDF::SampleDirection(
-            *bounceMat, bounceN, bounceV, lambda, u1, u2,
+            regularizedMat, bounceN, bounceV, lambda, u1, u2,
             bounceThroughput, transmitted, isEntering);
 
         if (bounceThroughput <= 0.f) break;
         pathThroughput *= bounceThroughput;
 
-        // Trace bounce ray — use SetPointAndDirection so t = actual distance
+        // Beer-Lambert: update volume tracking based on transmission
+        if (transmitted) {
+            // Path regularization: after rough refraction, raise min roughness
+            if (bounceMat->roughness > 0.05f)
+                pathMinRoughness = std::max(pathMinRoughness, bounceMat->roughness * 0.5f);
+
+            if (isEntering && bounceMat->absorptionDensity > 0.f) {
+                insideVolumeMat = bounceMat;
+            } else if (!isEntering) {
+                insideVolumeMat = nullptr;
+            }
+        }
+
+        // Trace bounce ray
         GfVec3f bOffset = transmitted ? (bounceN * -0.1f) : (bounceN * 0.01f);
         GfRay bounceRay;
         bounceRay.SetPointAndDirection(
@@ -836,7 +864,7 @@ float SpectralIntegrator::_ShadeSpectral(
 
         SpectralBVH::Hit bounceHit = bvh.Intersect(bounceRay, rayTime);
 
-        // Beer-Lambert absorption: if traveling inside a volume, attenuate
+        // Beer-Lambert absorption: attenuate for distance traveled inside volume
         if (insideVolumeMat && bounceHit.valid()) {
             float T = insideVolumeMat->SpectralTransmittance(lambda, float(bounceHit.t));
             pathThroughput *= T;
@@ -883,15 +911,6 @@ float SpectralIntegrator::_ShadeSpectral(
         float bNdotV = bounceN[0]*bounceV[0] + bounceN[1]*bounceV[1] + bounceN[2]*bounceV[2];
         isEntering = (bNdotV > 0.f);  // normal faces camera = entering
 
-        // Beer-Lambert: track entering/exiting glass volumes
-        if (bounceMat->opacity < 0.99f && bounceMat->metallic < 0.5f) {
-            if (isEntering) {
-                insideVolumeMat = bounceMat;  // entering glass
-            } else {
-                insideVolumeMat = nullptr;    // exiting glass
-            }
-        }
-
         // Flip normal to face camera
         if (bNdotV < 0.f) bounceN = -bounceN;
 
@@ -926,16 +945,12 @@ float SpectralIntegrator::_ShadeSpectral(
                         continue;
                     }
 
-                    GfVec3f shadowN = shadowHit.tri->faceNormal;
-                    float hitFacing = shadowN[0]*L[0] + shadowN[1]*L[1] + shadowN[2]*L[2];
-                    if (hitFacing < 0.f) {
-                        if (light.type == SpectralLight::Type::Distant ||
-                            light.type == SpectralLight::Type::Dome) {
-                            inShadow = true;
-                        } else {
-                            float lightDist = (light.position - bounceOrigin).GetLength();
-                            inShadow = (shadowHit.t < lightDist);
-                        }
+                    if (light.type == SpectralLight::Type::Distant ||
+                        light.type == SpectralLight::Type::Dome) {
+                        inShadow = true;
+                    } else {
+                        float lightDist = (light.position - bounceOrigin).GetLength();
+                        inShadow = (shadowHit.t < lightDist);
                     }
                     break;
                 }

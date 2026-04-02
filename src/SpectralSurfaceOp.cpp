@@ -70,6 +70,12 @@ void SpectralSurfaceOp::knobs(Knob_Callback f)
 {
     ShaderOp::knobs(f);
 
+    Text_knob(f,
+        "<b><font size='+1'>SpectralSurface</font></b><br>"
+        "<font color='#999'>Physically-based spectral material for SpectralRenderer</font>"
+    );
+    Divider(f);
+
     Divider(f, "Surface");
     Color_knob(f, _diffuseColor, "diffuse_color", "diffuse color");
     Tooltip(f, "Base surface colour. For metals this tints\n"
@@ -173,6 +179,71 @@ void SpectralSurfaceOp::knobs(Knob_Callback f)
     Tooltip(f, "Displacement map image file (.exr, .hdr, .png, .jpg).\n"
                "Red channel is used as the displacement height.\n"
                "Leave empty to disable displacement.");
+
+    Divider(f);
+    BeginClosedGroup(f, "spectral_surface_info", "Spectral material &mdash; how it works");
+    {
+        Text_knob(f,
+            "<b>Surface shading model</b><br>"
+            "Uses the Disney Principled BSDF (Burley 2012) with GGX microfacet specular.<br>"
+            "Metallic/roughness workflow: metallic=0 gives dielectric (plastic, glass),<br>"
+            "metallic=1 gives conductor (metal). Roughness controls microfacet spread.<br>"
+            "<br>"
+            "<b>Spectral reflectance</b><br>"
+            "RGB base colour is converted to a spectral curve using Gaussian basis functions:<br>"
+            "R(&lambda;) = r&middot;G(&lambda;,630,30) + g&middot;G(&lambda;,532,30) + b&middot;G(&lambda;,460,25)<br>"
+            "where G(&lambda;,&mu;,&sigma;) = e<sup>-(&lambda;-&mu;)&sup2;/2&sigma;&sup2;</sup>.<br>"
+            "Each ray evaluates this at a single wavelength for true spectral transport.<br>"
+            "<br>"
+            "<b>Metal Fresnel</b><br>"
+            "Metal presets use measured (n,k) optical constants from Palik's Handbook.<br>"
+            "Exact conductor Fresnel: F = (R<sub>s</sub> + R<sub>p</sub>) / 2 with complex IOR.<br>"
+            "9-point spectral data (380&ndash;780nm) for Au, Cu, Ag, Al, Fe, Ti.<br>"
+            "Produces physically correct colour shift with viewing angle.<br>"
+            "<br>"
+            "<b>Dispersion (Cauchy model)</b><br>"
+            "n(&lambda;) = n<sub>d</sub> + (n<sub>d</sub>&minus;1)/V<sub>d</sub> "
+            "&middot; (587.6&minus;&lambda;) / (656.3&minus;486.1)<br>"
+            "where V<sub>d</sub> = Abbe number. Higher V<sub>d</sub> = less dispersion.<br>"
+            "Each wavelength refracts at a different angle &rarr; rainbow splitting.<br>"
+            "<br>"
+            "<b>Thin-film interference (Fabry-Perot)</b><br>"
+            "Phase: &delta; = 4&pi; n<sub>film</sub> d cos&theta;<sub>t</sub> / &lambda;<br>"
+            "Reflectance modulation: F<sub>film</sub> = F &middot; (1 + &frac12;cos&delta;)<br>"
+            "Coating thickness in nm controls the interference colour pattern.<br>"
+            "<br>"
+            "<b>Beer-Lambert absorption</b><br>"
+            "Light inside glass/liquid is absorbed: T(&lambda;) = e<sup>&minus;&sigma;(&lambda;)&middot;d</sup><br>"
+            "where &sigma;(&lambda;) = &minus;ln(color<sub>&lambda;</sub>) &times; density.<br>"
+            "Volume colour = what survives (red glass absorbs blue/green).<br>"
+            "Thicker geometry = deeper colour saturation &mdash; physically correct.<br>"
+            "<br>"
+            "<b>Multiscatter GGX (Kulla-Conty 2017)</b><br>"
+            "Compensates energy lost to multiple microfacet bounces at high roughness.<br>"
+            "f<sub>ms</sub> = F<sub>avg</sub> &middot; (1&minus;E<sub>ss</sub>(V)) &middot; "
+            "(1&minus;E<sub>ss</sub>(L)) / (&pi;(1&minus;E<sub>ss,avg</sub>))<br>"
+            "Rough metals gain ~40&ndash;70% energy. Smooth surfaces unaffected.<br>"
+            "<br>"
+            "<b>Texture blending</b><br>"
+            "The tex input pipe provides base colour from any Nuke image node.<br>"
+            "Texture blend controls the mix: result = baseColor&times;(1&minus;b) + texture&times;b.<br>"
+            "Works on both CPU and GPU render paths.<br>"
+            "<br>"
+            "<b>Displacement</b><br>"
+            "Render-time displacement via OpenSubdiv Catmull-Clark subdivision.<br>"
+            "Per-vertex: P&prime; = P + N &middot; (sample &minus; midpoint) &times; scale.<br>"
+            "Normals recomputed from displaced geometry."
+        );
+    }
+    EndGroup(f);
+
+    Divider(f);
+    Text_knob(f,
+        "<font color='#666' size='-1'>"
+        "SpectralSurface v1.0 \xc2\xb7 Physically-based spectral material<br>"
+        "Created by Marten Blumen"
+        "</font>"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -192,14 +263,14 @@ void SpectralSurfaceOp::_ApplyPreset(int preset)
         case 1: // glass
             _diffuseColor[0] = _diffuseColor[1] = _diffuseColor[2] = 0.95f;
             _metallic = 0.0f; _roughness = 0.0f; _ior = 1.52f;
-            _opacity = 0.02f; _abbeNumber = 58.f; _thinFilmThickness = 0.f;
+            _opacity = 0.002f; _abbeNumber = 58.f; _thinFilmThickness = 0.f;
             _metalType = 0;
             _absorptionColor[0]=1.f; _absorptionColor[1]=1.f; _absorptionColor[2]=1.f; _absorptionDensity=0.f;
             break;
         case 2: // diamond
             _diffuseColor[0] = _diffuseColor[1] = _diffuseColor[2] = 0.97f;
             _metallic = 0.0f; _roughness = 0.0f; _ior = 2.42f;
-            _opacity = 0.02f; _abbeNumber = 55.f; _thinFilmThickness = 0.f;
+            _opacity = 0.002f; _abbeNumber = 55.f; _thinFilmThickness = 0.f;
             _metalType = 0;
             _absorptionColor[0]=1.f; _absorptionColor[1]=1.f; _absorptionColor[2]=1.f; _absorptionDensity=0.f;
             break;
