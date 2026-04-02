@@ -216,6 +216,12 @@ void SpectralIntegrator::RenderFrame(
                                             aovs->position[pixIdx*3+1] = hitPos[1];
                                             aovs->position[pixIdx*3+2] = hitPos[2];
                                         }
+                                        if (aovs->pRef) {
+                                            GfVec3f pRef = hit.tri->pRef0 * w + hit.tri->pRef1 * float(hit.u) + hit.tri->pRef2 * float(hit.v);
+                                            aovs->pRef[pixIdx*3+0] = pRef[0];
+                                            aovs->pRef[pixIdx*3+1] = pRef[1];
+                                            aovs->pRef[pixIdx*3+2] = pRef[2];
+                                        }
                                         if (aovs->uv) {
                                             GfVec2f uv = hit.tri->uv0 * w + hit.tri->uv1 * float(hit.u) + hit.tri->uv2 * float(hit.v);
                                             aovs->uv[pixIdx*2+0] = uv[0];
@@ -488,7 +494,41 @@ GfRay SpectralIntegrator::_MakeRay(
                     farView[2]/farView[3]);
 
     GfVec3d origin = cam.viewToWorld.Transform(nearPos);
-    GfVec3d dir    = cam.viewToWorld.Transform(farPos) - origin;
+    GfVec3d target = cam.viewToWorld.Transform(farPos);
+    GfVec3d dir    = target - origin;
+
+    // DOF: thin lens model
+    if (cam.fStop > 0.f && cam.focusDistance > 0.f) {
+        // Lens radius from f-stop: R = focalLength / (2 * fStop)
+        // focalLength in mm, convert to world units (assume 1 unit = 1cm, so /10)
+        float lensRadius = (cam.focalLength * 0.1f) / (2.f * cam.fStop);
+
+        // Focus point: where the pinhole ray hits the focal plane
+        GfVec3d forward = cam.viewToWorld.TransformDir(GfVec3d(0, 0, -1));
+        forward.Normalize();
+        double denom = GfDot(dir, forward);
+        if (std::abs(denom) > 1e-8) {
+            double tFocus = double(cam.focusDistance) / (denom / dir.GetLength());
+            GfVec3d focalPoint = origin + dir.GetNormalized() * tFocus;
+
+            // Random point on lens disk (uniform)
+            unsigned int seed = (py * cam.imageWidth + px) * 7919u +
+                                static_cast<unsigned int>(jitterX * 65536) * 2971u;
+            float u1 = _Hash(seed);
+            float u2 = _Hash(seed + 1u);
+            float r = lensRadius * std::sqrt(u1);
+            float theta = 6.28318f * u2;
+
+            // Lens basis vectors from camera
+            GfVec3d right = cam.viewToWorld.TransformDir(GfVec3d(1, 0, 0));
+            GfVec3d up    = cam.viewToWorld.TransformDir(GfVec3d(0, 1, 0));
+            right.Normalize();
+            up.Normalize();
+
+            origin = origin + right * (r * std::cos(theta)) + up * (r * std::sin(theta));
+            dir = focalPoint - origin;
+        }
+    }
 
     GfRay ray;
     ray.SetEnds(origin, origin + dir);
@@ -980,7 +1020,7 @@ void SpectralIntegrator::ComputeAO(
 void SpectralIntegrator::ComputeGeometryAOVs(
     const SpectralScene& scene,
     const SpectralCamera& camera,
-    float* normalOut, float* posOut, float* uvOut, float* albedoOut,
+    float* normalOut, float* posOut, float* pRefOut, float* uvOut, float* albedoOut,
     float* objectIdOut, float* materialIdOut, float* depthOut)
 {
 #ifdef SPECTRAL_HAS_EMBREE
@@ -1036,6 +1076,14 @@ void SpectralIntegrator::ComputeGeometryAOVs(
                     posOut[pixIdx*3+0] = hitPos[0];
                     posOut[pixIdx*3+1] = hitPos[1];
                     posOut[pixIdx*3+2] = hitPos[2];
+                }
+
+                // pRef (reference/undisplaced position)
+                if (pRefOut) {
+                    GfVec3f pRef = hit.tri->pRef0 * w + hit.tri->pRef1 * float(hit.u) + hit.tri->pRef2 * float(hit.v);
+                    pRefOut[pixIdx*3+0] = pRef[0];
+                    pRefOut[pixIdx*3+1] = pRef[1];
+                    pRefOut[pixIdx*3+2] = pRef[2];
                 }
 
                 // UV

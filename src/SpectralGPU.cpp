@@ -559,6 +559,26 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     copyMatrix(camera.projInverse, launchParams.camera.projInverse);
     copyMatrixTransposed(camera.viewToWorld, launchParams.camera.viewToWorld);
 
+    // DOF params
+    launchParams.camera.fStop = camera.fStop;
+    launchParams.camera.focusDistance = camera.focusDistance;
+    launchParams.camera.focalLength = camera.focalLength;
+
+    // Camera basis vectors for lens disk sampling
+    pxr::GfVec3d right = camera.viewToWorld.TransformDir(pxr::GfVec3d(1, 0, 0));
+    pxr::GfVec3d up    = camera.viewToWorld.TransformDir(pxr::GfVec3d(0, 1, 0));
+    pxr::GfVec3d fwd   = camera.viewToWorld.TransformDir(pxr::GfVec3d(0, 0, -1));
+    right.Normalize(); up.Normalize(); fwd.Normalize();
+    launchParams.camera.right[0]   = float(right[0]);
+    launchParams.camera.right[1]   = float(right[1]);
+    launchParams.camera.right[2]   = float(right[2]);
+    launchParams.camera.up[0]      = float(up[0]);
+    launchParams.camera.up[1]      = float(up[1]);
+    launchParams.camera.up[2]      = float(up[2]);
+    launchParams.camera.forward[0] = float(fwd[0]);
+    launchParams.camera.forward[1] = float(fwd[1]);
+    launchParams.camera.forward[2] = float(fwd[2]);
+
     // Upload launch params
     CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_params), &launchParams,
                           sizeof(spectral_gpu::LaunchParams), cudaMemcpyHostToDevice));

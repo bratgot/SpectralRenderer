@@ -17,6 +17,9 @@
 //Path to a program.
 CMAKE_AR:FILEPATH=C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.38.33130/bin/Hostx64/x64/lib.exe
 
+//No help, variable specified on the command line.
+CMAKE_BUILD_TYPE:UNINITIALIZED=Release
+
 //Semicolon separated list of supported configuration types, only
 // supports Debug, Release, MinSizeRel, and RelWithDebInfo, anything
 // else will be ignored.
@@ -176,11 +179,20 @@ CMAKE_STATIC_LINKER_FLAGS_RELEASE:STRING=
 // during RELWITHDEBINFO builds.
 CMAKE_STATIC_LINKER_FLAGS_RELWITHDEBINFO:STRING=
 
+//No help, variable specified on the command line.
+CMAKE_TOOLCHAIN_FILE:UNINITIALIZED=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
+
 //If this value is on, makefiles will be generated without the
 // .SILENT directive, and all commands will be echoed to the console
 // during the make.  This is useful for debugging only. With Visual
 // Studio IDE projects all commands are done without /nologo.
 CMAKE_VERBOSE_MAKEFILE:BOOL=FALSE
+
+//CUDA toolkit
+CUDA_TOOLKIT_ROOT:PATH=C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6
+
+//Embree 4 install root
+EMBREE_ROOT:PATH=C:/dev/embree-4
 
 //Value Computed by CMake
 HdSpectral_BINARY_DIR:STATIC=C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build
@@ -192,13 +204,25 @@ HdSpectral_IS_TOP_LEVEL:STATIC=ON
 HdSpectral_SOURCE_DIR:STATIC=C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral
 
 //Path to a library.
+LIB_CUDA:FILEPATH=C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/lib/x64/cuda.lib
+
+//Path to a library.
+LIB_CUDART:FILEPATH=C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/lib/x64/cudart.lib
+
+//Path to a library.
 LIB_DDIMAGE:FILEPATH=C:/Program Files/Nuke17.0v1/DDImage.lib
+
+//Path to a library.
+LIB_EMBREE:FILEPATH=C:/dev/embree-4/lib/embree4.lib
 
 //Path to a library.
 LIB_FDKBASE:FILEPATH=C:/Program Files/Nuke17.0v1/FdkBase.2.1.lib
 
 //Path to a library.
 LIB_NDK:FILEPATH=C:/Program Files/Nuke17.0v1/Ndk.lib
+
+//Path to a library.
+LIB_OSD_CPU:FILEPATH=C:/dev/opensubdiv-3.6.0/build/lib/Release/osdCPU.lib
 
 //Path to a library.
 LIB_TBB:FILEPATH=C:/Program Files/Nuke17.0v1/tbb.lib
@@ -209,8 +233,17 @@ LIB_USDABS:FILEPATH=C:/Program Files/Nuke17.0v1/FnUsdAbstraction.lib
 //Path to a library.
 LIB_USDENGINE:FILEPATH=C:/Program Files/Nuke17.0v1/FnUsdEngine.lib
 
-//Root directory of the Nuke 17.0v1 installation
+//Nuke 17.0v1 install root
 NUKE_ROOT:PATH=C:/Program Files/Nuke17.0v1
+
+//OptiX SDK
+OPTIX_ROOT:PATH=C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.1.0
+
+//OpenSubdiv lib dir
+OSD_LIB_DIR:PATH=C:/dev/opensubdiv-3.6.0/build/lib/Release
+
+//OpenSubdiv source root
+OSD_ROOT:PATH=C:/dev/opensubdiv-3.6.0
 
 //Path to a library.
 _found_usd_ar:FILEPATH=C:/Program Files/Nuke17.0v1/FnUSD/lib/usd_ar.lib

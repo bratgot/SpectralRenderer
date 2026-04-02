@@ -9,7 +9,6 @@
 #include <pxr/imaging/hd/aov.h>
 #include <pxr/base/vt/dictionary.h>
 #include <pxr/base/tf/staticTokens.h>
-#include <pxr/imaging/hd/instancer.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -213,18 +212,10 @@ void HdSpectralRenderDelegate::DestroyBprim(HdBprim* bPrim) { delete bPrim; }
 // ---------------------------------------------------------------------------
 // CommitResources — Phase 1 no-op
 // ---------------------------------------------------------------------------
-void HdSpectralRenderDelegate::CommitResources(HdChangeTracker* /*tracker*/) {}
-
-// ---------------------------------------------------------------------------
-// Instancer factory — pure virtual in PXR 0.25.8, deferred to Phase 2
-// ---------------------------------------------------------------------------
 HdInstancer*
-HdSpectralRenderDelegate::CreateInstancer(HdSceneDelegate* /*delegate*/,
-                                           SdfPath const&   /*id*/)
+HdSpectralRenderDelegate::CreateInstancer(HdSceneDelegate* /*delegate*/, SdfPath const& /*id*/)
 {
-    // Point instancing (USD PointInstancer prim) not yet supported.
-    // Returning nullptr is valid — Hydra skips instanced prims gracefully.
-    return nullptr;
+    return nullptr; // Phase 2: implement for USD PointInstancer support
 }
 
 void
@@ -232,5 +223,7 @@ HdSpectralRenderDelegate::DestroyInstancer(HdInstancer* instancer)
 {
     delete instancer;
 }
+
+void HdSpectralRenderDelegate::CommitResources(HdChangeTracker* /*tracker*/) {}
 
 PXR_NAMESPACE_CLOSE_SCOPE

@@ -6,6 +6,7 @@
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/renderThread.h>
 #include <pxr/imaging/hd/aov.h>
+#include <pxr/imaging/hd/instancer.h>
 #include <pxr/base/vt/dictionary.h>
 
 #include <memory>
@@ -80,11 +81,10 @@ public:
                          SdfPath const& sprimId) override;
     HdSprim* CreateFallbackSprim(TfToken const& typeId) override;
     void     DestroySprim(HdSprim* sPrim) override;
-    
-    // Instancer factory — required pure virtual in PXR 0.25.8
-    // Phase 1: returns nullptr (no point instancing support yet)
+
+    // Required pure virtuals in PXR 0.25.8
     HdInstancer* CreateInstancer(HdSceneDelegate* delegate,
-                                 SdfPath const&   id) override;
+                                 SdfPath const& id) override;
     void         DestroyInstancer(HdInstancer* instancer) override;
 
     // -----------------------------------------------------------------------

@@ -27,6 +27,11 @@ class HDSPECTRAL_API SpectralSurfaceOp : public ShaderOp
 public:
     explicit SpectralSurfaceOp(Node* node);
 
+    int minimum_inputs() const override { return 0; }
+    int maximum_inputs() const override { return 1; }
+    const char* input_label(int idx, char*) const override { return idx == 0 ? "disp" : ""; }
+    bool test_input(int idx, Op* op) const override;
+
     const char* Class()     const override { return CLASS; }
     const char* node_help() const override;
 
@@ -66,6 +71,9 @@ private:
     int   _spectralPreset   = 0;   // 0=custom, 1=glass, 2=diamond, 3=copper, 4=gold, 5=silver, 6=aluminium
     float _abbeNumber       = 0.0f;   // dispersion (0=no dispersion, ~60=crown glass, ~30=flint glass)
     float _thinFilmThickness = 0.0f;  // nm (0=disabled, 200-800nm for interference)
+    float _displacementScale = 0.0f;    // world units (0=disabled)
+    float _displacementMidpoint = 0.0f; // 0.5=centered, 0=outward only
+    const char* _displacementFile = "";  // displacement map path
 
     void _ApplyPreset(int preset);
     void _SetShaderProperties(usg::ShaderDesc& desc, const MaterialContext& rtx);
@@ -76,6 +84,10 @@ public:
     struct SpectralParams {
         float abbeNumber       = 0.f;
         float thinFilmThickness = 0.f;
+        float displacementScale = 0.f;
+        float displacementMidpoint = 0.0f;
+        std::string displacementFile;
+        Op* dispIop = nullptr;  // displacement Iop input (if connected)
     };
     static std::unordered_map<std::string, SpectralParams>& GetRegistry();
     void RegisterParams();

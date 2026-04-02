@@ -105,10 +105,14 @@ private:
     float _adaptiveThreshold = 0.05f; // adaptive sampling threshold
     bool  _progressive = true;          // progressive refinement mode
     bool  _blueNoise = true;            // R2 quasi-random sampling
+    float _fStop = 0.f;            // 0 = pinhole (no DOF)
+    float _focusDistance = 100.f;    // world units
+    int   _proxyMode = 3;              // 0=1/4, 1=1/2, 2=3/4, 3=full
     int   _aoSamples = 0;              // AO samples per pixel (0 = disabled)
     float _aoRadius  = 5.f;            // AO max ray distance
     bool  _aovNormals  = true;
     bool  _aovPosition = true;
+    bool  _aovPRef    = true;
     bool  _aovUV       = true;
     bool  _aovAlbedo   = true;
     bool  _aovDirect   = false;
@@ -121,6 +125,7 @@ private:
     float _lightIntensity = 1.0f;  // global light intensity multiplier
     int   _illuminant = 0;         // 0=auto, 1=D50, 2=D65, 3=A, 4=F2, 5=F11
     const char* _cameraPath = "";
+    const char* _labelStr = "";  // node label for DAG display
 
     FormatPair _outputFormat;
 
@@ -141,6 +146,7 @@ private:
     // Geometry AOV buffers (3 floats per pixel for vector channels)
     std::vector<float>  _normalBuffer;   // world normals (Nx, Ny, Nz)
     std::vector<float>  _posBuffer;      // world position (Px, Py, Pz)
+    std::vector<float>  _pRefBuffer;     // reference position (undisplaced)
     std::vector<float>  _uvBuffer;       // texture coords (u, v)
     std::vector<float>  _albedoBuffer;   // base color (r, g, b)
     std::vector<float>  _directBuffer;   // direct lighting (r, g, b)
@@ -154,6 +160,7 @@ private:
     // Geometry AOV channels
     Channel _chanNx = Chan_Black, _chanNy = Chan_Black, _chanNz = Chan_Black;
     Channel _chanPx = Chan_Black, _chanPy = Chan_Black, _chanPz = Chan_Black;
+    Channel _chanPRefX = Chan_Black, _chanPRefY = Chan_Black, _chanPRefZ = Chan_Black;
     Channel _chanUu = Chan_Black, _chanUv = Chan_Black;
     Channel _chanAlbedoR = Chan_Black, _chanAlbedoG = Chan_Black, _chanAlbedoB = Chan_Black;
     Channel _chanDirectR = Chan_Black, _chanDirectG = Chan_Black, _chanDirectB = Chan_Black;
@@ -161,6 +168,8 @@ private:
     Channel _chanEmissionR = Chan_Black, _chanEmissionG = Chan_Black, _chanEmissionB = Chan_Black;
     unsigned int        _fbWidth  = 0;
     unsigned int        _fbHeight = 0;
+    unsigned int        _fbFullWidth  = 0;
+    unsigned int        _fbFullHeight = 0;
     std::atomic<bool>   _frameReady { false };
     std::mutex          _renderMutex;
 };

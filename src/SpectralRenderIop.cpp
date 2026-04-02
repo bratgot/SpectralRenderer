@@ -130,11 +130,8 @@ bool SpectralRenderIop::test_input(int idx, Op* op) const
 
 Op* SpectralRenderIop::default_input(int idx) const
 {
-    // Input 2 (BG): provide a Black node as default so Nuke
-    // doesn't complain about unconnected Iop inputs.
-    // Inputs 0 and 1 are optional — return null.
     if (idx == 2) return Iop::default_input(0);
-    return nullptr;
+    return nullptr;  // scene, cam, disp are optional
 }
 
 // ---------------------------------------------------------------------------
@@ -142,111 +139,239 @@ Op* SpectralRenderIop::default_input(int idx) const
 // ---------------------------------------------------------------------------
 void SpectralRenderIop::knobs(Knob_Callback f)
 {
+    Text_knob(f, "<b><font size='+1'>SpectralRenderer</font></b><br>"
+                 "<font color='#888'>Physically-based spectral path tracer</font>");
+
+    String_knob(f, &_labelStr, "label", "");
+    SetFlags(f, Knob::INVISIBLE);
+
+    Divider(f, "Scene");
     File_knob(f, &_usdFilePath, "usd_file", "USD file");
-    Tooltip(f, "Path to a .usd/.usda/.usdc file.\n"
-               "Only used when input 0 is not connected.");
-
+    Tooltip(f, "Path to a .usd/.usda/.usdc file.<br>"
+               "Only used when the Scene input is not connected.");
     String_knob(f, &_cameraPath, "camera_path", "camera prim");
-    Tooltip(f, "USD prim path e.g. /World/Camera. Leave blank to auto-find.");
-
+    Tooltip(f, "USD prim path to a specific camera,<br>"
+               "e.g. /World/Camera1. Leave blank to<br>"
+               "auto-detect the first camera in the stage.");
     Int_knob(f, &_frame, "frame", "frame");
-
+    Tooltip(f, "Frame number to render. USD time code<br>"
+               "is derived from this value.");
     Format_knob(f, &_outputFormat, "format", "format");
+    Tooltip(f, "Output image resolution. If a background<br>"
+               "input is connected, its format is used instead.");
 
-    Divider(f, "Render settings");
-    static const char* const deviceNames[] = { "cpu", "gpu", "auto", nullptr };
-    Enumeration_knob(f, &_deviceMode, deviceNames, "device", "device");
-    Tooltip(f, "cpu: Embree CPU ray tracing\n"
-               "gpu: OptiX RTX GPU ray tracing\n"
-               "auto: GPU if available, else CPU");
-    Int_knob(f, &_samples,    "samples",     "samples per pixel"); SetRange(f, 1, 256);
-    Int_knob(f, &_maxBounces, "max_bounces", "max bounces");       SetRange(f, 1, 16);
-    Int_knob(f, &_tileSize,   "tile_size",   "tile size");         SetRange(f, 16, 256);
+    BeginGroup(f, "render_grp", "Render");
+    {
+        static const char* const deviceNames[] = { "cpu", "gpu", "auto", nullptr };
+        Enumeration_knob(f, &_deviceMode, deviceNames, "device", "device");
+        Tooltip(f, "Rendering device:<br>"
+                   "cpu = Embree 4 CPU ray tracing<br>"
+                   "gpu = OptiX 8.1 RTX GPU ray tracing<br>"
+                   "auto = GPU if available, otherwise CPU");
+        static const char* const proxyNames[] = { "1/4", "1/2", "3/4", "full", nullptr };
+        Enumeration_knob(f, &_proxyMode, proxyNames, "proxy", "proxy");
+        Tooltip(f, "Render resolution proxy.<br>"
+                   "1/4 = quarter resolution (fastest preview)<br>"
+                   "1/2 = half resolution<br>"
+                   "3/4 = three-quarter resolution<br>"
+                   "full = full output resolution");
+        Int_knob(f, &_samples, "samples", "samples per pixel"); SetRange(f, 1, 256);
+        Tooltip(f, "Number of spectral samples per pixel.<br>"
+                   "Higher values reduce noise. Each sample<br>"
+                   "traces one wavelength through the scene.<br>"
+                   "1 = normal-shaded preview, 16+ = spectral.");
+        Int_knob(f, &_maxBounces, "max_bounces", "max bounces"); SetRange(f, 1, 16);
+        Tooltip(f, "Maximum number of light bounces per ray.<br>"
+                   "1 = direct lighting only<br>"
+                   "4 = good for most scenes (default)<br>"
+                   "8+ = needed for complex glass and caustics");
+        Int_knob(f, &_tileSize, "tile_size", "tile size"); SetRange(f, 16, 256);
+        Tooltip(f, "Tile size in pixels for parallel rendering.<br>"
+                   "Smaller tiles = better load balancing.<br>"
+                   "Larger tiles = less overhead. Default 64.");
+        Float_knob(f, &_adaptiveThreshold, "adaptive_threshold", "adaptive threshold");
+        SetRange(f, 0.f, 0.5f);
+        Tooltip(f, "Adaptive sampling convergence threshold.<br>"
+                   "Pixels with noise below this stop receiving<br>"
+                   "samples, saving render time on clean areas.<br>"
+                   "0.0 = disabled, 0.05 = default, 0.1 = aggressive");
+        Newline(f);
+        Bool_knob(f, &_progressive, "progressive", "progressive");
+        Tooltip(f, "Progressive refinement mode. First render<br>"
+                   "produces a fast 8-spp preview. Subsequent<br>"
+                   "renders accumulate to full sample count.<br>"
+                   "Any parameter change resets the preview.");
+        Bool_knob(f, &_blueNoise, "blue_noise", "blue noise");
+        Tooltip(f, "R2 quasi-random sampling sequence for<br>"
+                   "better sample distribution. Reduces visible<br>"
+                   "noise patterns at low sample counts compared<br>"
+                   "to pure random sampling.");
+        Bool_knob(f, &_denoise, "denoise", "denoise");
+        Tooltip(f, "Apply OptiX AI denoiser as a post-process.<br>"
+                   "Dramatically cleans up noisy low-spp renders.<br>"
+                   "Works on both CPU and GPU rendered images.<br>"
+                   "Requires an NVIDIA GPU with OptiX support.");
+        Divider(f, "Depth of field");
+        Float_knob(f, &_fStop, "fstop", "f-stop");
+        SetRange(f, 0.f, 22.f);
+        Tooltip(f, "Lens aperture for depth of field.<br>"
+                   "0 = pinhole camera, no DOF (default)<br>"
+                   "1.4 = very shallow DOF<br>"
+                   "5.6 = moderate DOF<br>"
+                   "16+ = nearly everything in focus");
+        Float_knob(f, &_focusDistance, "focus_distance", "focus distance");
+        SetRange(f, 0.1f, 10000.f);
+        Tooltip(f, "Distance from camera to the focal plane<br>"
+                   "in world units. Objects at this distance<br>"
+                   "will be sharp; nearer and farther objects blur.");
+    }
+    EndGroup(f);
 
-    Float_knob(f, &_adaptiveThreshold, "adaptive_threshold", "adaptive threshold");
-    SetRange(f, 0.f, 0.5f);
-    Tooltip(f, "Adaptive sampling convergence threshold.\n"
-               "Pixels with noise below this level stop receiving samples.\n"
-               "0.0 = disabled (all pixels get equal samples)\n"
-               "0.05 = default (saves 30-60% render time)\n"
-               "0.1 = aggressive (faster, slightly noisier dark areas)");
+    BeginGroup(f, "lighting_grp", "Lighting");
+    {
+        Float_knob(f, &_lightIntensity, "light_intensity", "intensity multiplier");
+        SetRange(f, 0.01f, 10.f);
+        Tooltip(f, "Global multiplier applied to all light intensities.<br>"
+                   "Nuke's USD pipeline uses physical light units<br>"
+                   "which can produce very bright values. Adjust<br>"
+                   "this to compensate. Default 1.0.");
+        static const char* const illuminantNames[] = {
+            "auto", "D50", "D65", "A", "F2", "F11", nullptr
+        };
+        Enumeration_knob(f, &_illuminant, illuminantNames, "illuminant", "illuminant");
+        Tooltip(f, "CIE standard illuminant override for all lights.<br>"
+                   "auto = use each light's own colour or temperature<br>"
+                   "D50 = horizon daylight (5003K)<br>"
+                   "D65 = noon daylight (6504K)<br>"
+                   "A = tungsten incandescent (2856K)<br>"
+                   "F2 = cool white fluorescent<br>"
+                   "F11 = narrow-band fluorescent");
+        Divider(f, "Motion blur");
+        Float_knob(f, &_shutterOpen, "shutter_open", "shutter open"); SetRange(f, -1.f, 0.f);
+        Tooltip(f, "Shutter open time relative to frame.<br>"
+                   "-0.5 = half frame before (centred shutter)<br>"
+                   "0.0 = starts at current frame");
+        Float_knob(f, &_shutterClose, "shutter_close", "shutter close"); SetRange(f, 0.f, 1.f);
+        Tooltip(f, "Shutter close time relative to frame.<br>"
+                   "0.5 = half frame after (180 degree shutter)<br>"
+                   "0.0 = no motion blur (both open and close at 0)");
+    }
+    EndGroup(f);
 
-    Bool_knob(f, &_progressive, "progressive", "progressive");
-    Tooltip(f, "Progressive refinement: first render is a fast preview,\n"
-               "subsequent renders accumulate more samples until full spp.\n"
-               "Change any parameter to reset and start fresh.");
+    BeginClosedGroup(f, "aov_grp", "AOV outputs");
+    {
+        Int_knob(f, &_aoSamples, "ao_samples", "AO samples"); SetRange(f, 0, 64);
+        Tooltip(f, "Ambient occlusion samples per pixel.<br>"
+                   "0 = disabled (no AO output channel)<br>"
+                   "8-16 = good quality<br>"
+                   "32+ = clean result<br>"
+                   "Output written to the other.ao channel.");
+        Float_knob(f, &_aoRadius, "ao_radius", "AO radius"); SetRange(f, 0.1f, 100.f);
+        Tooltip(f, "Maximum distance for ambient occlusion rays.<br>"
+                   "Smaller values give tighter contact shadows.<br>"
+                   "Larger values give broader ambient darkening.");
+        Newline(f);
+        Bool_knob(f, &_aovNormals, "aov_normals", "N");
+        Tooltip(f, "Output world-space surface normals<br>"
+                   "to the N.red, N.green, N.blue channels.");
+        Bool_knob(f, &_aovPosition, "aov_position", "P");
+        Tooltip(f, "Output world-space hit position<br>"
+                   "to the P.red, P.green, P.blue channels.");
+        Bool_knob(f, &_aovPRef, "aov_pref", "Pref");
+        Tooltip(f, "Reference position in object/local space.<br>"
+                   "Stays constant across animation and deformation.<br>"
+                   "Used for sticky texture projections and mattes<br>"
+                   "that follow deforming or animated geometry.");
+        Bool_knob(f, &_aovUV, "aov_uv", "UV");
+        Tooltip(f, "Output texture coordinates to<br>"
+                   "the uv.red and uv.green channels.");
+        Bool_knob(f, &_aovAlbedo, "aov_albedo", "albedo");
+        Tooltip(f, "Output resolved surface base colour<br>"
+                   "(with textures applied) to the albedo layer.");
+        Bool_knob(f, &_aovDirect, "aov_direct", "direct");
+        Tooltip(f, "Output direct lighting component to<br>"
+                   "the direct layer. On GPU renders this<br>"
+                   "requires an extra CPU pass at low spp.");
+        Bool_knob(f, &_aovIndirect, "aov_indirect", "indirect");
+        Tooltip(f, "Output indirect/bounce lighting component<br>"
+                   "to the indirect layer. On GPU renders this<br>"
+                   "requires an extra CPU pass at low spp.");
+        Bool_knob(f, &_aovEmission, "aov_emission", "emission");
+        Tooltip(f, "Output emissive surface contribution<br>"
+                   "to the emission layer. On GPU renders this<br>"
+                   "requires an extra CPU pass at low spp.");
+    }
+    EndGroup(f);
 
-    Bool_knob(f, &_blueNoise, "blue_noise", "blue noise");
-    Tooltip(f, "R2 quasi-random sampling for better sample distribution.\n"
-               "Reduces visible noise patterns at low sample counts.\n"
-               "Enabled by default. Disable for pure random sampling.");
+    BeginClosedGroup(f, "spectral_engine", "Spectral rendering engine");
+    {
+        Text_knob(f,
+            "<b>Hero wavelength spectral sampling</b><br>"
+            "Samples the visible spectrum 380-780nm using CIE 1931 2-degree standard observer colour<br>"
+            "matching functions. Each ray carries a single wavelength for efficient spectral Monte Carlo<br>"
+            "integration with physically correct colour reproduction via XYZ to linear RGB conversion.<br>"
+            "<br>"
+            "<b>Disney BSDF with GGX microfacet model</b><br>"
+            "Physically-based shading model supporting metallic and dielectric workflows with importance-sampled<br>"
+            "GGX specular lobe, Smith geometry term, and energy-conserving Disney diffuse. Mixed GGX and<br>"
+            "cosine hemisphere sampling weighted by roughness and metallic for optimal noise reduction.<br>"
+            "<br>"
+            "<b>Dispersion and thin-film interference</b><br>"
+            "Wavelength-dependent IOR via Cauchy dispersion model controlled by Abbe number. Snell's law<br>"
+            "refraction with exact Fresnel dielectric equations for accurate reflect/refract probability.<br>"
+            "Fabry-Perot thin-film cosine modulation of reflectance for iridescent coating effects.<br>"
+            "<br>"
+            "<b>Acceleration structures</b><br>"
+            "CPU path uses Embree 4 BVH with native two-timestep motion blur support. GPU path uses<br>"
+            "OptiX 8.1 with RTX hardware-accelerated ray tracing via geometry acceleration structures.<br>"
+            "Both paths support multi-bounce path tracing with Russian roulette termination.<br>"
+            "<br>"
+            "<b>Adaptive and blue-noise sampling</b><br>"
+            "Per-pixel luminance variance tracking using Welford's online algorithm. Converged pixels skip<br>"
+            "further sampling across multi-pass batches. R2 plastic constant low-discrepancy sequence with<br>"
+            "per-pixel Cranley-Patterson rotation provides decorrelated blue-noise sample distribution.<br>"
+            "<br>"
+            "<b>Environment lighting</b><br>"
+            "HDRI lat-long environment maps with cosine-weighted hemisphere sampling oriented to surface<br>"
+            "normals at each shading point. Per-wavelength RGB-to-spectral Gaussian basis conversion<br>"
+            "provides physically correct spectral environment illumination from standard HDR images.<br>"
+            "<br>"
+            "<b>Render-time displacement</b><br>"
+            "OpenSubdiv Catmull-Clark tessellation with face-varying UV refinement through subdivision<br>"
+            "levels. Per-vertex displacement along normals sampled from texture map with bilinear filtering.<br>"
+            "Automatic subdivision applied to non-subdivided meshes when displacement is present."
+        );
+    }
+    EndGroup(f);
 
-    Divider(f, "AOV outputs");
-    Int_knob(f, &_aoSamples, "ao_samples", "AO samples");
-    SetRange(f, 0, 64);
-    Tooltip(f, "Ambient occlusion samples per pixel.\n"
-               "0 = disabled (no AO output)\n"
-               "8-16 = good quality, 32+ = clean\n"
-               "Output to 'other.ao' channel.");
-
-    Float_knob(f, &_aoRadius, "ao_radius", "AO radius");
-    SetRange(f, 0.1f, 100.f);
-    Tooltip(f, "Maximum distance for AO rays.\n"
-               "Smaller values give tighter contact shadows.\n"
-               "Larger values give broader ambient darkening.");
-
-    Newline(f);
-    Bool_knob(f, &_aovNormals,  "aov_normals",  "N (normals)");
-    Bool_knob(f, &_aovPosition, "aov_position", "P (position)");
-    Bool_knob(f, &_aovUV,       "aov_uv",       "UV");
-    Bool_knob(f, &_aovAlbedo,   "aov_albedo",   "albedo");
-    Newline(f);
-    Bool_knob(f, &_aovDirect,   "aov_direct",   "direct");
-    Bool_knob(f, &_aovIndirect, "aov_indirect",  "indirect");
-    Bool_knob(f, &_aovEmission, "aov_emission",  "emission");
-    Tooltip(f, "Enable individual AOV output channels.\n"
-               "Shading AOVs (direct/indirect/emission) require\n"
-               "extra computation — disable if not needed.");
-
-    Bool_knob(f, &_denoise, "denoise", "denoise (GPU)");
-    Tooltip(f, "Apply OptiX AI denoiser after GPU rendering.\n"
-               "Dramatically cleans up low-spp renders.\n"
-               "Only available on GPU device mode.");
-
-    Divider(f, "Lighting");
-    Float_knob(f, &_lightIntensity, "light_intensity", "light intensity");
-    SetRange(f, 0.01f, 10.f);
-    Tooltip(f, "Global light intensity multiplier.\n"
-               "Nuke's USD pipeline uses physical light units which\n"
-               "can produce very large values. Adjust this to\n"
-               "compensate. Default 1.0.");
-
-    static const char* const illuminantNames[] = {
-        "auto", "D50", "D65", "A", "F2", "F11", nullptr
-    };
-    Enumeration_knob(f, &_illuminant, illuminantNames, "illuminant", "illuminant");
-    Tooltip(f, "CIE illuminant override for all lights.\n"
-               "auto = use each light's own color/temperature\n"
-               "D50  = CIE D50 (horizon daylight, 5003K)\n"
-               "D65  = CIE D65 (noon daylight, 6504K)\n"
-               "A    = CIE A (tungsten incandescent, 2856K)\n"
-               "F2   = CIE F2 (cool white fluorescent)\n"
-               "F11  = CIE F11 (narrow-band fluorescent)");
-
-
-    Divider(f, "Motion blur");
-    Float_knob(f, &_shutterOpen,  "shutter_open",  "shutter open");  SetRange(f, -1.f, 0.f);
-    Float_knob(f, &_shutterClose, "shutter_close", "shutter close"); SetRange(f, 0.f, 1.f);
-    Tooltip(f, "Shutter interval relative to frame.\n"
-               "-0.5 / 0.5 = centered on frame (180 degree shutter)\n"
-               "0.0 / 0.5  = forward motion blur\n"
-               "0.0 / 0.0  = no motion blur");
+    Divider(f);
+    Text_knob(f,
+        "<font color='#666' size='-1'>"
+        "SpectralRenderer v1.0 \xc2\xb7 NDK + Hydra \xc2\xb7 Nuke 17 \xc2\xb7 Embree 4 \xc2\xb7 OptiX 8.1 \xc2\xb7 OpenSubdiv 3.6<br>"
+        "Created by Marten Blumen"
+        "</font>"
+    );
 }
 
 int SpectralRenderIop::knob_changed(Knob* k)
 {
     _frameReady.store(false);
-    _progressiveSppDone = 0;  // reset progressive accumulation
+    _progressiveSppDone = 0;
+
+    // Update node label in DAG
+    const char* device = "CPU";
+#ifdef SPECTRAL_HAS_OPTIX
+    if (_deviceMode == 1) device = "GPU";
+    else if (_deviceMode == 2) device = "auto";
+#endif
+    if (Knob* lk = knob("label")) {
+        char buf[128];
+        static const char* const proxyLabels[] = { "1/4", "1/2", "3/4", "full" };
+        const char* proxyStr = (_proxyMode >= 0 && _proxyMode <= 3) ? proxyLabels[_proxyMode] : "full";
+        snprintf(buf, sizeof(buf), "%s\n%d spp\n%d bounces\n%s", device, _samples, _maxBounces, proxyStr);
+        lk->set_text(buf);
+    }
+
     return Iop::knob_changed(k);
 }
 
@@ -304,6 +429,10 @@ void SpectralRenderIop::_validate(bool forReal)
         _chanPx = getChannel("P.red"); _chanPy = getChannel("P.green"); _chanPz = getChannel("P.blue");
         channels += _chanPx; channels += _chanPy; channels += _chanPz;
     }
+    if (_aovPRef) {
+        _chanPRefX = getChannel("pRef.red"); _chanPRefY = getChannel("pRef.green"); _chanPRefZ = getChannel("pRef.blue");
+        channels += _chanPRefX; channels += _chanPRefY; channels += _chanPRefZ;
+    }
     if (_aovUV) {
         _chanUu = getChannel("uv.red"); _chanUv = getChannel("uv.green");
         channels += _chanUu; channels += _chanUv;
@@ -358,9 +487,14 @@ void SpectralRenderIop::engine(
 {
     _EnsureFrameRendered();
 
-    const int W = static_cast<int>(_fbWidth);
+    const int W = static_cast<int>(_fbWidth);       // proxy render resolution
     const int H = static_cast<int>(_fbHeight);
-    int bufY = H - 1 - y;
+    const int fullW = static_cast<int>(_fbFullWidth ? _fbFullWidth : _fbWidth);
+    const int fullH = static_cast<int>(_fbFullHeight ? _fbFullHeight : _fbHeight);
+
+    int fullBufY = fullH - 1 - y;
+    // Map output Y to proxy buffer Y
+    int bufY = (H == fullH) ? fullBufY : (fullBufY * H / fullH);
 
     // Get BG pixels if available
     Row bgRow(x, r);
@@ -388,6 +522,7 @@ void SpectralRenderIop::engine(
     }
 
     const float* srcRow = _frameBuffer.data() + bufY * W * 4;
+    const bool isProxy = (W != fullW);
 
     // Composite: render over BG using render alpha
     auto compositeChannel = [&](Channel ch, int comp) {
@@ -396,14 +531,14 @@ void SpectralRenderIop::engine(
         const float* bgPtr = hasBG ? bgRow[ch] + x : nullptr;
 
         for (int px = x; px < r; ++px) {
+            int proxyX = isProxy ? (px * W / fullW) : px;
             float fg = 0.f, fgA = 0.f;
-            if (px >= 0 && px < W) {
-                fg  = srcRow[px * 4 + comp];
-                fgA = srcRow[px * 4 + 3];
+            if (proxyX >= 0 && proxyX < W) {
+                fg  = srcRow[proxyX * 4 + comp];
+                fgA = srcRow[proxyX * 4 + 3];
             }
 
             if (bgPtr) {
-                // Standard "over" composite: fg + bg * (1 - fgA)
                 float bg = bgPtr[px - x];
                 out[px] = fg + bg * (1.f - fgA);
             } else {
@@ -422,7 +557,8 @@ void SpectralRenderIop::engine(
         const float* bgPtr = hasBG ? bgRow[Chan_Alpha] + x : nullptr;
 
         for (int px = x; px < r; ++px) {
-            float fgA = (px >= 0 && px < W) ? srcRow[px * 4 + 3] : 0.f;
+            int proxyX = isProxy ? (px * W / fullW) : px;
+            float fgA = (proxyX >= 0 && proxyX < W) ? srcRow[proxyX * 4 + 3] : 0.f;
             if (bgPtr) {
                 float bgA = bgPtr[px - x];
                 out[px] = fgA + bgA * (1.f - fgA);
@@ -437,8 +573,9 @@ void SpectralRenderIop::engine(
         if (!(channels & ch) || idBuf.empty()) return;
         float* out = row.writable(ch);
         for (int px = x; px < r; ++px) {
-            if (px >= 0 && px < W && bufY >= 0 && bufY < H) {
-                out[px] = idBuf[static_cast<size_t>(bufY) * W + px];
+            int proxyX = isProxy ? (px * W / fullW) : px;
+            if (proxyX >= 0 && proxyX < W && bufY >= 0 && bufY < H) {
+                out[px] = idBuf[static_cast<size_t>(bufY) * W + proxyX];
             } else {
                 out[px] = 0.f;
             }
@@ -456,8 +593,9 @@ void SpectralRenderIop::engine(
             if (!(channels & ch)) return;
             float* out = row.writable(ch);
             for (int px = x; px < r; ++px) {
-                if (px >= 0 && px < W && bufY >= 0 && bufY < H) {
-                    out[px] = buf[static_cast<size_t>(bufY) * W * stride + px * stride + comp];
+                int proxyX = isProxy ? (px * W / fullW) : px;
+                if (proxyX >= 0 && proxyX < W && bufY >= 0 && bufY < H) {
+                    out[px] = buf[static_cast<size_t>(bufY) * W * stride + proxyX * stride + comp];
                 } else {
                     out[px] = 0.f;
                 }
@@ -470,6 +608,7 @@ void SpectralRenderIop::engine(
 
     write3Channel(_chanNx, _chanNy, _chanNz, _normalBuffer, 3);
     write3Channel(_chanPx, _chanPy, _chanPz, _posBuffer, 3);
+    write3Channel(_chanPRefX, _chanPRefY, _chanPRefZ, _pRefBuffer, 3);
     write3Channel(_chanUu, _chanUv, Chan_Black, _uvBuffer, 2);
     write3Channel(_chanAlbedoR, _chanAlbedoG, _chanAlbedoB, _albedoBuffer, 3);
     write3Channel(_chanDirectR, _chanDirectG, _chanDirectB, _directBuffer, 3);
@@ -802,6 +941,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
         VtVec3fArray points;
         mesh.GetPointsAttr().Get(&points, timeOpen);
         if (points.empty()) continue;
+        VtVec3fArray pointsRef;  // undisplaced positions for pRef AOV
 
         // Read points at shutter close for motion blur
         VtVec3fArray pointsClose;
@@ -1127,11 +1267,67 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                             if (shaderPath.find(entry.first) != std::string::npos) {
                                 mat.abbeNumber        = entry.second.abbeNumber;
                                 mat.thinFilmThickness = entry.second.thinFilmThickness;
-                                if (mat.abbeNumber > 0.f || mat.thinFilmThickness > 0.f) {
+                                mat.displacementScale = entry.second.displacementScale;
+                                mat.displacementMidpoint = entry.second.displacementMidpoint;
+                                // Load displacement texture from file path
+                                if (!entry.second.displacementFile.empty()
+                                    && mat.displacementScale > 0.f) {
+                                    int dTexId = _scene->LoadTexture(entry.second.displacementFile);
+                                    if (dTexId >= 0) {
+                                        mat.displacementTexId = dTexId;
+                                        fprintf(stderr, "SpectralRender: displacement map '%s' (id=%d)\n",
+                                                entry.second.displacementFile.c_str(), dTexId);
+                                    }
+                                }
+                                // Fall back to displacement Iop from SpectralSurface input
+                                if (mat.displacementTexId < 0 && mat.displacementScale > 0.f
+                                    && entry.second.dispIop) {
+                                    Iop* dispIop = dynamic_cast<Iop*>(entry.second.dispIop);
+                                    if (dispIop) {
+                                        try {
+                                            dispIop->validate(true);
+                                            const int texW = dispIop->info().format().width();
+                                            const int texH = dispIop->info().format().height();
+                                            if (texW > 0 && texH > 0) {
+                                                pxr::SpectralTexture tex;
+                                                tex._width = texW;
+                                                tex._height = texH;
+                                                tex._channels = 3;
+                                                tex._pixels.resize(size_t(texW) * texH * 3);
+                                                tex._path = "displacement_iop";
+
+                                                dispIop->request(0, 0, texW, texH, Mask_RGB, 1);
+                                                for (int y = 0; y < texH; ++y) {
+                                                    Row row(0, texW);
+                                                    dispIop->get(y, 0, texW, Mask_RGB, row);
+                                                    const float* rp = row[Chan_Red];
+                                                    const float* gp = row[Chan_Green];
+                                                    const float* bp = row[Chan_Blue];
+                                                    int storeY = texH - 1 - y;
+                                                    for (int x = 0; x < texW; ++x) {
+                                                        size_t idx = (size_t(storeY) * texW + x) * 3;
+                                                        tex._pixels[idx + 0] = rp ? rp[x] : 0.f;
+                                                        tex._pixels[idx + 1] = gp ? gp[x] : 0.f;
+                                                        tex._pixels[idx + 2] = bp ? bp[x] : 0.f;
+                                                    }
+                                                }
+
+                                                mat.displacementTexId = _scene->AddTexture(std::move(tex));
+                                                fprintf(stderr, "SpectralRender: displacement from Iop '%s' (%dx%d, id=%d)\n",
+                                                        dispIop->node_name(), texW, texH, mat.displacementTexId);
+                                            }
+                                        } catch (...) {
+                                            fprintf(stderr, "SpectralRender: failed to read displacement Iop\n");
+                                        }
+                                    }
+                                }
+                                if (mat.abbeNumber > 0.f || mat.thinFilmThickness > 0.f
+                                    || mat.displacementScale > 0.f) {
                                     fprintf(stderr, "SpectralRender: spectral props from '%s'"
-                                            " — Abbe=%.1f thinFilm=%.0fnm\n",
+                                            " — Abbe=%.1f thinFilm=%.0fnm disp=%.2f\n",
                                             entry.first.c_str(),
-                                            mat.abbeNumber, mat.thinFilmThickness);
+                                            mat.abbeNumber, mat.thinFilmThickness,
+                                            mat.displacementScale);
                                 }
                                 break;
                             }
@@ -1158,6 +1354,17 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
             std::string schemeStr = subdivScheme.GetString();
 
             SpectralSubdiv::Scheme scheme = SpectralSubdiv::SchemeFromToken(schemeStr);
+
+            // Auto-subdivide when displacement is present but no scheme set
+            const SpectralMaterial& meshMat = _scene->GetMaterial(matId);
+            if (scheme == SpectralSubdiv::Scheme::None
+                && meshMat.displacementScale > 0.f
+                && meshMat.displacementTexId >= 0) {
+                scheme = SpectralSubdiv::Scheme::CatmullClark;
+                fprintf(stderr, "SpectralRender: auto-subdividing %s for displacement\n",
+                        prim.GetPath().GetText());
+            }
+
             if (scheme != SpectralSubdiv::Scheme::None) {
                 SpectralSubdiv::Input subIn;
                 subIn.points            = points;
@@ -1256,6 +1463,103 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                         uvs.clear();
                     }
 
+                    // ---- Render-time displacement ----
+                    // Save undisplaced positions for pRef AOV
+                    VtVec3fArray pointsRef = points;
+
+                    // After subdivision: offset refined vertices along normals
+                    // using displacement map sampled at refined UVs.
+                    {
+                        const SpectralMaterial& dispMat = _scene->GetMaterial(matId);
+                        if (dispMat.displacementScale > 0.f && dispMat.displacementTexId >= 0) {
+                            const auto* dispTex = _scene->GetTexture(dispMat.displacementTexId);
+                            if (dispTex && dispTex->IsValid()) {
+                                const int nPts = static_cast<int>(points.size());
+                                const int nIdx = static_cast<int>(faceVertexIndices.size());
+
+                                // Step 1: Compute per-vertex UVs by averaging face-varying UVs
+                                VtVec2fArray vertexUVs(nPts, GfVec2f(0.f));
+                                std::vector<int> uvCount(nPts, 0);
+                                if (!uvs.empty() && uvsInterp == UsdGeomTokens->faceVarying) {
+                                    for (int i = 0; i < nIdx; ++i) {
+                                        int vi = faceVertexIndices[i];
+                                        if (vi >= 0 && vi < nPts && i < static_cast<int>(uvs.size())) {
+                                            vertexUVs[vi] += uvs[i];
+                                            uvCount[vi]++;
+                                        }
+                                    }
+                                    for (int i = 0; i < nPts; ++i) {
+                                        if (uvCount[i] > 1) vertexUVs[i] /= float(uvCount[i]);
+                                    }
+                                } else if (!uvs.empty()) {
+                                    // Vertex-interpolated UVs — direct mapping
+                                    for (int i = 0; i < std::min(nPts, static_cast<int>(uvs.size())); ++i) {
+                                        vertexUVs[i] = uvs[i];
+                                    }
+                                }
+
+                                // Step 2: Sample displacement and offset vertices
+                                float scale = dispMat.displacementScale;
+                                float midpoint = dispMat.displacementMidpoint;
+                                int texW = dispTex->GetWidth();
+                                int texH = dispTex->GetHeight();
+                                int texCh = dispTex->_channels;
+                                const float* texPx = dispTex->_pixels.data();
+
+                                for (int i = 0; i < nPts; ++i) {
+                                    GfVec2f uv = vertexUVs[i];
+                                    // Repeat wrap + bilinear sample
+                                    float su = uv[0] - std::floor(uv[0]);
+                                    float sv = 1.f - (uv[1] - std::floor(uv[1]));
+                                    float fx = su * (texW - 1);
+                                    float fy = sv * (texH - 1);
+                                    int x0 = std::max(0, std::min(int(fx), texW-1));
+                                    int y0 = std::max(0, std::min(int(fy), texH-1));
+                                    int x1 = std::min(x0+1, texW-1);
+                                    int y1 = std::min(y0+1, texH-1);
+                                    float dx = fx - x0, dy = fy - y0;
+
+                                    auto samplePx = [&](int x, int y) -> float {
+                                        int idx = (y * texW + x) * texCh;
+                                        return texPx[idx]; // use red channel
+                                    };
+
+                                    float c00 = samplePx(x0,y0), c10 = samplePx(x1,y0);
+                                    float c01 = samplePx(x0,y1), c11 = samplePx(x1,y1);
+                                    float val = (c00*(1-dx)+c10*dx)*(1-dy) + (c01*(1-dx)+c11*dx)*dy;
+
+                                    float offset = (val - midpoint) * scale;
+                                    GfVec3f N = normals[i];
+                                    float nlen = N.GetLength();
+                                    if (nlen > 1e-6f) N /= nlen;
+                                    points[i] += N * offset;
+                                }
+
+                                // Step 3: Recompute normals from displaced geometry
+                                for (int i = 0; i < nPts; ++i) normals[i] = GfVec3f(0.f);
+                                for (int i = 0; i + 2 < nIdx; i += 3) {
+                                    int i0 = faceVertexIndices[i];
+                                    int i1 = faceVertexIndices[i+1];
+                                    int i2 = faceVertexIndices[i+2];
+                                    if (i0 >= nPts || i1 >= nPts || i2 >= nPts) continue;
+                                    GfVec3f e0 = points[i1] - points[i0];
+                                    GfVec3f e1 = points[i2] - points[i0];
+                                    GfVec3f fn = GfCross(e0, e1);
+                                    normals[i0] += fn;
+                                    normals[i1] += fn;
+                                    normals[i2] += fn;
+                                }
+                                for (int i = 0; i < nPts; ++i) {
+                                    float len = normals[i].GetLength();
+                                    normals[i] = (len > 1e-8f) ? normals[i] / len : GfVec3f(0,1,0);
+                                }
+
+                                fprintf(stderr, "SpectralRender: displaced %d vertices (scale=%.2f, tex=%dx%d) for %s\n",
+                                        nPts, scale, texW, texH, prim.GetPath().GetText());
+                            }
+                        }
+                    }
+
                     // Motion blur: pointsClose must match subdivided topology.
                     // For transform-only motion, the local points are identical
                     // at both times — just use the subdivided points for both.
@@ -1339,6 +1643,13 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                 tri.v0 = xfPoint(points[pi0]);
                 tri.v1 = xfPoint(points[pi1]);
                 tri.v2 = xfPoint(points[pi2]);
+
+                // Pref: object-space rest position (before displacement, no world xf)
+                // Stays constant across animation — used for sticky texture projections
+                const VtVec3fArray& refPts = pointsRef.empty() ? points : pointsRef;
+                tri.pRef0 = refPts[pi0];
+                tri.pRef1 = refPts[pi1];
+                tri.pRef2 = refPts[pi2];
 
                 // Motion blur: close-time positions
                 if (meshHasMotion && !pointsClose.empty()) {
@@ -1541,6 +1852,9 @@ void SpectralRenderIop::_BuildCameraFromInput()
 
     _camera.projInverse = pxrProj.GetInverse();
 
+    // Read focal length from camera for DOF lens radius
+    _camera.focalLength = static_cast<float>(cam->focal_length());
+
     _cameraFromInput = true;
 
     GfVec3d camPos = _camera.viewToWorld.ExtractTranslation();
@@ -1567,12 +1881,20 @@ void SpectralRenderIop::_EnsureFrameRendered()
     // Use the format from info_ (set by _validate from BG or format knob)
     const Format* fmtPtr = &(info_.format());
     if (!fmtPtr) { _frameReady.store(true); return; }
-    const unsigned int W = static_cast<unsigned int>(fmtPtr->width());
-    const unsigned int H = static_cast<unsigned int>(fmtPtr->height());
-    if (W == 0 || H == 0) { _frameReady.store(true); return; }
+    const unsigned int fullW = static_cast<unsigned int>(fmtPtr->width());
+    const unsigned int fullH = static_cast<unsigned int>(fmtPtr->height());
+    if (fullW == 0 || fullH == 0) { _frameReady.store(true); return; }
+
+    // Proxy scale: 0=1/4, 1=1/2, 2=3/4, 3=full
+    static const float proxyScales[] = { 0.25f, 0.5f, 0.75f, 1.0f };
+    float proxyScale = (_proxyMode >= 0 && _proxyMode <= 3) ? proxyScales[_proxyMode] : 1.0f;
+    const unsigned int W = std::max(1u, static_cast<unsigned int>(fullW * proxyScale));
+    const unsigned int H = std::max(1u, static_cast<unsigned int>(fullH * proxyScale));
 
     _fbWidth  = W;
     _fbHeight = H;
+    _fbFullWidth  = fullW;
+    _fbFullHeight = fullH;
     _frameBuffer.assign(size_t(W) * H * 4, 0.f);
     _depthBuffer.assign(size_t(W) * H, 1e30f);
     _objectIdBuffer.assign(size_t(W) * H, 0.f);
@@ -1580,6 +1902,7 @@ void SpectralRenderIop::_EnsureFrameRendered()
     _aoBuffer.assign(size_t(W) * H, 1.f);
     if (_aovNormals)  _normalBuffer.assign(size_t(W) * H * 3, 0.f); else _normalBuffer.clear();
     if (_aovPosition) _posBuffer.assign(size_t(W) * H * 3, 0.f);    else _posBuffer.clear();
+    if (_aovPRef)     _pRefBuffer.assign(size_t(W) * H * 3, 0.f);   else _pRefBuffer.clear();
     if (_aovUV)       _uvBuffer.assign(size_t(W) * H * 2, 0.f);     else _uvBuffer.clear();
     if (_aovAlbedo)   _albedoBuffer.assign(size_t(W) * H * 3, 0.f); else _albedoBuffer.clear();
     if (_aovDirect)   _directBuffer.assign(size_t(W) * H * 3, 0.f); else _directBuffer.clear();
@@ -1604,6 +1927,8 @@ void SpectralRenderIop::_EnsureFrameRendered()
 
     cam.adaptiveThreshold = _adaptiveThreshold;
     cam.blueNoise = _blueNoise;
+    cam.fStop = _fStop;
+    cam.focusDistance = _focusDistance;
 
     // Progressive rendering: first pass is a fast preview
     int renderSpp = _samples;
@@ -1623,8 +1948,12 @@ void SpectralRenderIop::_EnsureFrameRendered()
 
     const char* deviceStr = useGPU ? "GPU" : "CPU";
     const char* passStr = (_progressive && renderSpp < _samples) ? " [preview]" : "";
-    fprintf(stderr, "SpectralRender: rendering %dx%d, %zu tris, %d spp, device=%s%s\n",
-            W, H, _scene->TotalTriangles(), renderSpp, deviceStr, passStr);
+    if (W != fullW || H != fullH)
+        fprintf(stderr, "SpectralRender: rendering %dx%d (proxy of %dx%d), %zu tris, %d spp, device=%s%s\n",
+                W, H, fullW, fullH, _scene->TotalTriangles(), renderSpp, deviceStr, passStr);
+    else
+        fprintf(stderr, "SpectralRender: rendering %dx%d, %zu tris, %d spp, device=%s%s\n",
+                W, H, _scene->TotalTriangles(), renderSpp, deviceStr, passStr);
 
 #ifdef SPECTRAL_HAS_OPTIX
     if (useGPU) {
@@ -1636,6 +1965,7 @@ void SpectralRenderIop::_EnsureFrameRendered()
         SpectralIntegrator::AOVBuffers aovBufs;
         aovBufs.normal   = _aovNormals  ? _normalBuffer.data()   : nullptr;
         aovBufs.position = _aovPosition ? _posBuffer.data()      : nullptr;
+        aovBufs.pRef     = _aovPRef     ? _pRefBuffer.data()     : nullptr;
         aovBufs.uv       = _aovUV       ? _uvBuffer.data()       : nullptr;
         aovBufs.albedo   = _aovAlbedo   ? _albedoBuffer.data()   : nullptr;
         aovBufs.direct   = _aovDirect   ? _directBuffer.data()   : nullptr;
@@ -1658,12 +1988,13 @@ void SpectralRenderIop::_EnsureFrameRendered()
     // Geometry AOV pass for GPU (CPU fills them during RenderFrame)
 #ifdef SPECTRAL_HAS_OPTIX
     if (useGPU) {
-        bool needGeomPass = _aovNormals || _aovPosition || _aovUV || _aovAlbedo;
+        bool needGeomPass = _aovNormals || _aovPosition || _aovPRef || _aovUV || _aovAlbedo;
         if (needGeomPass) {
             SpectralIntegrator::ComputeGeometryAOVs(
                 *_scene, cam,
                 _aovNormals  ? _normalBuffer.data() : nullptr,
                 _aovPosition ? _posBuffer.data()    : nullptr,
+                _aovPRef     ? _pRefBuffer.data()   : nullptr,
                 _aovUV       ? _uvBuffer.data()     : nullptr,
                 _aovAlbedo   ? _albedoBuffer.data() : nullptr,
                 _objectIdBuffer.data(), _materialIdBuffer.data(),

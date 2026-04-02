@@ -60,6 +60,12 @@ struct GPULight {
 struct CameraParams {
     float projInverse[16];
     float viewToWorld[16];
+    float fStop;            // 0 = pinhole
+    float focusDistance;
+    float focalLength;      // mm
+    float right[3];         // camera right vector (world)
+    float up[3];            // camera up vector (world)
+    float forward[3];       // camera forward vector (world)
 };
 
 struct LaunchParams {

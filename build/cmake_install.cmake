@@ -48,6 +48,22 @@ if(CMAKE_INSTALL_COMPONENT STREQUAL "Unspecified" OR NOT CMAKE_INSTALL_COMPONENT
   file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/HdSpectral/resources" TYPE FILE FILES "C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build/HdSpectral/resources/plugInfo.json")
 endif()
 
+if(CMAKE_INSTALL_COMPONENT STREQUAL "Unspecified" OR NOT CMAKE_INSTALL_COMPONENT)
+  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/." TYPE FILE FILES "C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build/plugInfo.json")
+endif()
+
+if(CMAKE_INSTALL_COMPONENT STREQUAL "Unspecified" OR NOT CMAKE_INSTALL_COMPONENT)
+  if(CMAKE_INSTALL_CONFIG_NAME MATCHES "^([Dd][Ee][Bb][Uu][Gg])$")
+    file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/SpectralRender" TYPE SHARED_LIBRARY FILES "C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build/SpectralRender/SpectralRender.dll")
+  elseif(CMAKE_INSTALL_CONFIG_NAME MATCHES "^([Rr][Ee][Ll][Ee][Aa][Ss][Ee])$")
+    file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/SpectralRender" TYPE SHARED_LIBRARY FILES "C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build/SpectralRender/SpectralRender.dll")
+  elseif(CMAKE_INSTALL_CONFIG_NAME MATCHES "^([Mm][Ii][Nn][Ss][Ii][Zz][Ee][Rr][Ee][Ll])$")
+    file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/SpectralRender" TYPE SHARED_LIBRARY FILES "C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build/SpectralRender/MinSizeRel/SpectralRender.dll")
+  elseif(CMAKE_INSTALL_CONFIG_NAME MATCHES "^([Rr][Ee][Ll][Ww][Ii][Tt][Hh][Dd][Ee][Bb][Ii][Nn][Ff][Oo])$")
+    file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/SpectralRender" TYPE SHARED_LIBRARY FILES "C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build/SpectralRender/RelWithDebInfo/SpectralRender.dll")
+  endif()
+endif()
+
 if(CMAKE_INSTALL_COMPONENT)
   set(CMAKE_INSTALL_MANIFEST "install_manifest_${CMAKE_INSTALL_COMPONENT}.txt")
 else()

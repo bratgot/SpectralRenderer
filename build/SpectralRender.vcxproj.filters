@@ -1,0 +1,19 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralRenderIop.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralSurfaceOp.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{342F0FDF-B08A-3561-A788-5E4236CA692F}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

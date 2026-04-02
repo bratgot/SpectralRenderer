@@ -24,7 +24,7 @@ events:
       The output was:
       0
       MSBuild version 17.14.19+164abd434 for .NET Framework
-      Build started 31/03/2026 6:43:59 PM.
+      Build started 31/03/2026 8:43:57 PM.
       
       Project "C:\\dev\\SpectralRenderer\\HdSpectral_Phase1\\HdSpectral\\build\\CMakeFiles\\3.28.3\\CompilerIdCXX\\CompilerIdCXX.vcxproj" on node 1 (default targets).
       PrepareForBuild:
@@ -62,7 +62,7 @@ events:
           0 Warning(s)
           0 Error(s)
       
-      Time Elapsed 00:00:01.16
+      Time Elapsed 00:00:00.88
       
       
       Compilation of the CXX compiler identification source "CMakeCXXCompilerId.cpp" produced "CompilerIdCXX.exe"
@@ -81,8 +81,8 @@ events:
     checks:
       - "Detecting CXX compiler ABI info"
     directories:
-      source: "C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build/CMakeFiles/CMakeScratch/TryCompile-ekggm2"
-      binary: "C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build/CMakeFiles/CMakeScratch/TryCompile-ekggm2"
+      source: "C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build/CMakeFiles/CMakeScratch/TryCompile-uysx8b"
+      binary: "C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build/CMakeFiles/CMakeScratch/TryCompile-uysx8b"
     cmakeVariables:
       CMAKE_CXX_FLAGS: "/DWIN32 /D_WINDOWS /EHsc"
       CMAKE_CXX_FLAGS_DEBUG: "/Zi /Ob0 /Od /RTC1"
@@ -91,49 +91,49 @@ events:
       variable: "CMAKE_CXX_ABI_COMPILED"
       cached: true
       stdout: |
-        Change Dir: 'C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build/CMakeFiles/CMakeScratch/TryCompile-ekggm2'
+        Change Dir: 'C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build/CMakeFiles/CMakeScratch/TryCompile-uysx8b'
         
-        Run Build Command(s): "C:/Program Files/Microsoft Visual Studio/2022/Community/MSBuild/Current/Bin/amd64/MSBuild.exe" cmTC_ac124.vcxproj /p:Configuration=Debug /p:Platform=x64 /p:VisualStudioVersion=17.0 /v:n
+        Run Build Command(s): "C:/Program Files/Microsoft Visual Studio/2022/Community/MSBuild/Current/Bin/amd64/MSBuild.exe" cmTC_daef5.vcxproj /p:Configuration=Debug /p:Platform=x64 /p:VisualStudioVersion=17.0 /v:n
         MSBuild version 17.14.19+164abd434 for .NET Framework
-        Build started 31/03/2026 6:44:01 PM.
+        Build started 31/03/2026 8:43:58 PM.
         
-        Project "C:\\dev\\SpectralRenderer\\HdSpectral_Phase1\\HdSpectral\\build\\CMakeFiles\\CMakeScratch\\TryCompile-ekggm2\\cmTC_ac124.vcxproj" on node 1 (default targets).
+        Project "C:\\dev\\SpectralRenderer\\HdSpectral_Phase1\\HdSpectral\\build\\CMakeFiles\\CMakeScratch\\TryCompile-uysx8b\\cmTC_daef5.vcxproj" on node 1 (default targets).
         PrepareForBuild:
-          Creating directory "cmTC_ac124.dir\\Debug\\".
+          Creating directory "cmTC_daef5.dir\\Debug\\".
           Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
-          Creating directory "C:\\dev\\SpectralRenderer\\HdSpectral_Phase1\\HdSpectral\\build\\CMakeFiles\\CMakeScratch\\TryCompile-ekggm2\\Debug\\".
-          Creating directory "cmTC_ac124.dir\\Debug\\cmTC_ac124.tlog\\".
+          Creating directory "C:\\dev\\SpectralRenderer\\HdSpectral_Phase1\\HdSpectral\\build\\CMakeFiles\\CMakeScratch\\TryCompile-uysx8b\\Debug\\".
+          Creating directory "cmTC_daef5.dir\\Debug\\cmTC_daef5.tlog\\".
         InitializeBuildStatus:
-          Creating "cmTC_ac124.dir\\Debug\\cmTC_ac124.tlog\\unsuccessfulbuild" because "AlwaysCreate" was specified.
-          Touching "cmTC_ac124.dir\\Debug\\cmTC_ac124.tlog\\unsuccessfulbuild".
+          Creating "cmTC_daef5.dir\\Debug\\cmTC_daef5.tlog\\unsuccessfulbuild" because "AlwaysCreate" was specified.
+          Touching "cmTC_daef5.dir\\Debug\\cmTC_daef5.tlog\\unsuccessfulbuild".
         VcpkgTripletSelection:
           Using triplet "x64-windows" from "C:\\vcpkg\\installed\\x64-windows\\"
           Using normalized configuration "Release"
         ClCompile:
-          C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.38.33130\\bin\\HostX64\\x64\\CL.exe /c /I"C:\\vcpkg\\installed\\x64-windows\\include" /Zi /W1 /WX- /diagnostics:column /Od /Ob0 /D _MBCS /D WIN32 /D _WINDOWS /D "CMAKE_INTDIR=\\"Debug\\"" /Gm- /EHsc /RTC1 /MDd /GS /fp:precise /Zc:wchar_t /Zc:forScope /Zc:inline /Fo"cmTC_ac124.dir\\Debug\\\\" /Fd"cmTC_ac124.dir\\Debug\\vc143.pdb" /external:W1 /Gd /TP /errorReport:queue "C:\\Program Files\\CMake\\share\\cmake-3.28\\Modules\\CMakeCXXCompilerABI.cpp"
+          C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.38.33130\\bin\\HostX64\\x64\\CL.exe /c /I"C:\\vcpkg\\installed\\x64-windows\\include" /Zi /W1 /WX- /diagnostics:column /Od /Ob0 /D _MBCS /D WIN32 /D _WINDOWS /D "CMAKE_INTDIR=\\"Debug\\"" /Gm- /EHsc /RTC1 /MDd /GS /fp:precise /Zc:wchar_t /Zc:forScope /Zc:inline /Fo"cmTC_daef5.dir\\Debug\\\\" /Fd"cmTC_daef5.dir\\Debug\\vc143.pdb" /external:W1 /Gd /TP /errorReport:queue "C:\\Program Files\\CMake\\share\\cmake-3.28\\Modules\\CMakeCXXCompilerABI.cpp"
           Microsoft (R) C/C++ Optimizing Compiler Version 19.38.33145 for x64
           Copyright (C) Microsoft Corporation.  All rights reserved.
-          cl /c /I"C:\\vcpkg\\installed\\x64-windows\\include" /Zi /W1 /WX- /diagnostics:column /Od /Ob0 /D _MBCS /D WIN32 /D _WINDOWS /D "CMAKE_INTDIR=\\"Debug\\"" /Gm- /EHsc /RTC1 /MDd /GS /fp:precise /Zc:wchar_t /Zc:forScope /Zc:inline /Fo"cmTC_ac124.dir\\Debug\\\\" /Fd"cmTC_ac124.dir\\Debug\\vc143.pdb" /external:W1 /Gd /TP /errorReport:queue "C:\\Program Files\\CMake\\share\\cmake-3.28\\Modules\\CMakeCXXCompilerABI.cpp"
+          cl /c /I"C:\\vcpkg\\installed\\x64-windows\\include" /Zi /W1 /WX- /diagnostics:column /Od /Ob0 /D _MBCS /D WIN32 /D _WINDOWS /D "CMAKE_INTDIR=\\"Debug\\"" /Gm- /EHsc /RTC1 /MDd /GS /fp:precise /Zc:wchar_t /Zc:forScope /Zc:inline /Fo"cmTC_daef5.dir\\Debug\\\\" /Fd"cmTC_daef5.dir\\Debug\\vc143.pdb" /external:W1 /Gd /TP /errorReport:queue "C:\\Program Files\\CMake\\share\\cmake-3.28\\Modules\\CMakeCXXCompilerABI.cpp"
           CMakeCXXCompilerABI.cpp
         Link:
-          C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.38.33130\\bin\\HostX64\\x64\\link.exe /ERRORREPORT:QUEUE /OUT:"C:\\dev\\SpectralRenderer\\HdSpectral_Phase1\\HdSpectral\\build\\CMakeFiles\\CMakeScratch\\TryCompile-ekggm2\\Debug\\cmTC_ac124.exe" /INCREMENTAL /ILK:"cmTC_ac124.dir\\Debug\\cmTC_ac124.ilk" /NOLOGO /LIBPATH:"C:\\vcpkg\\installed\\x64-windows\\lib" /LIBPATH:"C:\\vcpkg\\installed\\x64-windows\\lib\\manual-link" kernel32.lib user32.lib gdi32.lib winspool.lib shell32.lib ole32.lib oleaut32.lib uuid.lib comdlg32.lib advapi32.lib "C:\\vcpkg\\installed\\x64-windows\\lib\\*.lib" /MANIFEST /MANIFESTUAC:"level='asInvoker' uiAccess='false'" /manifest:embed /DEBUG /PDB:"C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build/CMakeFiles/CMakeScratch/TryCompile-ekggm2/Debug/cmTC_ac124.pdb" /SUBSYSTEM:CONSOLE /TLBID:1 /DYNAMICBASE /NXCOMPAT /IMPLIB:"C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build/CMakeFiles/CMakeScratch/TryCompile-ekggm2/Debug/cmTC_ac124.lib" /MACHINE:X64  /machine:x64 cmTC_ac124.dir\\Debug\\CMakeCXXCompilerABI.obj
-          cmTC_ac124.vcxproj -> C:\\dev\\SpectralRenderer\\HdSpectral_Phase1\\HdSpectral\\build\\CMakeFiles\\CMakeScratch\\TryCompile-ekggm2\\Debug\\cmTC_ac124.exe
+          C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.38.33130\\bin\\HostX64\\x64\\link.exe /ERRORREPORT:QUEUE /OUT:"C:\\dev\\SpectralRenderer\\HdSpectral_Phase1\\HdSpectral\\build\\CMakeFiles\\CMakeScratch\\TryCompile-uysx8b\\Debug\\cmTC_daef5.exe" /INCREMENTAL /ILK:"cmTC_daef5.dir\\Debug\\cmTC_daef5.ilk" /NOLOGO /LIBPATH:"C:\\vcpkg\\installed\\x64-windows\\lib" /LIBPATH:"C:\\vcpkg\\installed\\x64-windows\\lib\\manual-link" kernel32.lib user32.lib gdi32.lib winspool.lib shell32.lib ole32.lib oleaut32.lib uuid.lib comdlg32.lib advapi32.lib "C:\\vcpkg\\installed\\x64-windows\\lib\\*.lib" /MANIFEST /MANIFESTUAC:"level='asInvoker' uiAccess='false'" /manifest:embed /DEBUG /PDB:"C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build/CMakeFiles/CMakeScratch/TryCompile-uysx8b/Debug/cmTC_daef5.pdb" /SUBSYSTEM:CONSOLE /TLBID:1 /DYNAMICBASE /NXCOMPAT /IMPLIB:"C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build/CMakeFiles/CMakeScratch/TryCompile-uysx8b/Debug/cmTC_daef5.lib" /MACHINE:X64  /machine:x64 cmTC_daef5.dir\\Debug\\CMakeCXXCompilerABI.obj
+          cmTC_daef5.vcxproj -> C:\\dev\\SpectralRenderer\\HdSpectral_Phase1\\HdSpectral\\build\\CMakeFiles\\CMakeScratch\\TryCompile-uysx8b\\Debug\\cmTC_daef5.exe
         AppLocalFromInstalled:
-          pwsh.exe -ExecutionPolicy Bypass -noprofile -File "C:\\vcpkg\\scripts\\buildsystems\\msbuild\\applocal.ps1" "C:\\dev\\SpectralRenderer\\HdSpectral_Phase1\\HdSpectral\\build\\CMakeFiles\\CMakeScratch\\TryCompile-ekggm2\\Debug\\cmTC_ac124.exe" "C:\\vcpkg\\installed\\x64-windows\\bin" "cmTC_ac124.dir\\Debug\\cmTC_ac124.tlog\\cmTC_ac124.write.1u.tlog" "cmTC_ac124.dir\\Debug\\vcpkg.applocal.log"
+          pwsh.exe -ExecutionPolicy Bypass -noprofile -File "C:\\vcpkg\\scripts\\buildsystems\\msbuild\\applocal.ps1" "C:\\dev\\SpectralRenderer\\HdSpectral_Phase1\\HdSpectral\\build\\CMakeFiles\\CMakeScratch\\TryCompile-uysx8b\\Debug\\cmTC_daef5.exe" "C:\\vcpkg\\installed\\x64-windows\\bin" "cmTC_daef5.dir\\Debug\\cmTC_daef5.tlog\\cmTC_daef5.write.1u.tlog" "cmTC_daef5.dir\\Debug\\vcpkg.applocal.log"
           'pwsh.exe' is not recognized as an internal or external command,
           operable program or batch file.
-          The command "pwsh.exe -ExecutionPolicy Bypass -noprofile -File "C:\\vcpkg\\scripts\\buildsystems\\msbuild\\applocal.ps1" "C:\\dev\\SpectralRenderer\\HdSpectral_Phase1\\HdSpectral\\build\\CMakeFiles\\CMakeScratch\\TryCompile-ekggm2\\Debug\\cmTC_ac124.exe" "C:\\vcpkg\\installed\\x64-windows\\bin" "cmTC_ac124.dir\\Debug\\cmTC_ac124.tlog\\cmTC_ac124.write.1u.tlog" "cmTC_ac124.dir\\Debug\\vcpkg.applocal.log"" exited with code 9009.
-          "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -ExecutionPolicy Bypass -noprofile -File "C:\\vcpkg\\scripts\\buildsystems\\msbuild\\applocal.ps1" "C:\\dev\\SpectralRenderer\\HdSpectral_Phase1\\HdSpectral\\build\\CMakeFiles\\CMakeScratch\\TryCompile-ekggm2\\Debug\\cmTC_ac124.exe" "C:\\vcpkg\\installed\\x64-windows\\bin" "cmTC_ac124.dir\\Debug\\cmTC_ac124.tlog\\cmTC_ac124.write.1u.tlog" "cmTC_ac124.dir\\Debug\\vcpkg.applocal.log"
+          The command "pwsh.exe -ExecutionPolicy Bypass -noprofile -File "C:\\vcpkg\\scripts\\buildsystems\\msbuild\\applocal.ps1" "C:\\dev\\SpectralRenderer\\HdSpectral_Phase1\\HdSpectral\\build\\CMakeFiles\\CMakeScratch\\TryCompile-uysx8b\\Debug\\cmTC_daef5.exe" "C:\\vcpkg\\installed\\x64-windows\\bin" "cmTC_daef5.dir\\Debug\\cmTC_daef5.tlog\\cmTC_daef5.write.1u.tlog" "cmTC_daef5.dir\\Debug\\vcpkg.applocal.log"" exited with code 9009.
+          "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -ExecutionPolicy Bypass -noprofile -File "C:\\vcpkg\\scripts\\buildsystems\\msbuild\\applocal.ps1" "C:\\dev\\SpectralRenderer\\HdSpectral_Phase1\\HdSpectral\\build\\CMakeFiles\\CMakeScratch\\TryCompile-uysx8b\\Debug\\cmTC_daef5.exe" "C:\\vcpkg\\installed\\x64-windows\\bin" "cmTC_daef5.dir\\Debug\\cmTC_daef5.tlog\\cmTC_daef5.write.1u.tlog" "cmTC_daef5.dir\\Debug\\vcpkg.applocal.log"
         FinalizeBuildStatus:
-          Deleting file "cmTC_ac124.dir\\Debug\\cmTC_ac124.tlog\\unsuccessfulbuild".
-          Touching "cmTC_ac124.dir\\Debug\\cmTC_ac124.tlog\\cmTC_ac124.lastbuildstate".
-        Done Building Project "C:\\dev\\SpectralRenderer\\HdSpectral_Phase1\\HdSpectral\\build\\CMakeFiles\\CMakeScratch\\TryCompile-ekggm2\\cmTC_ac124.vcxproj" (default targets).
+          Deleting file "cmTC_daef5.dir\\Debug\\cmTC_daef5.tlog\\unsuccessfulbuild".
+          Touching "cmTC_daef5.dir\\Debug\\cmTC_daef5.tlog\\cmTC_daef5.lastbuildstate".
+        Done Building Project "C:\\dev\\SpectralRenderer\\HdSpectral_Phase1\\HdSpectral\\build\\CMakeFiles\\CMakeScratch\\TryCompile-uysx8b\\cmTC_daef5.vcxproj" (default targets).
         
         Build succeeded.
             0 Warning(s)
             0 Error(s)
         
-        Time Elapsed 00:00:00.89
+        Time Elapsed 00:00:00.91
         
       exitCode: 0
 ...

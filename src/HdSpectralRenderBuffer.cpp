@@ -1,6 +1,6 @@
 #include "HdSpectralRenderBuffer.h"
 #include <pxr/base/tf/diagnostic.h>
-#include <pxr/base/gf/vec3i.h>  
+#include <pxr/base/gf/vec3i.h>
 #include <cstring>  // memset
 
 PXR_NAMESPACE_OPEN_SCOPE

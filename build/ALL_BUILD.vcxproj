@@ -177,6 +177,14 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <Project>{BA8A6471-0465-32A8-B18D-7A354A3EC351}</Project>
       <Name>HdSpectral</Name>
     </ProjectReference>
+    <ProjectReference Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralCore.vcxproj">
+      <Project>{2D73B80D-3B0C-3C49-B79D-A2408A10C5B0}</Project>
+      <Name>SpectralCore</Name>
+    </ProjectReference>
+    <ProjectReference Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralRender.vcxproj">
+      <Project>{962C48FE-B873-3B7C-BC43-D778C41BA26C}</Project>
+      <Name>SpectralRender</Name>
+    </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

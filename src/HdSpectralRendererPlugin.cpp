@@ -2,20 +2,22 @@
 #include "HdSpectralRenderDelegate.h"
 
 #include <pxr/imaging/hd/rendererPluginRegistry.h>
+#include <pxr/imaging/hd/rendererPlugin.h>
+#include <pxr/base/tf/type.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
 // ---------------------------------------------------------------------------
 // Plugin registration
 //
-//   This macro expands to a static initialiser that registers
-//   HdSpectralRendererPlugin with Hydra's plugin registry.
-//   It runs when the DLL is loaded (i.e. when PXR_PLUGINPATH_NAME points
-//   at the directory containing our plugInfo.json and Nuke starts).
+//   HdRendererPluginRegistry::Define registers both the TfType and the
+//   factory in one call.  The type name must match plugInfo.json "Types" key.
 //
-//   The string name ("HdSpectralRendererPlugin") must match:
-//     1. The C++ class name
-//     2. The "Types" key in plugInfo.json
+//   Note: PXR may emit a "missing TfType registration" warning during
+//   startup if it parses plugInfo.json before this DLL's static
+//   initialisers run.  The warning is resolved once the DLL loads
+//   and TF_REGISTRY_FUNCTION executes — "Spectral (CPU)" still appears
+//   in the renderer dropdown.
 // ---------------------------------------------------------------------------
 TF_REGISTRY_FUNCTION(TfType)
 {

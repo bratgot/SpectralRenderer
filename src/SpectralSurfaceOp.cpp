@@ -6,6 +6,8 @@
 
 #include <DDImage/Knobs.h>
 #include <DDImage/Op.h>
+#include <DDImage/Iop.h>
+#include <DDImage/Row.h>
 
 #include "usg/geom/ShaderDesc.h"
 #include "usg/base/Value.h"
@@ -83,6 +85,26 @@ void SpectralSurfaceOp::knobs(Knob_Callback f)
                "~300nm = magenta\n"
                "~400nm = cyan-green\n"
                "~500nm = rainbow/iridescent");
+
+    Divider(f, "Displacement");
+    Float_knob(f, &_displacementScale, "displacement_scale", "scale");
+    SetRange(f, 0.f, 10.f);
+    Tooltip(f, "Displacement map amplitude in world units.\n"
+               "0 = disabled (default)\n"
+               "Connect a texture to the displacement input\n"
+               "on the geometry node to provide the map.");
+
+    Float_knob(f, &_displacementMidpoint, "displacement_midpoint", "midpoint");
+    SetRange(f, -1.f, 1.f);
+    Tooltip(f, "Displacement bias.\n"
+               "0.0 = centered (default, grey = no offset)\n"
+               "-1.0 = maximum inward bias\n"
+               "1.0 = maximum outward bias");
+
+    File_knob(f, &_displacementFile, "displacement_file", "map");
+    Tooltip(f, "Displacement map image file (.exr, .hdr, .png, .jpg).\n"
+               "Red channel is used as the displacement height.\n"
+               "Leave empty to disable displacement.");
 }
 
 // ---------------------------------------------------------------------------
@@ -178,7 +200,25 @@ void SpectralSurfaceOp::RegisterParams()
     SpectralParams p;
     p.abbeNumber        = _abbeNumber;
     p.thinFilmThickness = _thinFilmThickness;
+    p.displacementScale = _displacementScale;
+    p.displacementMidpoint = _displacementMidpoint;
+    p.displacementFile = (_displacementFile && _displacementFile[0]) ? _displacementFile : "";
+    // Store displacement Iop if connected
+    if (inputs() > 0 && input(0)) {
+        Op* dispOp = input(0);
+        Iop* dispIop = dynamic_cast<Iop*>(dispOp);
+        if (dispIop) p.dispIop = dispOp;
+    }
     GetRegistry()[node_name()] = p;
+}
+
+bool SpectralSurfaceOp::test_input(int idx, Op* op) const
+{
+    if (idx == 0) {
+        if (!op) return true;
+        return dynamic_cast<Iop*>(op) != nullptr;
+    }
+    return ShaderOp::test_input(idx, op);
 }
 
 // ---------------------------------------------------------------------------

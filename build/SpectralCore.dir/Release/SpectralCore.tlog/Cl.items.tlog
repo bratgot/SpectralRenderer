@@ -1,0 +1,5 @@
+C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralIntegrator.cpp;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralCore.dir\Release\SpectralIntegrator.obj
+C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralTexture.cpp;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralCore.dir\Release\SpectralTexture.obj
+C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralBVH.cpp;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralCore.dir\Release\SpectralBVH.obj
+C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralSubdiv.cpp;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralCore.dir\Release\SpectralSubdiv.obj
+C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralGPU.cpp;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralCore.dir\Release\SpectralGPU.obj

@@ -46,7 +46,8 @@ static __forceinline__ __device__ float3 transformPoint(const float* m, float3 p
 }
 
 static __forceinline__ __device__ void makeRay(
-    float px, float py, float W, float H, float3& origin, float3& dir)
+    float px, float py, float W, float H, float3& origin, float3& dir,
+    unsigned int seed = 0)
 {
     float ndcX = 2.f * px / W - 1.f;
     float ndcY = -2.f * py / H + 1.f;
@@ -58,6 +59,32 @@ static __forceinline__ __device__ void makeRay(
     float3 worldFar  = transformPoint(params.camera.viewToWorld, farPos);
     origin = worldNear;
     dir = make_float3(worldFar.x-worldNear.x, worldFar.y-worldNear.y, worldFar.z-worldNear.z);
+
+    // DOF: thin lens
+    if (params.camera.fStop > 0.f && params.camera.focusDistance > 0.f) {
+        float lensRadius = (params.camera.focalLength * 0.1f) / (2.f * params.camera.fStop);
+        float3 fwd = make_float3(params.camera.forward[0], params.camera.forward[1], params.camera.forward[2]);
+        float denom = dir.x*fwd.x + dir.y*fwd.y + dir.z*fwd.z;
+        if (fabsf(denom) > 1e-8f) {
+            float dirLen = sqrtf(dir.x*dir.x + dir.y*dir.y + dir.z*dir.z);
+            float tFocus = params.camera.focusDistance / (denom / dirLen);
+            float3 dirN = make_float3(dir.x/dirLen, dir.y/dirLen, dir.z/dirLen);
+            float3 focalPt = make_float3(origin.x + dirN.x*tFocus, origin.y + dirN.y*tFocus, origin.z + dirN.z*tFocus);
+
+            float u1 = hashRNG(seed);
+            float u2 = hashRNG(seed + 1u);
+            float r = lensRadius * sqrtf(u1);
+            float theta = 6.28318f * u2;
+            float dx = r * cosf(theta), dy = r * sinf(theta);
+
+            float3 rt = make_float3(params.camera.right[0], params.camera.right[1], params.camera.right[2]);
+            float3 up = make_float3(params.camera.up[0], params.camera.up[1], params.camera.up[2]);
+            origin.x += rt.x*dx + up.x*dy;
+            origin.y += rt.y*dx + up.y*dy;
+            origin.z += rt.z*dx + up.z*dy;
+            dir = make_float3(focalPt.x-origin.x, focalPt.y-origin.y, focalPt.z-origin.z);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -565,7 +592,8 @@ extern "C" __global__ void __raygen__spectral()
     if (spp <= 1) {
         // Normal-as-colour
         float3 origin, dir;
-        makeRay(px+0.5f, py+0.5f, W, H, origin, dir);
+        unsigned int dofSeed = pixIdx * 7919u;
+        makeRay(px+0.5f, py+0.5f, W, H, origin, dir, dofSeed);
         unsigned int p0=0,p1=0,p2=0,p3=__float_as_uint(1e30f),p4=0,p5=0,p6=0;
         optixTrace(params.traversable, origin, dir, 1e-4f,1e30f,0.f,
                    OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0, p0,p1,p2,p3,p4,p5,p6);
@@ -595,7 +623,7 @@ extern "C" __global__ void __raygen__spectral()
             float lambda = 380.f + wu*400.f;
 
             float3 origin, dir;
-            makeRay(px+jx, py+jy, W, H, origin, dir);
+            makeRay(px+jx, py+jy, W, H, origin, dir, seed + 50u);
 
             // Primary ray
             unsigned int p0=0,p1=0,p2=0,p3=__float_as_uint(1e30f),p4=0,p5=0,p6=0;

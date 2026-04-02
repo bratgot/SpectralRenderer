@@ -1,0 +1,23 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\CMakeFiles\f0674633ea0a78d0ac6b5a15f13fcda3\SpectralGPUKernel.ptx.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\CMakeFiles\f0674633ea0a78d0ac6b5a15f13fcda3\SpectralGPUKernel_ptx.h.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\CMakeFiles\b94e36398e033b7df3732cb12018850d\SpectralPTX.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\CMakeFiles\SpectralPTX" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{CFB5423D-5B77-34B6-8997-2A74F08323AE}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

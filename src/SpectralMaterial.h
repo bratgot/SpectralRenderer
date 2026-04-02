@@ -39,6 +39,13 @@ struct SpectralMaterial
     int     roughnessTexId = -1;   // roughness texture
     int     metallicTexId  = -1;   // metallic texture
     int     normalMapTexId = -1;   // normal map
+    int     displacementTexId = -1; // displacement map
+    float   displacementScale = 0.f; // world units, 0 = disabled
+    float   displacementMidpoint = 0.0f; // 0.5 = centered, 0 = outward only
+
+    // Spectral-specific properties
+    float   abbeNumber       = 0.0f;   // dispersion (0=none, ~60=crown glass, ~30=flint)
+    float   thinFilmThickness = 0.0f;  // thin-film interference thickness in nm (0=disabled)
 
     // Identifier
     std::string name = "default";

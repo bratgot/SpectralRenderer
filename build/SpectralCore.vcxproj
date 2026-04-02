@@ -1,0 +1,307 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <PreferredToolArchitecture>x64</PreferredToolArchitecture>
+  </PropertyGroup>
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="MinSizeRel|x64">
+      <Configuration>MinSizeRel</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="RelWithDebInfo|x64">
+      <Configuration>RelWithDebInfo</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{2D73B80D-3B0C-3C49-B79D-A2408A10C5B0}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+    <Platform>x64</Platform>
+    <ProjectName>SpectralCore</ProjectName>
+    <VCProjectUpgraderObjectName>NoUpgrade</VCProjectUpgraderObjectName>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <_ProjectFileVersion>10.0.20506.1</_ProjectFileVersion>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\Debug\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">SpectralCore.dir\Debug\</IntDir>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">SpectralCore</TargetName>
+    <TargetExt Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">.lib</TargetExt>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\Release\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Release|x64'">SpectralCore.dir\Release\</IntDir>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='Release|x64'">SpectralCore</TargetName>
+    <TargetExt Condition="'$(Configuration)|$(Platform)'=='Release|x64'">.lib</TargetExt>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\MinSizeRel\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">SpectralCore.dir\MinSizeRel\</IntDir>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">SpectralCore</TargetName>
+    <TargetExt Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">.lib</TargetExt>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\RelWithDebInfo\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">SpectralCore.dir\RelWithDebInfo\</IntDir>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">SpectralCore</TargetName>
+    <TargetExt Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">.lib</TargetExt>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>C:\Program Files\Nuke17.0v1\FnUSD\include;C:\Program Files\Nuke17.0v1\include;C:\Program Files\Nuke17.0v1\include\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src;C:\dev\embree-4\include;C:\dev\opensubdiv-3.6.0;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.1.0\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>%(AdditionalOptions) /Zc:__cplusplus /utf-8</AdditionalOptions>
+      <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
+      <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <DisableSpecificWarnings>4251;4275;4267;4244;4305</DisableSpecificWarnings>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <InlineFunctionExpansion>Disabled</InlineFunctionExpansion>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <Optimization>Disabled</Optimization>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
+      <UseFullPaths>false</UseFullPaths>
+      <WarningLevel>Level3</WarningLevel>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NOMINMAX;_USE_MATH_DEFINES;WIN32_LEAN_AND_MEAN;HDSPECTRAL_EXPORTS;SPECTRAL_HAS_EMBREE=1;SPECTRAL_HAS_OSD=1;SPECTRAL_HAS_OPTIX=1;CMAKE_INTDIR="Debug"</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)</ObjectFileName>
+      <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
+    </ClCompile>
+    <ResourceCompile>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_DEBUG;_WINDOWS;NOMINMAX;_USE_MATH_DEFINES;WIN32_LEAN_AND_MEAN;HDSPECTRAL_EXPORTS;SPECTRAL_HAS_EMBREE=1;SPECTRAL_HAS_OSD=1;SPECTRAL_HAS_OPTIX=1;CMAKE_INTDIR=\"Debug\"</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>C:\Program Files\Nuke17.0v1\FnUSD\include;C:\Program Files\Nuke17.0v1\include;C:\Program Files\Nuke17.0v1\include\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src;C:\dev\embree-4\include;C:\dev\opensubdiv-3.6.0;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.1.0\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
+    <Midl>
+      <AdditionalIncludeDirectories>C:\Program Files\Nuke17.0v1\FnUSD\include;C:\Program Files\Nuke17.0v1\include;C:\Program Files\Nuke17.0v1\include\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src;C:\dev\embree-4\include;C:\dev\opensubdiv-3.6.0;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.1.0\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
+      <HeaderFileName>%(Filename).h</HeaderFileName>
+      <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
+      <InterfaceIdentifierFileName>%(Filename)_i.c</InterfaceIdentifierFileName>
+      <ProxyFileName>%(Filename)_p.c</ProxyFileName>
+    </Midl>
+    <Lib>
+      <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
+    </Lib>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>C:\Program Files\Nuke17.0v1\FnUSD\include;C:\Program Files\Nuke17.0v1\include;C:\Program Files\Nuke17.0v1\include\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src;C:\dev\embree-4\include;C:\dev\opensubdiv-3.6.0;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.1.0\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>%(AdditionalOptions) /Zc:__cplusplus /utf-8</AdditionalOptions>
+      <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
+      <DisableSpecificWarnings>4251;4275;4267;4244;4305</DisableSpecificWarnings>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <Optimization>MaxSpeed</Optimization>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <UseFullPaths>false</UseFullPaths>
+      <WarningLevel>Level3</WarningLevel>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;NOMINMAX;_USE_MATH_DEFINES;WIN32_LEAN_AND_MEAN;HDSPECTRAL_EXPORTS;SPECTRAL_HAS_EMBREE=1;SPECTRAL_HAS_OSD=1;SPECTRAL_HAS_OPTIX=1;CMAKE_INTDIR="Release"</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)</ObjectFileName>
+      <DebugInformationFormat>
+      </DebugInformationFormat>
+      <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
+    </ClCompile>
+    <ResourceCompile>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;NOMINMAX;_USE_MATH_DEFINES;WIN32_LEAN_AND_MEAN;HDSPECTRAL_EXPORTS;SPECTRAL_HAS_EMBREE=1;SPECTRAL_HAS_OSD=1;SPECTRAL_HAS_OPTIX=1;CMAKE_INTDIR=\"Release\"</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>C:\Program Files\Nuke17.0v1\FnUSD\include;C:\Program Files\Nuke17.0v1\include;C:\Program Files\Nuke17.0v1\include\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src;C:\dev\embree-4\include;C:\dev\opensubdiv-3.6.0;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.1.0\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
+    <Midl>
+      <AdditionalIncludeDirectories>C:\Program Files\Nuke17.0v1\FnUSD\include;C:\Program Files\Nuke17.0v1\include;C:\Program Files\Nuke17.0v1\include\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src;C:\dev\embree-4\include;C:\dev\opensubdiv-3.6.0;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.1.0\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
+      <HeaderFileName>%(Filename).h</HeaderFileName>
+      <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
+      <InterfaceIdentifierFileName>%(Filename)_i.c</InterfaceIdentifierFileName>
+      <ProxyFileName>%(Filename)_p.c</ProxyFileName>
+    </Midl>
+    <Lib>
+      <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
+    </Lib>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>C:\Program Files\Nuke17.0v1\FnUSD\include;C:\Program Files\Nuke17.0v1\include;C:\Program Files\Nuke17.0v1\include\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src;C:\dev\embree-4\include;C:\dev\opensubdiv-3.6.0;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.1.0\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>%(AdditionalOptions) /Zc:__cplusplus /utf-8</AdditionalOptions>
+      <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
+      <DisableSpecificWarnings>4251;4275;4267;4244;4305</DisableSpecificWarnings>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <InlineFunctionExpansion>OnlyExplicitInline</InlineFunctionExpansion>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <Optimization>MinSpace</Optimization>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <UseFullPaths>false</UseFullPaths>
+      <WarningLevel>Level3</WarningLevel>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;NOMINMAX;_USE_MATH_DEFINES;WIN32_LEAN_AND_MEAN;HDSPECTRAL_EXPORTS;SPECTRAL_HAS_EMBREE=1;SPECTRAL_HAS_OSD=1;SPECTRAL_HAS_OPTIX=1;CMAKE_INTDIR="MinSizeRel"</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)</ObjectFileName>
+      <DebugInformationFormat>
+      </DebugInformationFormat>
+      <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
+    </ClCompile>
+    <ResourceCompile>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;NOMINMAX;_USE_MATH_DEFINES;WIN32_LEAN_AND_MEAN;HDSPECTRAL_EXPORTS;SPECTRAL_HAS_EMBREE=1;SPECTRAL_HAS_OSD=1;SPECTRAL_HAS_OPTIX=1;CMAKE_INTDIR=\"MinSizeRel\"</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>C:\Program Files\Nuke17.0v1\FnUSD\include;C:\Program Files\Nuke17.0v1\include;C:\Program Files\Nuke17.0v1\include\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src;C:\dev\embree-4\include;C:\dev\opensubdiv-3.6.0;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.1.0\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
+    <Midl>
+      <AdditionalIncludeDirectories>C:\Program Files\Nuke17.0v1\FnUSD\include;C:\Program Files\Nuke17.0v1\include;C:\Program Files\Nuke17.0v1\include\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src;C:\dev\embree-4\include;C:\dev\opensubdiv-3.6.0;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.1.0\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
+      <HeaderFileName>%(Filename).h</HeaderFileName>
+      <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
+      <InterfaceIdentifierFileName>%(Filename)_i.c</InterfaceIdentifierFileName>
+      <ProxyFileName>%(Filename)_p.c</ProxyFileName>
+    </Midl>
+    <Lib>
+      <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
+    </Lib>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>C:\Program Files\Nuke17.0v1\FnUSD\include;C:\Program Files\Nuke17.0v1\include;C:\Program Files\Nuke17.0v1\include\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src;C:\dev\embree-4\include;C:\dev\opensubdiv-3.6.0;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.1.0\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>%(AdditionalOptions) /Zc:__cplusplus /utf-8</AdditionalOptions>
+      <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <DisableSpecificWarnings>4251;4275;4267;4244;4305</DisableSpecificWarnings>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <InlineFunctionExpansion>OnlyExplicitInline</InlineFunctionExpansion>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <Optimization>MaxSpeed</Optimization>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <UseFullPaths>false</UseFullPaths>
+      <WarningLevel>Level3</WarningLevel>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;NOMINMAX;_USE_MATH_DEFINES;WIN32_LEAN_AND_MEAN;HDSPECTRAL_EXPORTS;SPECTRAL_HAS_EMBREE=1;SPECTRAL_HAS_OSD=1;SPECTRAL_HAS_OPTIX=1;CMAKE_INTDIR="RelWithDebInfo"</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)</ObjectFileName>
+      <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
+    </ClCompile>
+    <ResourceCompile>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;NOMINMAX;_USE_MATH_DEFINES;WIN32_LEAN_AND_MEAN;HDSPECTRAL_EXPORTS;SPECTRAL_HAS_EMBREE=1;SPECTRAL_HAS_OSD=1;SPECTRAL_HAS_OPTIX=1;CMAKE_INTDIR=\"RelWithDebInfo\"</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>C:\Program Files\Nuke17.0v1\FnUSD\include;C:\Program Files\Nuke17.0v1\include;C:\Program Files\Nuke17.0v1\include\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src;C:\dev\embree-4\include;C:\dev\opensubdiv-3.6.0;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.1.0\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
+    <Midl>
+      <AdditionalIncludeDirectories>C:\Program Files\Nuke17.0v1\FnUSD\include;C:\Program Files\Nuke17.0v1\include;C:\Program Files\Nuke17.0v1\include\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src;C:\dev\embree-4\include;C:\dev\opensubdiv-3.6.0;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.1.0\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
+      <HeaderFileName>%(Filename).h</HeaderFileName>
+      <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
+      <InterfaceIdentifierFileName>%(Filename)_i.c</InterfaceIdentifierFileName>
+      <ProxyFileName>%(Filename)_p.c</ProxyFileName>
+    </Midl>
+    <Lib>
+      <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
+    </Lib>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <CustomBuild Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\CMakeLists.txt">
+      <UseUtf8Encoding>Always</UseUtf8Encoding>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Building Custom Rule C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/CMakeLists.txt</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral -BC:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build --check-stamp-file C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeCXXInformation.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeCommonLanguageInclude.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeGenericSystem.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeInitializeConfigs.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeLanguageInformation.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeRCInformation.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeSystemSpecificInformation.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeSystemSpecificInitialize.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Compiler\CMakeCommonCompilerMacros.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Compiler\MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Compiler\MSVC.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Platform\Windows-Initialize.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Platform\Windows-MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Platform\Windows-MSVC.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Platform\Windows.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Platform\WindowsPaths.cmake;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\CMakeFiles\3.28.3\CMakeCXXCompiler.cmake;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\CMakeFiles\3.28.3\CMakeRCCompiler.cmake;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\CMakeFiles\3.28.3\CMakeSystem.cmake;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\plugInfo.json.in;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\CMakeFiles\generate.stamp</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Building Custom Rule C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/CMakeLists.txt</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral -BC:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build --check-stamp-file C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeCXXInformation.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeCommonLanguageInclude.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeGenericSystem.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeInitializeConfigs.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeLanguageInformation.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeRCInformation.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeSystemSpecificInformation.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeSystemSpecificInitialize.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Compiler\CMakeCommonCompilerMacros.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Compiler\MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Compiler\MSVC.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Platform\Windows-Initialize.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Platform\Windows-MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Platform\Windows-MSVC.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Platform\Windows.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Platform\WindowsPaths.cmake;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\CMakeFiles\3.28.3\CMakeCXXCompiler.cmake;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\CMakeFiles\3.28.3\CMakeRCCompiler.cmake;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\CMakeFiles\3.28.3\CMakeSystem.cmake;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\plugInfo.json.in;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\CMakeFiles\generate.stamp</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">Building Custom Rule C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/CMakeLists.txt</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral -BC:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build --check-stamp-file C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeCXXInformation.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeCommonLanguageInclude.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeGenericSystem.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeInitializeConfigs.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeLanguageInformation.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeRCInformation.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeSystemSpecificInformation.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeSystemSpecificInitialize.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Compiler\CMakeCommonCompilerMacros.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Compiler\MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Compiler\MSVC.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Platform\Windows-Initialize.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Platform\Windows-MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Platform\Windows-MSVC.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Platform\Windows.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Platform\WindowsPaths.cmake;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\CMakeFiles\3.28.3\CMakeCXXCompiler.cmake;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\CMakeFiles\3.28.3\CMakeRCCompiler.cmake;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\CMakeFiles\3.28.3\CMakeSystem.cmake;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\plugInfo.json.in;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\CMakeFiles\generate.stamp</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">Building Custom Rule C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/CMakeLists.txt</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral -BC:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build --check-stamp-file C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeCXXInformation.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeCommonLanguageInclude.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeGenericSystem.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeInitializeConfigs.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeLanguageInformation.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeRCInformation.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeSystemSpecificInformation.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\CMakeSystemSpecificInitialize.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Compiler\CMakeCommonCompilerMacros.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Compiler\MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Compiler\MSVC.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Platform\Windows-Initialize.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Platform\Windows-MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Platform\Windows-MSVC.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Platform\Windows.cmake;C:\Program Files\CMake\share\cmake-3.28\Modules\Platform\WindowsPaths.cmake;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\CMakeFiles\3.28.3\CMakeCXXCompiler.cmake;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\CMakeFiles\3.28.3\CMakeRCCompiler.cmake;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\CMakeFiles\3.28.3\CMakeSystem.cmake;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\plugInfo.json.in;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\CMakeFiles\generate.stamp</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">false</LinkObjects>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralIntegrator.cpp" />
+    <ClCompile Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralTexture.cpp" />
+    <ClCompile Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralBVH.cpp" />
+    <ClCompile Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralSubdiv.cpp" />
+    <ClCompile Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralGPU.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\ZERO_CHECK.vcxproj">
+      <Project>{D79C8DE3-9461-31FA-859A-A01553D97139}</Project>
+      <Name>ZERO_CHECK</Name>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <CopyToOutputDirectory>Never</CopyToOutputDirectory>
+    </ProjectReference>
+    <ProjectReference Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralPTX.vcxproj">
+      <Project>{3CC2B6A7-BB21-3156-A011-84654355C3B1}</Project>
+      <Name>SpectralPTX</Name>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <CopyToOutputDirectory>Never</CopyToOutputDirectory>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+</Project>

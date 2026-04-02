@@ -23,6 +23,7 @@ struct SpectralTriangle {
     GfVec3f n0, n1, n2;       // per-vertex world-space normals
     GfVec3f faceNormal;        // geometric (flat) normal
     GfVec2f uv0, uv1, uv2;   // per-vertex texture coordinates
+    GfVec3f pRef0, pRef1, pRef2; // reference (undisplaced) positions
     SpectralMaterialId materialId = kDefaultMaterialId;
     int     objectId = 0;          // per-mesh object ID for AOV
 
