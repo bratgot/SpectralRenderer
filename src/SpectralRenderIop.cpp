@@ -557,7 +557,52 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                 UsdLuxSphereLight sph(prim);
                 float r = 0.5f;
                 sph.GetRadiusAttr().Get(&r, timeCode);
-                light.radius = r;
+                // Check "treat as point" — forces radius to 0 for hard shadows
+                bool treatAsPoint = false;
+                sph.GetTreatAsPointAttr().Get(&treatAsPoint, timeCode);
+                light.radius = treatAsPoint ? 0.f : r;
+
+                // Check for shaping cone (SphereLight acting as SpotLight)
+                VtValue coneVal;
+                if (prim.GetAttribute(TfToken("inputs:shaping:cone:angle")).Get(&coneVal, timeCode)
+                    && coneVal.IsHolding<float>()) {
+                    float halfAngle = coneVal.UncheckedGet<float>();
+                    if (halfAngle > 0.f && halfAngle < 180.f) {
+                        light.type = SpectralLight::Type::Spot;
+                        GfVec3d fwd = xf.TransformDir(GfVec3d(0, 0, -1));
+                        fwd.Normalize();
+                        light.direction = GfVec3f(fwd);
+                        light.coneAngle = halfAngle * 2.f;
+                        VtValue softVal;
+                        if (prim.GetAttribute(TfToken("inputs:shaping:cone:softness")).Get(&softVal, timeCode)
+                            && softVal.IsHolding<float>())
+                            light.coneSoftness = softVal.UncheckedGet<float>();
+                        light.PrecomputeCone();
+                    }
+                }
+            } else if (prim.GetTypeName() == TfToken("SpotLight")) {
+                // SpotLight: position + direction + cone
+                light.type = SpectralLight::Type::Spot;
+                GfMatrix4d xf = xfCache.GetLocalToWorldTransform(prim);
+                light.position = GfVec3f(xf.ExtractTranslation());
+                GfVec3d fwd = xf.TransformDir(GfVec3d(0, 0, -1));
+                fwd.Normalize();
+                light.direction = GfVec3f(fwd);
+                // Read cone angle and softness
+                VtValue v;
+                if (prim.GetAttribute(TfToken("inputs:shaping:cone:angle")).Get(&v, timeCode)
+                    && v.IsHolding<float>())
+                    light.coneAngle = v.UncheckedGet<float>() * 2.f;  // USD stores half-angle
+                if (prim.GetAttribute(TfToken("inputs:shaping:cone:softness")).Get(&v, timeCode)
+                    && v.IsHolding<float>())
+                    light.coneSoftness = v.UncheckedGet<float>();
+                // Read radius for soft shadows
+                if (prim.GetAttribute(TfToken("inputs:radius")).Get(&v, timeCode)
+                    && v.IsHolding<float>())
+                    light.radius = v.UncheckedGet<float>();
+                else
+                    light.radius = 0.f;
+                light.PrecomputeCone();
             } else if (prim.IsA<UsdLuxRectLight>()) {
                 light.type = SpectralLight::Type::Rect;
                 GfMatrix4d xf = xfCache.GetLocalToWorldTransform(prim);
@@ -573,6 +618,27 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                 light.height = h;
             } else if (prim.IsA<UsdLuxDomeLight>()) {
                 light.type = SpectralLight::Type::Dome;
+                // Try to load HDRI texture
+                UsdLuxDomeLight dome(prim);
+                SdfAssetPath texPath;
+                if (dome.GetTextureFileAttr().Get(&texPath, timeCode)) {
+                    std::string filePath = texPath.GetResolvedPath();
+                    if (filePath.empty()) filePath = texPath.GetAssetPath();
+                    if (!filePath.empty()) {
+                        int texId = _scene->LoadTexture(filePath);
+                        if (texId >= 0) {
+                            const auto* tex = _scene->GetTexture(texId);
+                            if (tex && tex->IsValid()) {
+                                light.envTexId = texId;
+                                light.envWidth = tex->GetWidth();
+                                light.envHeight = tex->GetHeight();
+                                light.envPixels = tex->_pixels.data();
+                                fprintf(stderr, "SpectralRender: HDRI env map '%s' (%dx%d)\n",
+                                        filePath.c_str(), light.envWidth, light.envHeight);
+                            }
+                        }
+                    }
+                }
             }
 
             // Common light properties via LightAPI

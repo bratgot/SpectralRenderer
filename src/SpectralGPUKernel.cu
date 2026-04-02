@@ -199,12 +199,26 @@ static __forceinline__ __device__ float3 lightDirection(const GPULight& light, f
     return normalize3(d);
 }
 
+static __forceinline__ __device__ float spotAttenuation(const GPULight& light, float3 hitPos)
+{
+    if (light.type != 4) return 1.f;
+    float3 toSurface = make_float3(hitPos.x-light.position.x, hitPos.y-light.position.y, hitPos.z-light.position.z);
+    toSurface = normalize3(toSurface);
+    float cosTheta = dot3(toSurface, light.direction);
+    if (cosTheta < light.cosConeAngle) return 0.f;
+    if (cosTheta > light.cosPenumbra) return 1.f;
+    float t = (cosTheta - light.cosConeAngle) / (light.cosPenumbra - light.cosConeAngle + 1e-7f);
+    return t * t * (3.f - 2.f * t);
+}
+
 static __forceinline__ __device__ float lightAttenuation(const GPULight& light, float3 hitPos)
 {
     if (light.type == 0 || light.type == 3) return 1.f;
     float3 d = make_float3(light.position.x-hitPos.x, light.position.y-hitPos.y, light.position.z-hitPos.z);
     float dist2 = d.x*d.x + d.y*d.y + d.z*d.z;
-    return 1.f / fmaxf(dist2, 0.001f);
+    float atten = 1.f / fmaxf(dist2, 0.001f);
+    if (light.type == 4) atten *= spotAttenuation(light, hitPos);
+    return atten;
 }
 
 // ---------------------------------------------------------------------------
@@ -462,8 +476,8 @@ static __forceinline__ __device__ float3 sampleLightDir(
 
     float3 samplePos = light.position;
 
-    if (light.type == 1 && light.radius > 0.f) {
-        // Sphere: uniform point on sphere surface
+    if ((light.type == 1 || light.type == 4) && light.radius > 0.f) {
+        // Sphere or Spot: uniform point on sphere surface
         float theta = 6.28318f * u1;
         float phi = acosf(1.f - 2.f * u2);
         float sp = sinf(phi);

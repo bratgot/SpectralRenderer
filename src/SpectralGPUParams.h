@@ -43,7 +43,7 @@ struct GPUTexture {
 
 // GPU-side light
 struct GPULight {
-    int    type;          // 0=distant, 1=sphere, 2=rect, 3=dome
+    int    type;          // 0=distant, 1=sphere, 2=rect, 3=dome, 4=spot
     float3 position;
     float3 direction;
     float3 color;
@@ -53,6 +53,8 @@ struct GPULight {
     float  radius;
     float  width;
     float  height;
+    float  cosConeAngle;  // cos(halfAngle) for spot
+    float  cosPenumbra;   // cos(innerHalfAngle) for spot
 };
 
 struct CameraParams {

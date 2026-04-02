@@ -616,7 +616,10 @@ float SpectralIntegrator::_ShadeSpectral(
 
             if (!inShadow) {
                 float bsdf = SpectralBSDF::Evaluate(resolvedMat, N, V, L, lambda);
-                float lightRad = light.SpectralEmission(lambda);
+                // Use environment emission for dome lights, regular for others
+                float lightRad = (light.type == SpectralLight::Type::Dome)
+                    ? light.EnvironmentEmission(L, lambda)
+                    : light.SpectralEmission(lambda);
                 float atten = light.Attenuation(hitPos);
                 radiance += bsdf * lightRad * atten;
             }
@@ -730,7 +733,9 @@ float SpectralIntegrator::_ShadeSpectral(
 
                 if (!inShadow) {
                     float bsdf = SpectralBSDF::Evaluate(*bounceMat, bounceN, bounceV, L, lambda);
-                    float lightRad = light.SpectralEmission(lambda);
+                    float lightRad = (light.type == SpectralLight::Type::Dome)
+                        ? light.EnvironmentEmission(L, lambda)
+                        : light.SpectralEmission(lambda);
                     float atten = light.Attenuation(bounceOrigin);
                     bounceRadiance += bsdf * lightRad * atten;
                 }

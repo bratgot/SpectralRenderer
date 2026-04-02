@@ -362,6 +362,8 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
                 gpuLights[i].radius    = lights[i].radius;
                 gpuLights[i].width     = lights[i].width;
                 gpuLights[i].height    = lights[i].height;
+                gpuLights[i].cosConeAngle = lights[i]._cosConeAngle;
+                gpuLights[i].cosPenumbra  = lights[i]._cosPenumbra;
             }
             size_t lightBytes = gpuLights.size() * sizeof(spectral_gpu::GPULight);
             CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_lights), lightBytes));
