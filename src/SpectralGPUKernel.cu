@@ -469,10 +469,22 @@ static __forceinline__ __device__ float3 sampleTextureGPU(int texId, float2 uv)
 // Sample a random point on a light surface for soft shadows
 // ---------------------------------------------------------------------------
 static __forceinline__ __device__ float3 sampleLightDir(
-    const GPULight& light, float3 hitPos, float u1, float u2)
+    const GPULight& light, float3 hitPos, float u1, float u2, float3 surfNormal)
 {
-    if (light.type == 0 || light.type == 3)  // distant or dome
+    if (light.type == 0)  // distant
         return normalize3(neg3(light.direction));
+
+    if (light.type == 3) {  // dome — cosine-weighted hemisphere around surface normal
+        float3 N = normalize3(surfNormal);
+        float3 up2 = (fabsf(N.y) < 0.999f) ? make_float3(0,1,0) : make_float3(1,0,0);
+        float3 T = normalize3(cross3(up2, N));
+        float3 B = cross3(N, T);
+        float r = sqrtf(u1);
+        float phi = 6.28318f * u2;
+        float x = r * cosf(phi), y = r * sinf(phi);
+        float z = sqrtf(fmaxf(0.f, 1.f - u1));
+        return normalize3(make_float3(T.x*x+B.x*y+N.x*z, T.y*x+B.y*y+N.y*z, T.z*x+B.z*y+N.z*z));
+    }
 
     float3 samplePos = light.position;
 
@@ -507,7 +519,7 @@ static __forceinline__ __device__ float shadeHit(
         for (unsigned int li = 0; li < params.lightCount; ++li) {
             const GPULight& light = params.lights[li];
             // Jittered light direction for soft shadows
-            float3 L = sampleLightDir(light, hitPos, hashRNG(rngSeed++), hashRNG(rngSeed++));
+            float3 L = sampleLightDir(light, hitPos, hashRNG(rngSeed++), hashRNG(rngSeed++), N);
 
             // Shadow ray
             bool inShadow = false;

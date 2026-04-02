@@ -279,9 +279,23 @@ void SpectralRenderIop::_validate(bool forReal)
     _chanObjectId   = getChannel("other.objectId");
     _chanMaterialId = getChannel("other.materialId");
     _chanAO         = getChannel("other.ao");
+    _chanNx = getChannel("N.red");   _chanNy = getChannel("N.green");   _chanNz = getChannel("N.blue");
+    _chanPx = getChannel("P.red");   _chanPy = getChannel("P.green");   _chanPz = getChannel("P.blue");
+    _chanUu = getChannel("uv.red");  _chanUv = getChannel("uv.green");
+    _chanAlbedoR = getChannel("albedo.red"); _chanAlbedoG = getChannel("albedo.green"); _chanAlbedoB = getChannel("albedo.blue");
+    _chanDirectR = getChannel("direct.red"); _chanDirectG = getChannel("direct.green"); _chanDirectB = getChannel("direct.blue");
+    _chanIndirectR = getChannel("indirect.red"); _chanIndirectG = getChannel("indirect.green"); _chanIndirectB = getChannel("indirect.blue");
+    _chanEmissionR = getChannel("emission.red"); _chanEmissionG = getChannel("emission.green"); _chanEmissionB = getChannel("emission.blue");
     channels += _chanObjectId;
     channels += _chanMaterialId;
     if (_aoSamples > 0) channels += _chanAO;
+    channels += _chanNx; channels += _chanNy; channels += _chanNz;
+    channels += _chanPx; channels += _chanPy; channels += _chanPz;
+    channels += _chanUu; channels += _chanUv;
+    channels += _chanAlbedoR; channels += _chanAlbedoG; channels += _chanAlbedoB;
+    channels += _chanDirectR; channels += _chanDirectG; channels += _chanDirectB;
+    channels += _chanIndirectR; channels += _chanIndirectG; channels += _chanIndirectB;
+    channels += _chanEmissionR; channels += _chanEmissionG; channels += _chanEmissionB;
     info_.channels(channels);
     info_.black_outside(true);
 
@@ -405,6 +419,34 @@ void SpectralRenderIop::engine(
     writeIdChannel(_chanObjectId, _objectIdBuffer);
     writeIdChannel(_chanMaterialId, _materialIdBuffer);
     writeIdChannel(_chanAO, _aoBuffer);
+
+    // Output vector AOV channels (3 floats per pixel)
+    auto write3Channel = [&](Channel chR, Channel chG, Channel chB,
+                             const std::vector<float>& buf, int stride) {
+        if (buf.empty()) return;
+        auto writeOne = [&](Channel ch, int comp) {
+            if (!(channels & ch)) return;
+            float* out = row.writable(ch);
+            for (int px = x; px < r; ++px) {
+                if (px >= 0 && px < W && bufY >= 0 && bufY < H) {
+                    out[px] = buf[static_cast<size_t>(bufY) * W * stride + px * stride + comp];
+                } else {
+                    out[px] = 0.f;
+                }
+            }
+        };
+        writeOne(chR, 0);
+        writeOne(chG, 1);
+        if (stride >= 3) writeOne(chB, 2);
+    };
+
+    write3Channel(_chanNx, _chanNy, _chanNz, _normalBuffer, 3);
+    write3Channel(_chanPx, _chanPy, _chanPz, _posBuffer, 3);
+    write3Channel(_chanUu, _chanUv, Chan_Black, _uvBuffer, 2);
+    write3Channel(_chanAlbedoR, _chanAlbedoG, _chanAlbedoB, _albedoBuffer, 3);
+    write3Channel(_chanDirectR, _chanDirectG, _chanDirectB, _directBuffer, 3);
+    write3Channel(_chanIndirectR, _chanIndirectG, _chanIndirectB, _indirectBuffer, 3);
+    write3Channel(_chanEmissionR, _chanEmissionG, _chanEmissionB, _emissionBuffer, 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -1508,6 +1550,13 @@ void SpectralRenderIop::_EnsureFrameRendered()
     _objectIdBuffer.assign(size_t(W) * H, 0.f);
     _materialIdBuffer.assign(size_t(W) * H, 0.f);
     _aoBuffer.assign(size_t(W) * H, 1.f);  // default white (no occlusion)
+    _normalBuffer.assign(size_t(W) * H * 3, 0.f);
+    _posBuffer.assign(size_t(W) * H * 3, 0.f);
+    _uvBuffer.assign(size_t(W) * H * 2, 0.f);
+    _albedoBuffer.assign(size_t(W) * H * 3, 0.f);
+    _directBuffer.assign(size_t(W) * H * 3, 0.f);
+    _indirectBuffer.assign(size_t(W) * H * 3, 0.f);
+    _emissionBuffer.assign(size_t(W) * H * 3, 0.f);
 
     SpectralCamera cam = _camera;
     cam.imageWidth  = W;
@@ -1556,9 +1605,19 @@ void SpectralRenderIop::_EnsureFrameRendered()
     } else
 #endif
     {
+        SpectralIntegrator::AOVBuffers aovBufs;
+        aovBufs.normal   = _normalBuffer.data();
+        aovBufs.position = _posBuffer.data();
+        aovBufs.uv       = _uvBuffer.data();
+        aovBufs.albedo   = _albedoBuffer.data();
+        aovBufs.direct   = _directBuffer.data();
+        aovBufs.indirect = _indirectBuffer.data();
+        aovBufs.emission = _emissionBuffer.data();
+
         SpectralIntegrator::RenderFrame(*_scene, cam, _frameBuffer.data(),
                                          renderSpp, _depthBuffer.data(), _maxBounces,
-                                         _objectIdBuffer.data(), _materialIdBuffer.data());
+                                         _objectIdBuffer.data(), _materialIdBuffer.data(),
+                                         &aovBufs);
     }
 
     // Denoise — works for both GPU and CPU renders

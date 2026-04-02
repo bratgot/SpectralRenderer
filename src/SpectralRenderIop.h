@@ -131,10 +131,27 @@ private:
     std::vector<int>    _accSampleCount; // samples accumulated per pixel
     std::vector<float>  _aoBuffer;       // ambient occlusion per pixel
 
+    // Geometry AOV buffers (3 floats per pixel for vector channels)
+    std::vector<float>  _normalBuffer;   // world normals (Nx, Ny, Nz)
+    std::vector<float>  _posBuffer;      // world position (Px, Py, Pz)
+    std::vector<float>  _uvBuffer;       // texture coords (u, v)
+    std::vector<float>  _albedoBuffer;   // base color (r, g, b)
+    std::vector<float>  _directBuffer;   // direct lighting (r, g, b)
+    std::vector<float>  _indirectBuffer; // indirect/bounce lighting (r, g, b)
+    std::vector<float>  _emissionBuffer; // emission (r, g, b)
+
     // Custom channels
     Channel _chanObjectId   = Chan_Black;
     Channel _chanMaterialId = Chan_Black;
     Channel _chanAO         = Chan_Black;
+    // Geometry AOV channels
+    Channel _chanNx = Chan_Black, _chanNy = Chan_Black, _chanNz = Chan_Black;
+    Channel _chanPx = Chan_Black, _chanPy = Chan_Black, _chanPz = Chan_Black;
+    Channel _chanUu = Chan_Black, _chanUv = Chan_Black;
+    Channel _chanAlbedoR = Chan_Black, _chanAlbedoG = Chan_Black, _chanAlbedoB = Chan_Black;
+    Channel _chanDirectR = Chan_Black, _chanDirectG = Chan_Black, _chanDirectB = Chan_Black;
+    Channel _chanIndirectR = Chan_Black, _chanIndirectG = Chan_Black, _chanIndirectB = Chan_Black;
+    Channel _chanEmissionR = Chan_Black, _chanEmissionG = Chan_Black, _chanEmissionB = Chan_Black;
     unsigned int        _fbWidth  = 0;
     unsigned int        _fbHeight = 0;
     std::atomic<bool>   _frameReady { false };

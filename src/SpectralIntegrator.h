@@ -94,6 +94,17 @@ public:
     //   Uses std::execution::par_unseq over rows for CPU parallelism.
     //   `pixels` must be pre-allocated: width * height * 4 floats.
     // -----------------------------------------------------------------------
+    // AOV buffer struct for production passes
+    struct AOVBuffers {
+        float* normal   = nullptr;  // 3 floats per pixel (Nx,Ny,Nz)
+        float* position = nullptr;  // 3 floats per pixel (Px,Py,Pz)
+        float* uv       = nullptr;  // 2 floats per pixel (u,v)
+        float* albedo   = nullptr;  // 3 floats per pixel (r,g,b)
+        float* direct   = nullptr;  // 3 floats per pixel
+        float* indirect = nullptr;  // 3 floats per pixel
+        float* emission = nullptr;  // 3 floats per pixel
+    };
+
     static void RenderFrame(
         const SpectralScene& scene,
         const SpectralCamera& camera,
@@ -103,6 +114,7 @@ public:
         int maxBounces = 4,
         float* objectIdOut = nullptr,
         float* materialIdOut = nullptr,
+        const AOVBuffers* aovs = nullptr,
         float* aoOut = nullptr);
 
 #ifdef SPECTRAL_HAS_OPTIX
@@ -157,6 +169,13 @@ private:
                                        double u, double v);
     static GfVec3f _SkyColor(const GfVec3f& dir);
 
+    // Shading component decomposition
+    struct ShadeComponents {
+        float direct   = 0.f;  // direct lighting
+        float indirect = 0.f;  // bounce/indirect
+        float emission = 0.f;  // emissive
+    };
+
     // Spectral shading — returns spectral radiance at a single wavelength
     static float _ShadeSpectral(const SpectralTriangle& tri,
                                  double u, double v, float lambda,
@@ -167,7 +186,8 @@ private:
                                  int maxBounces,
                                  unsigned int& rngSeed,
                                  const SpectralBVH& bvh,
-                                 float rayTime = 0.f);
+                                 float rayTime = 0.f,
+                                 ShadeComponents* comps = nullptr);
     static float _SkySpectral(const GfVec3f& dir, float lambda);
 
     // Simple hash-based RNG for per-pixel, per-sample jitter

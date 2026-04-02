@@ -198,23 +198,32 @@ struct SpectralLight
     //   u1, u2: uniform random in [0,1)
     //   Returns a direction from surfacePos toward the sampled point.
     // ------------------------------------------------------------------
-    GfVec3f SampleDirection(const GfVec3f& surfacePos, float u1, float u2) const
+    GfVec3f SampleDirection(const GfVec3f& surfacePos, float u1, float u2,
+                            const GfVec3f& surfaceNormal = GfVec3f(0,1,0)) const
     {
         if (type == Type::Distant) {
             return GfVec3f(-direction[0], -direction[1], -direction[2]);
         }
 
         if (type == Type::Dome) {
-            // Cosine-weighted hemisphere for environment sampling
-            GfVec3f N(0.f, 1.f, 0.f);  // up
-            GfVec3f up = (std::abs(N[1]) < 0.999f) ? GfVec3f(0,1,0) : GfVec3f(1,0,0);
-            GfVec3f T = GfCross(up, N);
+            // Cosine-weighted hemisphere around the SURFACE NORMAL
+            GfVec3f N = surfaceNormal;
+            float nlen = N.GetLength();
+            if (nlen > 1e-6f) N /= nlen;
+            GfVec3f up2 = (std::abs(N[1]) < 0.999f) ? GfVec3f(0,1,0) : GfVec3f(1,0,0);
+            GfVec3f T = GfCross(up2, N);
             float tlen = T.GetLength();
             if (tlen > 1e-6f) T /= tlen;
             GfVec3f B = GfCross(N, T);
             float r = std::sqrt(u1);
             float phi = 6.28318f * u2;
-            return GfVec3f(T * (r * std::cos(phi)) + B * (r * std::sin(phi)) + N * std::sqrt(std::max(0.f, 1.f - u1)));
+            float x = r * std::cos(phi);
+            float y = r * std::sin(phi);
+            float z = std::sqrt(std::max(0.f, 1.f - u1));
+            GfVec3f dir = T * x + B * y + N * z;
+            float dlen = dir.GetLength();
+            if (dlen > 1e-6f) dir /= dlen;
+            return dir;
         }
 
         GfVec3f samplePos = position;

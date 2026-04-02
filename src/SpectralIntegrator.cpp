@@ -15,6 +15,11 @@
 
 PXR_NAMESPACE_OPEN_SCOPE
 
+// Forward declaration — defined later in this file
+static SpectralMaterial _ResolveMaterial(
+    const SpectralMaterial& mat, const SpectralTriangle& tri,
+    float w, float u, float v, const SpectralScene& scene);
+
 // ---------------------------------------------------------------------------
 // RenderFrame  — full image, parallel over rows
 // ---------------------------------------------------------------------------
@@ -27,6 +32,7 @@ void SpectralIntegrator::RenderFrame(
     int                   maxBounces,
     float*                objectIdOut,
     float*                materialIdOut,
+    const AOVBuffers*     aovs,
     float*                aoOut)
 {
 #ifdef SPECTRAL_HAS_EMBREE
@@ -107,6 +113,17 @@ void SpectralIntegrator::RenderFrame(
         std::vector<int>   objIdBuf(numPixels, 0);
         std::vector<int>   matIdBuf(numPixels, 0);
 
+        // Shading component accumulators (XYZ per component)
+        bool trackDirect   = aovs && aovs->direct;
+        bool trackIndirect = aovs && aovs->indirect;
+        bool trackEmission = aovs && aovs->emission;
+        std::vector<float> accDirectX, accDirectY, accDirectZ;
+        std::vector<float> accIndirectX, accIndirectY, accIndirectZ;
+        std::vector<float> accEmissionX, accEmissionY, accEmissionZ;
+        if (trackDirect)   { accDirectX.resize(numPixels,0); accDirectY.resize(numPixels,0); accDirectZ.resize(numPixels,0); }
+        if (trackIndirect) { accIndirectX.resize(numPixels,0); accIndirectY.resize(numPixels,0); accIndirectZ.resize(numPixels,0); }
+        if (trackEmission) { accEmissionX.resize(numPixels,0); accEmissionY.resize(numPixels,0); accEmissionZ.resize(numPixels,0); }
+
         // Split into adaptive passes
         const int batchSize = std::max(4, spp / 4);
         const float adaptThreshold = camera.adaptiveThreshold;
@@ -157,6 +174,7 @@ void SpectralIntegrator::RenderFrame(
                             SpectralBVH::Hit hit = bvh.Intersect(ray, rayTime);
 
                             float radiance;
+                            ShadeComponents comps;
                             if (hit.valid()) {
                                 const SpectralMaterial& mat = scene.GetMaterial(hit.tri->materialId);
                                 GfVec3d worldHit = ray.GetStartPoint() + hit.t * ray.GetDirection();
@@ -168,7 +186,7 @@ void SpectralIntegrator::RenderFrame(
                                     static_cast<double>(hit.u),
                                     static_cast<double>(hit.v),
                                     lambda, mat, scene, hitPos, rayDir,
-                                    maxBounces, bounceSeed, bvh, rayTime);
+                                    maxBounces, bounceSeed, bvh, rayTime, &comps);
 
                                 GfVec3d viewHit = worldToView.Transform(worldHit);
                                 float camZ = static_cast<float>(-viewHit[2]);
@@ -176,6 +194,40 @@ void SpectralIntegrator::RenderFrame(
                                 if (objIdBuf[pixIdx] == 0) {
                                     objIdBuf[pixIdx] = hit.tri->objectId;
                                     matIdBuf[pixIdx] = hit.tri->materialId;
+
+                                    // Geometry AOVs — first hit only
+                                    if (aovs) {
+                                        float w = 1.f - float(hit.u) - float(hit.v);
+                                        GfVec3f N = hit.tri->n0 * w + hit.tri->n1 * float(hit.u) + hit.tri->n2 * float(hit.v);
+                                        float nlen = N.GetLength();
+                                        if (nlen > 1e-6f) N /= nlen;
+                                        GfVec3f V = GfVec3f(-rayDir);
+                                        float vlen = V.GetLength();
+                                        if (vlen > 1e-6f) V /= vlen;
+                                        if (N[0]*V[0]+N[1]*V[1]+N[2]*V[2] < 0.f) N = -N;
+
+                                        if (aovs->normal) {
+                                            aovs->normal[pixIdx*3+0] = N[0];
+                                            aovs->normal[pixIdx*3+1] = N[1];
+                                            aovs->normal[pixIdx*3+2] = N[2];
+                                        }
+                                        if (aovs->position) {
+                                            aovs->position[pixIdx*3+0] = hitPos[0];
+                                            aovs->position[pixIdx*3+1] = hitPos[1];
+                                            aovs->position[pixIdx*3+2] = hitPos[2];
+                                        }
+                                        if (aovs->uv) {
+                                            GfVec2f uv = hit.tri->uv0 * w + hit.tri->uv1 * float(hit.u) + hit.tri->uv2 * float(hit.v);
+                                            aovs->uv[pixIdx*2+0] = uv[0];
+                                            aovs->uv[pixIdx*2+1] = uv[1];
+                                        }
+                                        if (aovs->albedo) {
+                                            SpectralMaterial resolved = _ResolveMaterial(mat, *hit.tri, w, float(hit.u), float(hit.v), scene);
+                                            aovs->albedo[pixIdx*3+0] = resolved.baseColor[0];
+                                            aovs->albedo[pixIdx*3+1] = resolved.baseColor[1];
+                                            aovs->albedo[pixIdx*3+2] = resolved.baseColor[2];
+                                        }
+                                    }
                                 }
                             } else {
                                 radiance = 0.f;
@@ -186,6 +238,20 @@ void SpectralIntegrator::RenderFrame(
                             accY[pixIdx] += xyz[1];
                             accZ[pixIdx] += xyz[2];
                             accCount[pixIdx]++;
+
+                            // Accumulate shading components
+                            if (trackDirect) {
+                                GfVec3f d = SpectralSpectrum::RadianceToXYZ(comps.direct, lambda);
+                                accDirectX[pixIdx] += d[0]; accDirectY[pixIdx] += d[1]; accDirectZ[pixIdx] += d[2];
+                            }
+                            if (trackIndirect) {
+                                GfVec3f i = SpectralSpectrum::RadianceToXYZ(comps.indirect, lambda);
+                                accIndirectX[pixIdx] += i[0]; accIndirectY[pixIdx] += i[1]; accIndirectZ[pixIdx] += i[2];
+                            }
+                            if (trackEmission) {
+                                GfVec3f e = SpectralSpectrum::RadianceToXYZ(comps.emission, lambda);
+                                accEmissionX[pixIdx] += e[0]; accEmissionY[pixIdx] += e[1]; accEmissionZ[pixIdx] += e[2];
+                            }
 
                             // Track luminance variance (Y channel ≈ luminance)
                             float lum = xyz[1];
@@ -237,6 +303,20 @@ void SpectralIntegrator::RenderFrame(
             if (depthOut) depthOut[i] = depthBuf[i];
             if (objectIdOut) objectIdOut[i] = static_cast<float>(objIdBuf[i]);
             if (materialIdOut) materialIdOut[i] = static_cast<float>(matIdBuf[i]);
+
+            // Write shading component AOVs
+            if (trackDirect) {
+                GfVec3f c = SpectralSpectrum::XYZtoLinearRGB(accDirectX[i]*invN, accDirectY[i]*invN, accDirectZ[i]*invN);
+                aovs->direct[i*3+0] = std::max(0.f,c[0]); aovs->direct[i*3+1] = std::max(0.f,c[1]); aovs->direct[i*3+2] = std::max(0.f,c[2]);
+            }
+            if (trackIndirect) {
+                GfVec3f c = SpectralSpectrum::XYZtoLinearRGB(accIndirectX[i]*invN, accIndirectY[i]*invN, accIndirectZ[i]*invN);
+                aovs->indirect[i*3+0] = std::max(0.f,c[0]); aovs->indirect[i*3+1] = std::max(0.f,c[1]); aovs->indirect[i*3+2] = std::max(0.f,c[2]);
+            }
+            if (trackEmission) {
+                GfVec3f c = SpectralSpectrum::XYZtoLinearRGB(accEmissionX[i]*invN, accEmissionY[i]*invN, accEmissionZ[i]*invN);
+                aovs->emission[i*3+0] = std::max(0.f,c[0]); aovs->emission[i*3+1] = std::max(0.f,c[1]); aovs->emission[i*3+2] = std::max(0.f,c[2]);
+            }
         }
 
         // ---- Ambient occlusion pass ----
@@ -555,7 +635,8 @@ float SpectralIntegrator::_ShadeSpectral(
     const SpectralTriangle& tri, double u, double v, float lambda,
     const SpectralMaterial& mat, const SpectralScene& scene,
     const GfVec3f& hitPos, const GfVec3f& rayDir, int maxBounces,
-    unsigned int& rngSeed, const SpectralBVH& bvh, float rayTime)
+    unsigned int& rngSeed, const SpectralBVH& bvh, float rayTime,
+    ShadeComponents* comps)
 {
     float w  = float(1.0 - u - v);
     float uf = float(u);
@@ -585,7 +666,7 @@ float SpectralIntegrator::_ShadeSpectral(
             // Soft shadows: jitter light sample position for area lights
             float su1 = _Hash(rngSeed++);
             float su2 = _Hash(rngSeed++);
-            GfVec3f L = light.SampleDirection(hitPos, su1, su2);
+            GfVec3f L = light.SampleDirection(hitPos, su1, su2, N);
 
             // Shadow ray — offset origin along normal to clear surface
             bool inShadow = false;
@@ -621,14 +702,18 @@ float SpectralIntegrator::_ShadeSpectral(
                     ? light.EnvironmentEmission(L, lambda)
                     : light.SpectralEmission(lambda);
                 float atten = light.Attenuation(hitPos);
-                radiance += bsdf * lightRad * atten;
+                float contrib = bsdf * lightRad * atten;
+                radiance += contrib;
+                if (comps) comps->direct += contrib;
             }
         }
         // No ambient fill — pure direct lighting
     }
     // No sky fill — pure direct + bounce lighting only
 
-    radiance += resolvedMat.SpectralEmission(lambda);
+    float emitVal = resolvedMat.SpectralEmission(lambda);
+    radiance += emitVal;
+    if (comps) comps->emission += emitVal;
 
     // ---- Bounce rays ----
     if (maxBounces <= 0) return radiance;
@@ -709,7 +794,7 @@ float SpectralIntegrator::_ShadeSpectral(
             for (const SpectralLight& light : scene.GetLights()) {
                 float bsu1 = _Hash(rngSeed++);
                 float bsu2 = _Hash(rngSeed++);
-                GfVec3f L = light.SampleDirection(bounceOrigin, bsu1, bsu2);
+                GfVec3f L = light.SampleDirection(bounceOrigin, bsu1, bsu2, bounceN);
 
                 bool inShadow = false;
                 GfVec3f sOrig = bounceOrigin + bounceN * 0.01f;
@@ -747,6 +832,7 @@ float SpectralIntegrator::_ShadeSpectral(
             bounceRadiance += bounceMat->SpectralEmission(lambda);
         }
         radiance += pathThroughput * bounceRadiance;
+        if (comps) comps->indirect += pathThroughput * bounceRadiance;
     }
 
     return radiance;
