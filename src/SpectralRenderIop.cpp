@@ -153,9 +153,6 @@ void SpectralRenderIop::knobs(Knob_Callback f)
     Tooltip(f, "USD prim path to a specific camera,<br>"
                "e.g. /World/Camera1. Leave blank to<br>"
                "auto-detect the first camera in the stage.");
-    Int_knob(f, &_frame, "frame", "frame");
-    Tooltip(f, "Frame number to render. USD time code<br>"
-               "is derived from this value.");
     Format_knob(f, &_outputFormat, "format", "format");
     Tooltip(f, "Output image resolution. If a background<br>"
                "input is connected, its format is used instead.");
@@ -226,11 +223,17 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                    "will be sharp; nearer and farther objects blur.");
         Divider(f, "Caustics");
         Bool_knob(f, &_caustics, "caustics", "enable caustics");
-        Tooltip(f, "Manifold Next Event Estimation (MNEE).<br>"
-                   "Finds specular refraction paths from lights<br>"
-                   "through glass surfaces to the shading point.<br>"
-                   "Each wavelength refracts differently via dispersion,<br>"
-                   "producing sharp rainbow caustic patterns.");
+        Tooltip(f, "Spectral caustics via forward specular trace.<br>"
+                   "Traces rays from lights through glass surfaces<br>"
+                   "with per-wavelength Snell's law refraction.<br>"
+                   "Handles multi-interface geometry (prisms, lenses).<br>"
+                   "Use SphereLight or DistantLight (not DomeLight).<br>"
+                   "Glass must have Abbe number > 0 for rainbow effect.");
+        Float_knob(f, &_causticRadius, "caustic_radius", "caustic radius");
+        SetRange(f, 0.1f, 10.f);
+        Tooltip(f, "Acceptance radius for forward-traced caustic rays.<br>"
+                   "Larger = brighter but softer caustics.<br>"
+                   "Smaller = sharper but dimmer. Default 0.5.");
     }
     EndGroup(f);
 
@@ -310,43 +313,74 @@ void SpectralRenderIop::knobs(Knob_Callback f)
     }
     EndGroup(f);
 
-    BeginClosedGroup(f, "spectral_engine", "Spectral rendering engine");
+    BeginClosedGroup(f, "spectral_engine", "Spectral rendering engine — algorithms and equations");
     {
         Text_knob(f,
             "<b>Hero wavelength spectral sampling</b><br>"
-            "Samples the visible spectrum 380-780nm using CIE 1931 2-degree standard observer colour<br>"
-            "matching functions. Each ray carries a single wavelength for efficient spectral Monte Carlo<br>"
-            "integration with physically correct colour reproduction via XYZ to linear RGB conversion.<br>"
+            "Samples visible spectrum 380-780nm via CIE 1931 2-degree standard observer.<br>"
+            "Spectral radiance L(lambda) integrated to XYZ: X = integral L(l)*x_bar(l) dl<br>"
+            "XYZ to linear sRGB via 3x3 matrix. Monte Carlo: one wavelength per ray.<br>"
             "<br>"
-            "<b>Disney BSDF with GGX microfacet model</b><br>"
-            "Physically-based shading model supporting metallic and dielectric workflows with importance-sampled<br>"
-            "GGX specular lobe, Smith geometry term, and energy-conserving Disney diffuse. Mixed GGX and<br>"
-            "cosine hemisphere sampling weighted by roughness and metallic for optimal noise reduction.<br>"
+            "<b>Disney BSDF with GGX microfacet (Burley 2012, Walter 2007)</b><br>"
+            "f = f_diff + f_spec. Diffuse: f_d = (1-metal)*baseColor/pi * F_disney.<br>"
+            "Specular: f_s = D*G*F / (4*NdotV*NdotL). D = GGX: a^2 / (pi*(NdotH^2*(a^2-1)+1)^2).<br>"
+            "G = Smith-GGX height-correlated. F = Schlick or exact conductor.<br>"
             "<br>"
-            "<b>Dispersion and thin-film interference</b><br>"
-            "Wavelength-dependent IOR via Cauchy dispersion model controlled by Abbe number. Snell's law<br>"
-            "refraction with exact Fresnel dielectric equations for accurate reflect/refract probability.<br>"
-            "Fabry-Perot thin-film cosine modulation of reflectance for iridescent coating effects.<br>"
+            "<b>Multiscatter GGX energy compensation (Kulla-Conty 2017)</b><br>"
+            "Single-scatter GGX loses energy at high roughness. Compensation lobe:<br>"
+            "f_ms = F_avg * (1-Ess(V)) * (1-Ess(L)) / (pi*(1-Ess_avg)).<br>"
+            "Ess = directional albedo from analytical fit. Adds ~40-70% energy at rough=1.<br>"
+            "<br>"
+            "<b>Complex IOR metals (Fresnel conductor)</b><br>"
+            "Exact unpolarized reflectance: F = (Rs+Rp)/2 using spectral (n,k).<br>"
+            "Rs = |cosI - n*cosT|^2 / |cosI + n*cosT|^2 (complex arithmetic).<br>"
+            "Measured data for Au, Cu, Ag, Al, Fe, Ti from Palik's Handbook.<br>"
+            "9-point spectral sampling 380-780nm with linear interpolation.<br>"
+            "<br>"
+            "<b>Multiple Importance Sampling (Veach 1995)</b><br>"
+            "Combines light sampling (NEE) and BSDF sampling with power heuristic:<br>"
+            "w(pA) = pA^2 / (pA^2 + pB^2). Light PDF: dome=cosine/pi, sphere=1/solidAngle,<br>"
+            "rect=dist^2/(area*cosTheta). BSDF PDF: mixed GGX + cosine hemisphere.<br>"
+            "<br>"
+            "<b>Dispersion (Cauchy model via Abbe number)</b><br>"
+            "n(lambda) = n_d + (n_d-1)/V_d * (587.6-lambda)/(656.3-486.1).<br>"
+            "Snell's law: n1*sin(theta1) = n2*sin(theta2) applied per-wavelength.<br>"
+            "Exact Fresnel dielectric for reflect/refract probability.<br>"
+            "<br>"
+            "<b>Spectral caustics (forward specular trace)</b><br>"
+            "For each light: trace ray toward shading point through glass.<br>"
+            "Refract at each interface with wavelength-dependent IOR (Abbe).<br>"
+            "Each wavelength exits at a different angle -> rainbow separation.<br>"
+            "Multi-interface: handles prisms, lenses, gems (up to 8 bounces).<br>"
+            "<br>"
+            "<b>Thin-film interference (Fabry-Perot)</b><br>"
+            "Phase: delta = 4*pi*n_film*d*cos(theta_t) / lambda.<br>"
+            "Reflectance modulation: F_film = F * (1 + 0.5*cos(delta)).<br>"
+            "Produces iridescent coating effects (soap bubbles, oil slicks).<br>"
             "<br>"
             "<b>Acceleration structures</b><br>"
-            "CPU path uses Embree 4 BVH with native two-timestep motion blur support. GPU path uses<br>"
-            "OptiX 8.1 with RTX hardware-accelerated ray tracing via geometry acceleration structures.<br>"
-            "Both paths support multi-bounce path tracing with Russian roulette termination.<br>"
+            "CPU: Embree 4 BVH with two-timestep motion blur interpolation.<br>"
+            "GPU: OptiX 8.1 GAS with RTX hardware RT cores.<br>"
+            "Multi-bounce path tracing. Russian roulette: P_rr = min(0.95, throughput).<br>"
             "<br>"
-            "<b>Adaptive and blue-noise sampling</b><br>"
-            "Per-pixel luminance variance tracking using Welford's online algorithm. Converged pixels skip<br>"
-            "further sampling across multi-pass batches. R2 plastic constant low-discrepancy sequence with<br>"
-            "per-pixel Cranley-Patterson rotation provides decorrelated blue-noise sample distribution.<br>"
+            "<b>Adaptive sampling (Welford's online algorithm)</b><br>"
+            "Per-pixel: M2 += (lum - mean) * (lum - new_mean). Variance = M2/(n-1).<br>"
+            "Converged when stddev less than threshold * max(mean, 0.001). Multi-pass batches.<br>"
             "<br>"
-            "<b>Environment lighting</b><br>"
-            "HDRI lat-long environment maps with cosine-weighted hemisphere sampling oriented to surface<br>"
-            "normals at each shading point. Per-wavelength RGB-to-spectral Gaussian basis conversion<br>"
-            "provides physically correct spectral environment illumination from standard HDR images.<br>"
+            "<b>R2 quasi-random sampling</b><br>"
+            "Plastic constant: phi2 = 1.3247..., a1 = 1/phi2, a2 = 1/phi2^2.<br>"
+            "Sample n: x = frac(offset + n*a1), y = frac(offset + n*a2).<br>"
+            "Per-pixel Cranley-Patterson rotation for decorrelation.<br>"
+            "<br>"
+            "<b>DOF thin lens model</b><br>"
+            "Lens radius R = focalLength / (2 * fStop). Uniform disk sampling.<br>"
+            "Origin offset: O' = O + right*dx + up*dy. Dir: focalPoint - O'.<br>"
+            "Focus plane at camera.focusDistance along view axis.<br>"
             "<br>"
             "<b>Render-time displacement</b><br>"
-            "OpenSubdiv Catmull-Clark tessellation with face-varying UV refinement through subdivision<br>"
-            "levels. Per-vertex displacement along normals sampled from texture map with bilinear filtering.<br>"
-            "Automatic subdivision applied to non-subdivided meshes when displacement is present."
+            "OpenSubdiv Catmull-Clark level 2 with face-varying UV refinement.<br>"
+            "Per-vertex: P' = P + N * (texSample - midpoint) * scale.<br>"
+            "Normals recomputed from displaced geometry via area-weighted face normals."
         );
     }
     EndGroup(f);
@@ -389,6 +423,13 @@ int SpectralRenderIop::knob_changed(Knob* k)
 // ---------------------------------------------------------------------------
 void SpectralRenderIop::_validate(bool forReal)
 {
+    // Read current frame from Nuke's timeline
+    int currentFrame = static_cast<int>(outputContext().frame());
+    if (currentFrame != _frame) {
+        _frame = currentFrame;
+        _frameReady.store(false);
+        _progressiveSppDone = 0;
+    }
     // ------------------------------------------------------------------
     // Determine output format:
     //   Priority: BG input format > format knob > fallback
@@ -1331,6 +1372,47 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                                         }
                                     }
                                 }
+
+                                // Read base color texture from tex Iop pipe
+                                if (mat.baseColorTexId < 0 && entry.second.texIop) {
+                                    Iop* texIop = dynamic_cast<Iop*>(entry.second.texIop);
+                                    if (texIop) {
+                                        try {
+                                            texIop->validate(true);
+                                            const int texW = texIop->info().format().width();
+                                            const int texH = texIop->info().format().height();
+                                            if (texW > 0 && texH > 0) {
+                                                pxr::SpectralTexture tex;
+                                                tex._width = texW;
+                                                tex._height = texH;
+                                                tex._channels = 3;
+                                                tex._pixels.resize(size_t(texW) * texH * 3);
+                                                tex._path = "tex_iop";
+                                                texIop->request(0, 0, texW, texH, Mask_RGB, 1);
+                                                for (int y = 0; y < texH; ++y) {
+                                                    Row row(0, texW);
+                                                    texIop->get(y, 0, texW, Mask_RGB, row);
+                                                    const float* rp = row[Chan_Red];
+                                                    const float* gp = row[Chan_Green];
+                                                    const float* bp = row[Chan_Blue];
+                                                    int storeY = texH - 1 - y;
+                                                    for (int x = 0; x < texW; ++x) {
+                                                        size_t idx = (size_t(storeY) * texW + x) * 3;
+                                                        tex._pixels[idx+0] = rp ? rp[x] : 0.f;
+                                                        tex._pixels[idx+1] = gp ? gp[x] : 0.f;
+                                                        tex._pixels[idx+2] = bp ? bp[x] : 0.f;
+                                                    }
+                                                }
+                                                mat.baseColorTexId = _scene->AddTexture(std::move(tex));
+                                                fprintf(stderr, "SpectralRender: base color from tex pipe '%s' (%dx%d, id=%d)\n",
+                                                        texIop->node_name(), texW, texH, mat.baseColorTexId);
+                                            }
+                                        } catch (...) {
+                                            fprintf(stderr, "SpectralRender: failed to read texture Iop\n");
+                                        }
+                                    }
+                                }
+
                                 if (mat.abbeNumber > 0.f || mat.thinFilmThickness > 0.f
                                     || mat.displacementScale > 0.f) {
                                     fprintf(stderr, "SpectralRender: spectral props from '%s'"

@@ -27,9 +27,15 @@ class HDSPECTRAL_API SpectralSurfaceOp : public ShaderOp
 public:
     explicit SpectralSurfaceOp(Node* node);
 
-    int minimum_inputs() const override { return 0; }
-    int maximum_inputs() const override { return 1; }
-    const char* input_label(int idx, char*) const override { return idx == 0 ? "disp" : ""; }
+    int minimum_inputs() const override { return 2; }
+    int maximum_inputs() const override { return 2; }
+    const char* input_label(int idx, char*) const override {
+        switch(idx) {
+            case 0: return "tex";
+            case 1: return "disp";
+            default: return "";
+        }
+    }
     bool test_input(int idx, Op* op) const override;
 
     const char* Class()     const override { return CLASS; }
@@ -89,7 +95,8 @@ public:
         float displacementMidpoint = 0.0f;
         std::string displacementFile;
         int metalType = 0;
-        Op* dispIop = nullptr;  // displacement Iop input (if connected)
+        Op* dispIop = nullptr;
+        Op* texIop  = nullptr;   // base color texture Iop
     };
     static std::unordered_map<std::string, SpectralParams>& GetRegistry();
     void RegisterParams();

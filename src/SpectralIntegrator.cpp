@@ -721,14 +721,27 @@ float SpectralIntegrator::_ShadeSpectral(
             float su2 = _Hash(rngSeed++);
             GfVec3f L = light.SampleDirection(hitPos, su1, su2, N);
 
-            // Shadow ray
+            // Shadow ray — trace through glass (transparent shadows)
             bool inShadow = false;
+            float shadowTransmit = 1.f;
             GfVec3f shadowOrigin = hitPos + N * 0.01f;
-            GfRay shadowRay;
-            shadowRay.SetPointAndDirection(GfVec3d(shadowOrigin), GfVec3d(L));
-            SpectralBVH::Hit shadowHit = bvh.Intersect(shadowRay, rayTime);
+            for (int shadowBounce = 0; shadowBounce < 8; ++shadowBounce) {
+                GfRay shadowRay;
+                shadowRay.SetPointAndDirection(GfVec3d(shadowOrigin), GfVec3d(L));
+                SpectralBVH::Hit shadowHit = bvh.Intersect(shadowRay, rayTime);
+                if (!shadowHit.valid()) break;  // reached light
 
-            if (shadowHit.valid()) {
+                const SpectralMaterial& shadowMat = scene.GetMaterial(shadowHit.tri->materialId);
+
+                // Glass: transmit through with Fresnel loss
+                if (shadowMat.opacity < 0.99f && shadowMat.metallic < 0.5f) {
+                    shadowTransmit *= (1.f - shadowMat.opacity) * 0.95f;
+                    if (shadowTransmit < 0.01f) { inShadow = true; break; }
+                    shadowOrigin = GfVec3f(GfVec3d(shadowOrigin) + shadowHit.t * GfVec3d(L)) + L * 0.02f;
+                    continue;  // keep tracing
+                }
+
+                // Opaque blocker
                 GfVec3f shadowN = shadowHit.tri->faceNormal;
                 float hitFacing = shadowN[0]*L[0] + shadowN[1]*L[1] + shadowN[2]*L[2];
                 if (hitFacing < 0.f) {
@@ -740,6 +753,7 @@ float SpectralIntegrator::_ShadeSpectral(
                         inShadow = (shadowHit.t < lightDist);
                     }
                 }
+                break;
             }
 
             if (!inShadow) {
@@ -749,191 +763,162 @@ float SpectralIntegrator::_ShadeSpectral(
                     : light.SpectralEmission(lambda);
                 float atten = light.Attenuation(hitPos);
 
-                // MIS weight: light sampling strategy
                 float pdfLight = light.SamplePdf(hitPos, L, N);
                 float pdfBsdf  = SpectralBSDF::Pdf(resolvedMat, N, V, L);
                 float misW = (pdfLight > 0.f)
                     ? SpectralBSDF::MISWeight(pdfLight, pdfBsdf)
-                    : 1.f;  // delta lights (distant, point) get full weight
+                    : 1.f;
 
-                float contrib = bsdf * lightRad * atten * misW;
+                float contrib = bsdf * lightRad * atten * misW * shadowTransmit;
                 radiance += contrib;
                 if (comps) comps->direct += contrib;
             }
         }
     }
 
-    // ---- MNEE: Manifold Next Event Estimation for specular caustics ----
-    // For each light, probe for specular surfaces between hit point and light.
-    // If found, use Newton iteration to find the refraction path that connects
-    // the shading point to the light through the glass. Each wavelength gets
-    // a different solution point due to dispersion → rainbow caustics.
-    if (photonMap) {  // reuse the caustics enable flag (photonMap != nullptr)
+    // ---- Spectral caustics via forward specular trace ----
+    // For each light: fire a fan of rays through nearby glass.
+    // Each ray refracts with wavelength-dependent IOR (Abbe dispersion).
+    // Rays that exit glass and land near P contribute caustic light.
+    // Multiple probes increase the chance of finding the caustic pattern.
+    if (photonMap) {  // reuse caustics enable flag
+        const int numProbes = 16;  // rays per light
         for (const SpectralLight& light : scene.GetLights()) {
             if (light.type == SpectralLight::Type::Dome) continue;
 
             GfVec3f lightPos = light.position;
+            GfVec3f lightDir;
             if (light.type == SpectralLight::Type::Distant) {
-                // Place virtual light far along direction
-                lightPos = hitPos - light.direction * 10000.f;
+                lightDir = GfVec3f(-light.direction[0], -light.direction[1], -light.direction[2]);
+                float dl = lightDir.GetLength();
+                if (dl > 1e-6f) lightDir /= dl;
+                lightPos = hitPos - lightDir * 1000.f;
+            } else {
+                lightDir = hitPos - lightPos;
+                float dl = lightDir.GetLength();
+                if (dl < 1e-4f) continue;
+                lightDir /= dl;
             }
 
-            // Probe: cast ray from P toward light, look for glass
-            GfVec3f toLight = lightPos - hitPos;
-            float lightDist = toLight.GetLength();
-            if (lightDist < 1e-4f) continue;
-            GfVec3f probeDir = toLight / lightDist;
+            // Build tangent frame around light direction
+            GfVec3f up2 = (std::abs(lightDir[1]) < 0.999f) ? GfVec3f(0,1,0) : GfVec3f(1,0,0);
+            GfVec3f tanU = GfCross(up2, lightDir);
+            float tul = tanU.GetLength();
+            if (tul > 1e-6f) tanU /= tul;
+            GfVec3f tanV = GfCross(lightDir, tanU);
 
-            GfRay probeRay;
-            probeRay.SetPointAndDirection(GfVec3d(hitPos + N * 0.02f), GfVec3d(probeDir));
-            SpectralBVH::Hit probeHit = bvh.Intersect(probeRay, rayTime);
+            for (int probe = 0; probe < numProbes; ++probe) {
+                unsigned int pseed = rngSeed + probe * 3u + 7000u;
+                float pu = _Hash(pseed);
+                float pv = _Hash(pseed + 1u);
 
-            if (!probeHit.valid()) continue;
-            if (probeHit.t > lightDist) continue;  // no glass between P and L
+                // Spread over a cone — wider angle to find caustic patterns
+                float spreadAngle = 0.15f;  // ~8.5 degrees
+                float dx = (pu - 0.5f) * spreadAngle;
+                float dy = (pv - 0.5f) * spreadAngle;
+                GfVec3f traceDir = lightDir + tanU * dx + tanV * dy;
+                float tdl = traceDir.GetLength();
+                if (tdl > 1e-6f) traceDir /= tdl;
 
-            const SpectralMaterial& specMat = scene.GetMaterial(probeHit.tri->materialId);
-            bool isSpecular = (specMat.opacity < 0.99f && specMat.metallic < 0.5f);
-            if (!isSpecular) continue;
+                GfVec3f pos = lightPos;
+                GfVec3f dir = traceDir;
+                float power = 1.f / float(numProbes);
+                bool passedThroughGlass = false;
+                bool entering = true;
 
-            // Found glass — compute wavelength-dependent IOR
-            float ior = specMat.ior;
-            if (specMat.abbeNumber > 0.f) {
-                float disp = (ior - 1.f) / specMat.abbeNumber;
-                float dL = (587.6f - lambda) / (656.3f - 486.1f);
-                ior = ior + disp * dL;
-            }
+                for (int bounce = 0; bounce < 8; ++bounce) {
+                    GfRay ray;
+                    ray.SetPointAndDirection(GfVec3d(pos), GfVec3d(dir));
+                    SpectralBVH::Hit bhit = bvh.Intersect(ray, rayTime);
+                    if (!bhit.valid()) break;
 
-            // Initial specular point
-            GfVec3f S = hitPos + N * 0.02f + probeDir * float(probeHit.t);
-            float bw = 1.f - float(probeHit.u) - float(probeHit.v);
-            GfVec3f specN = probeHit.tri->n0 * bw
-                          + probeHit.tri->n1 * float(probeHit.u)
-                          + probeHit.tri->n2 * float(probeHit.v);
-            float snLen = specN.GetLength();
-            if (snLen > 1e-6f) specN /= snLen;
+                    GfVec3f bHitPos = GfVec3f(GfVec3d(pos) + bhit.t * GfVec3d(dir));
+                    float bw = 1.f - float(bhit.u) - float(bhit.v);
+                    GfVec3f bN = bhit.tri->n0 * bw
+                               + bhit.tri->n1 * float(bhit.u)
+                               + bhit.tri->n2 * float(bhit.v);
+                    float bnLen = bN.GetLength();
+                    if (bnLen > 1e-6f) bN /= bnLen;
 
-            // Orient specular normal toward the shading point
-            GfVec3f fromP = hitPos - S;
-            if (fromP[0]*specN[0] + fromP[1]*specN[1] + fromP[2]*specN[2] < 0.f)
-                specN = -specN;
+                    const SpectralMaterial& bMat = scene.GetMaterial(bhit.tri->materialId);
+                    bool isGlass = (bMat.opacity < 0.99f && bMat.metallic < 0.5f);
 
-            // Newton iteration on generalized half-vector constraint
-            bool converged = false;
-            float eta = 1.f / ior;  // entering glass from air
+                    if (!isGlass) {
+                        if (passedThroughGlass) {
+                            GfVec3f diff = bHitPos - hitPos;
+                            float dist2 = diff[0]*diff[0] + diff[1]*diff[1] + diff[2]*diff[2];
+                            float acceptR = gatherRadius;
+                            if (dist2 < acceptR * acceptR) {
+                                GfVec3f L_dir = GfVec3f(-dir[0], -dir[1], -dir[2]);
+                                float ldl = L_dir.GetLength();
+                                if (ldl > 1e-6f) L_dir /= ldl;
+                                float NdotCL = N[0]*L_dir[0] + N[1]*L_dir[1] + N[2]*L_dir[2];
+                                if (NdotCL > 0.f) {
+                                    float bsdfVal = SpectralBSDF::Evaluate(resolvedMat, N, V, L_dir, lambda);
+                                    float lightRad = light.SpectralEmission(lambda);
+                                    float atten = light.Attenuation(bHitPos);
+                                    // Weight by proximity (closer = stronger)
+                                    float proxW = 1.f - dist2 / (acceptR * acceptR);
+                                    float causticContrib = bsdfVal * power * lightRad * atten * proxW;
+                                    radiance += causticContrib;
+                                    if (comps) comps->direct += causticContrib;
+                                }
+                            }
+                        }
+                        break;
+                    }
 
-            for (int iter = 0; iter < 15; ++iter) {
-                GfVec3f wi = S - hitPos;
-                float wiLen = wi.GetLength();
-                if (wiLen < 1e-6f) break;
-                wi /= wiLen;
+                    // Glass interface — refract with spectral dispersion
+                    passedThroughGlass = true;
+                    GfVec3f bV = GfVec3f(-dir[0], -dir[1], -dir[2]);
+                    float bvLen = bV.GetLength();
+                    if (bvLen > 1e-6f) bV /= bvLen;
+                    float bNdotV = bN[0]*bV[0] + bN[1]*bV[1] + bN[2]*bV[2];
+                    entering = (bNdotV > 0.f);
+                    if (bNdotV < 0.f) bN = -bN;
 
-                GfVec3f wo = lightPos - S;
-                float woLen = wo.GetLength();
-                if (woLen < 1e-6f) break;
-                wo /= woLen;
+                    float ior = bMat.ior;
+                    if (bMat.abbeNumber > 0.f) {
+                        float disp = (ior - 1.f) / bMat.abbeNumber;
+                        float dL = (587.6f - lambda) / (656.3f - 486.1f);
+                        ior = ior + disp * dL;
+                    }
 
-                // Generalized half-vector for refraction: h = -(wi + eta*wo)
-                GfVec3f h = GfVec3f(-(wi[0] + eta * wo[0]),
-                                     -(wi[1] + eta * wo[1]),
-                                     -(wi[2] + eta * wo[2]));
-                float hLen = h.GetLength();
-                if (hLen < 1e-8f) break;
-                h /= hLen;
+                    float eta = entering ? (1.f / ior) : ior;
+                    float cosI = std::abs(bN[0]*bV[0] + bN[1]*bV[1] + bN[2]*bV[2]);
+                    float sinT2 = eta * eta * (1.f - cosI * cosI);
 
-                // Constraint: h should equal specN (tangential error should be zero)
-                float hDotN = h[0]*specN[0] + h[1]*specN[1] + h[2]*specN[2];
-                GfVec3f tangErr = GfVec3f(h[0] - specN[0] * hDotN,
-                                          h[1] - specN[1] * hDotN,
-                                          h[2] - specN[2] * hDotN);
-                float errLen = tangErr.GetLength();
+                    float F;
+                    if (sinT2 > 1.f) { F = 1.f; }
+                    else {
+                        float cosT = std::sqrt(1.f - sinT2);
+                        float rS = (cosI - ior * cosT) / (cosI + ior * cosT);
+                        float rP = (ior * cosI - cosT) / (ior * cosI + cosT);
+                        F = 0.5f * (rS * rS + rP * rP);
+                    }
+                    power *= (1.f - F);
 
-                if (errLen < 1e-5f) {
-                    converged = true;
-                    break;
+                    GfVec3f geoN = entering ? bN : -bN;
+                    if (sinT2 < 1.f) {
+                        float cosT = std::sqrt(1.f - sinT2);
+                        dir = GfVec3f(-bV[0]*eta + geoN[0]*(eta*cosI - cosT),
+                                      -bV[1]*eta + geoN[1]*(eta*cosI - cosT),
+                                      -bV[2]*eta + geoN[2]*(eta*cosI - cosT));
+                        float ddl = dir.GetLength();
+                        if (ddl > 1e-6f) dir /= ddl;
+                        pos = bHitPos - bN * 0.01f;
+                    } else {
+                        float VdotN = bV[0]*bN[0] + bV[1]*bN[1] + bV[2]*bN[2];
+                        dir = GfVec3f(bN[0]*2.f*VdotN - bV[0],
+                                      bN[1]*2.f*VdotN - bV[1],
+                                      bN[2]*2.f*VdotN - bV[2]);
+                        float ddl = dir.GetLength();
+                        if (ddl > 1e-6f) dir /= ddl;
+                        pos = bHitPos + bN * 0.01f;
+                    }
                 }
-
-                // Move S along the tangent plane to reduce error
-                // Step size proportional to distance and error
-                float step = std::min(woLen, wiLen) * 0.5f;
-                S = S + tangErr * step;
-
-                // Re-intersect to stay on the surface
-                GfRay snapRay;
-                snapRay.SetPointAndDirection(
-                    GfVec3d(S + GfVec3f(specN) * 0.5f),
-                    GfVec3d(-specN));
-                SpectralBVH::Hit snapHit = bvh.Intersect(snapRay, rayTime);
-                if (snapHit.valid() && snapHit.t < 2.f) {
-                    S = GfVec3f(GfVec3d(S + GfVec3f(specN) * 0.5f)
-                        + snapHit.t * GfVec3d(-specN));
-                    // Update normal at new position
-                    float sw = 1.f - float(snapHit.u) - float(snapHit.v);
-                    specN = snapHit.tri->n0 * sw
-                          + snapHit.tri->n1 * float(snapHit.u)
-                          + snapHit.tri->n2 * float(snapHit.v);
-                    snLen = specN.GetLength();
-                    if (snLen > 1e-6f) specN /= snLen;
-                    fromP = hitPos - S;
-                    if (fromP[0]*specN[0]+fromP[1]*specN[1]+fromP[2]*specN[2] < 0.f)
-                        specN = -specN;
-                }
             }
-
-            if (!converged) continue;
-
-            // Verify the found path: trace from S toward light, check no blockers
-            GfVec3f finalWo = lightPos - S;
-            float finalDist = finalWo.GetLength();
-            if (finalDist < 1e-4f) continue;
-            finalWo /= finalDist;
-
-            GfRay verifyRay;
-            verifyRay.SetPointAndDirection(GfVec3d(S - specN * 0.02f), GfVec3d(finalWo));
-            SpectralBVH::Hit verifyHit = bvh.Intersect(verifyRay, rayTime);
-
-            // Allow pass-through of the glass back face
-            bool blocked = false;
-            if (verifyHit.valid()) {
-                const SpectralMaterial& blockMat = scene.GetMaterial(verifyHit.tri->materialId);
-                if (blockMat.opacity > 0.99f && verifyHit.t < finalDist * 0.99f)
-                    blocked = true;
-            }
-            if (blocked) continue;
-
-            // Evaluate contribution
-            GfVec3f dirToS = S - hitPos;
-            float distToS = dirToS.GetLength();
-            if (distToS < 1e-6f) continue;
-            GfVec3f L_dir = dirToS / distToS;
-
-            float NdotL = N[0]*L_dir[0] + N[1]*L_dir[1] + N[2]*L_dir[2];
-            if (NdotL <= 0.f) continue;
-
-            // BSDF at shading point for direction toward S
-            float bsdfVal = SpectralBSDF::Evaluate(resolvedMat, N, V, L_dir, lambda);
-
-            // Fresnel transmittance through glass
-            GfVec3f wi_spec = L_dir;
-            float cosI = std::abs(wi_spec[0]*specN[0] + wi_spec[1]*specN[1] + wi_spec[2]*specN[2]);
-            float sinT2 = eta * eta * (1.f - cosI * cosI);
-            float F_glass = 1.f;
-            if (sinT2 < 1.f) {
-                float cosT = std::sqrt(1.f - sinT2);
-                float rS = (cosI - ior * cosT) / (cosI + ior * cosT);
-                float rP = (ior * cosI - cosT) / (ior * cosI + cosT);
-                F_glass = 0.5f * (rS * rS + rP * rP);
-            }
-            float T_glass = 1.f - F_glass;  // transmittance
-
-            float lightRad = light.SpectralEmission(lambda);
-            float atten = light.Attenuation(S);
-
-            // Geometry term
-            float G = 1.f / (distToS * distToS + 1e-4f);
-
-            float causticContrib = bsdfVal * T_glass * lightRad * atten * G * distToS * distToS;
-            radiance += causticContrib;
-            if (comps) comps->direct += causticContrib;
+            rngSeed += numProbes * 3u;
         }
     }
 
@@ -1039,12 +1024,22 @@ float SpectralIntegrator::_ShadeSpectral(
                 GfVec3f L = light.SampleDirection(bounceOrigin, bsu1, bsu2, bounceN);
 
                 bool inShadow = false;
+                float shadowTransmit = 1.f;
                 GfVec3f sOrig = bounceOrigin + bounceN * 0.01f;
-                GfRay shadowRay;
-                shadowRay.SetPointAndDirection(GfVec3d(sOrig), GfVec3d(L));
-                SpectralBVH::Hit shadowHit = bvh.Intersect(shadowRay, rayTime);
+                for (int sb = 0; sb < 8; ++sb) {
+                    GfRay shadowRay;
+                    shadowRay.SetPointAndDirection(GfVec3d(sOrig), GfVec3d(L));
+                    SpectralBVH::Hit shadowHit = bvh.Intersect(shadowRay, rayTime);
+                    if (!shadowHit.valid()) break;
 
-                if (shadowHit.valid()) {
+                    const SpectralMaterial& sMat = scene.GetMaterial(shadowHit.tri->materialId);
+                    if (sMat.opacity < 0.99f && sMat.metallic < 0.5f) {
+                        shadowTransmit *= (1.f - sMat.opacity) * 0.95f;
+                        if (shadowTransmit < 0.01f) { inShadow = true; break; }
+                        sOrig = GfVec3f(GfVec3d(sOrig) + shadowHit.t * GfVec3d(L)) + L * 0.02f;
+                        continue;
+                    }
+
                     GfVec3f shadowN = shadowHit.tri->faceNormal;
                     float hitFacing = shadowN[0]*L[0] + shadowN[1]*L[1] + shadowN[2]*L[2];
                     if (hitFacing < 0.f) {
@@ -1056,6 +1051,7 @@ float SpectralIntegrator::_ShadeSpectral(
                             inShadow = (shadowHit.t < lightDist);
                         }
                     }
+                    break;
                 }
 
                 if (!inShadow) {
@@ -1071,7 +1067,7 @@ float SpectralIntegrator::_ShadeSpectral(
                         ? SpectralBSDF::MISWeight(pdfLight, pdfBsdf)
                         : 1.f;
 
-                    bounceRadiance += bsdf * lightRad * atten * misW;
+                    bounceRadiance += bsdf * lightRad * atten * misW * shadowTransmit;
                 }
             }
         }

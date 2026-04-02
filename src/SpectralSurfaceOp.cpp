@@ -15,7 +15,8 @@
 using namespace DD::Image;
 
 static const char* const kSpectralPresetNames[] = {
-    "custom", "glass", "diamond", "copper", "gold", "silver", "aluminium", nullptr
+    "custom", "glass", "diamond", "copper", "gold", "silver", "aluminium",
+    "white paper", "concrete", "wood", "skin", "rubber", "water", nullptr
 };
 
 const char* const SpectralSurfaceOp::CLASS = "SpectralSurface";
@@ -157,6 +158,42 @@ void SpectralSurfaceOp::_ApplyPreset(int preset)
             _opacity = 1.0f; _abbeNumber = 0.f; _thinFilmThickness = 0.f;
             _metalType = 4;  // aluminium spectral IOR
             break;
+        case 7: // white paper
+            _diffuseColor[0] = 0.75f; _diffuseColor[1] = 0.73f; _diffuseColor[2] = 0.70f;
+            _metallic = 0.0f; _roughness = 0.9f; _ior = 1.5f;
+            _opacity = 1.0f; _abbeNumber = 0.f; _thinFilmThickness = 0.f;
+            _metalType = 0;
+            break;
+        case 8: // concrete
+            _diffuseColor[0] = 0.55f; _diffuseColor[1] = 0.53f; _diffuseColor[2] = 0.50f;
+            _metallic = 0.0f; _roughness = 0.95f; _ior = 1.5f;
+            _opacity = 1.0f; _abbeNumber = 0.f; _thinFilmThickness = 0.f;
+            _metalType = 0;
+            break;
+        case 9: // wood
+            _diffuseColor[0] = 0.43f; _diffuseColor[1] = 0.30f; _diffuseColor[2] = 0.18f;
+            _metallic = 0.0f; _roughness = 0.7f; _ior = 1.5f;
+            _opacity = 1.0f; _abbeNumber = 0.f; _thinFilmThickness = 0.f;
+            _metalType = 0;
+            break;
+        case 10: // skin
+            _diffuseColor[0] = 0.76f; _diffuseColor[1] = 0.57f; _diffuseColor[2] = 0.45f;
+            _metallic = 0.0f; _roughness = 0.5f; _ior = 1.4f;
+            _opacity = 1.0f; _abbeNumber = 0.f; _thinFilmThickness = 0.f;
+            _metalType = 0;
+            break;
+        case 11: // rubber
+            _diffuseColor[0] = 0.05f; _diffuseColor[1] = 0.05f; _diffuseColor[2] = 0.05f;
+            _metallic = 0.0f; _roughness = 0.85f; _ior = 1.5f;
+            _opacity = 1.0f; _abbeNumber = 0.f; _thinFilmThickness = 0.f;
+            _metalType = 0;
+            break;
+        case 12: // water
+            _diffuseColor[0] = 0.95f; _diffuseColor[1] = 0.95f; _diffuseColor[2] = 0.98f;
+            _metallic = 0.0f; _roughness = 0.0f; _ior = 1.333f;
+            _opacity = 0.15f; _abbeNumber = 55.f; _thinFilmThickness = 0.f;
+            _metalType = 0;
+            break;
         default: // custom — don't change anything
             break;
     }
@@ -210,18 +247,21 @@ void SpectralSurfaceOp::RegisterParams()
     p.displacementMidpoint = _displacementMidpoint;
     p.displacementFile = (_displacementFile && _displacementFile[0]) ? _displacementFile : "";
     p.metalType = _metalType;
-    // Store displacement Iop if connected
+    // Store Iop pointers if connected
     if (inputs() > 0 && input(0)) {
-        Op* dispOp = input(0);
-        Iop* dispIop = dynamic_cast<Iop*>(dispOp);
-        if (dispIop) p.dispIop = dispOp;
+        Iop* texIop = dynamic_cast<Iop*>(input(0));
+        if (texIop) p.texIop = input(0);
+    }
+    if (inputs() > 1 && input(1)) {
+        Iop* dispIop = dynamic_cast<Iop*>(input(1));
+        if (dispIop) p.dispIop = input(1);
     }
     GetRegistry()[node_name()] = p;
 }
 
 bool SpectralSurfaceOp::test_input(int idx, Op* op) const
 {
-    if (idx == 0) {
+    if (idx == 0 || idx == 1) {
         if (!op) return true;
         return dynamic_cast<Iop*>(op) != nullptr;
     }

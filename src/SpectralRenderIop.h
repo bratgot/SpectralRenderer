@@ -54,7 +54,7 @@ public:
     // Input 0: Scene  (GeometryProviderI) — optional
     // Input 1: Camera (CameraOp)          — optional
     // Input 2: BG     (any Iop)           — optional, sets output resolution
-    int  minimum_inputs()               const override { return 0; }
+    int  minimum_inputs()               const override { return 1; }
     int  maximum_inputs()               const override { return 3; }
     const char* input_label(int idx, char*) const override;
     bool test_input(int idx, Op* op)    const override;
