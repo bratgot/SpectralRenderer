@@ -31,6 +31,9 @@ struct GPUMaterial {
     float  abbeNumber;
     float  thinFilmThickness;
     int    baseColorTexId;   // -1 = no texture
+    float  textureBlend;     // 0=base color, 1=full texture
+    float3 absorptionColor;  // volume color (white=clear)
+    float  absorptionDensity; // 0=clear, higher=darker
 };
 
 // GPU-side texture (header only — pixel data is a separate device buffer)

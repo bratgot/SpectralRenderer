@@ -34,18 +34,35 @@ const char* SpectralSurfaceOp::node_help() const
 {
     return
         "SpectralSurface — physically-based spectral material.\n\n"
-        "Standard PBR controls (diffuse, metallic, roughness, IOR)\n"
-        "plus spectral-specific features:\n\n"
-        "Dispersion: Abbe number controls wavelength-dependent IOR.\n"
-        "  0 = no dispersion (default)\n"
-        "  ~60 = crown glass (low dispersion)\n"
-        "  ~30 = flint glass (high dispersion)\n"
-        "  ~55 = diamond\n\n"
-        "Thin-film: Interference coating thickness in nm.\n"
-        "  0 = disabled\n"
-        "  200-800nm = visible spectrum interference\n\n"
-        "Presets: Common material configurations.\n\n"
-        "Connect via GeoBindMaterial to assign to geometry.";
+        "INPUTS:\n"
+        "  tex  — base colour texture from any Nuke image node\n"
+        "  disp — displacement map (red channel = height)\n\n"
+        "SURFACE:\n"
+        "  diffuse color — base colour / albedo\n"
+        "  metallic — 0=dielectric, 1=metal\n"
+        "  roughness — 0=mirror, 1=matte\n"
+        "  IOR — index of refraction (1.5=glass, 2.42=diamond)\n"
+        "  opacity — 1=opaque, 0.02=glass (enables refraction)\n\n"
+        "SPECTRAL:\n"
+        "  preset — quick setup for common materials\n"
+        "  dispersion (Abbe) — rainbow splitting in glass\n"
+        "    60=crown glass, 30=flint glass, 55=diamond\n"
+        "  thin-film — iridescent coating thickness in nm\n\n"
+        "TEXTURE:\n"
+        "  texture blend — mix between base colour and tex input\n"
+        "    0=base only, 1=full texture, 0.5=half-and-half\n\n"
+        "VOLUME ABSORPTION (Beer-Lambert):\n"
+        "  volume color — what colour the glass transmits\n"
+        "    red=(1,0,0) for red glass, white=clear\n"
+        "  density — absorption strength (0=clear, 2=deep colour)\n\n"
+        "DISPLACEMENT:\n"
+        "  scale — world-space amplitude\n"
+        "  midpoint — 0=outward only, 0.5=centered\n\n"
+        "PRESETS: glass, diamond, copper, gold, silver, aluminium,\n"
+        "  white paper, concrete, wood, skin, rubber, water\n\n"
+        "Connect via GeoBindMaterial to assign to geometry.\n"
+        "Metal presets use measured spectral (n,k) data for\n"
+        "physically correct wavelength-dependent reflectance.";
 }
 
 // ---------------------------------------------------------------------------
@@ -55,14 +72,42 @@ void SpectralSurfaceOp::knobs(Knob_Callback f)
 
     Divider(f, "Surface");
     Color_knob(f, _diffuseColor, "diffuse_color", "diffuse color");
+    Tooltip(f, "Base surface colour. For metals this tints\n"
+               "the specular reflection. For dielectrics this\n"
+               "is the diffuse albedo.");
     Float_knob(f, &_metallic,  "metallic",  "metallic");   SetRange(f, 0.f, 1.f);
+    Tooltip(f, "0 = dielectric (plastic, glass, wood)\n"
+               "1 = metal (gold, copper, aluminium)\n"
+               "Metals have no diffuse, only specular.");
     Float_knob(f, &_roughness, "roughness", "roughness");  SetRange(f, 0.f, 1.f);
+    Tooltip(f, "Microfacet roughness.\n"
+               "0 = perfect mirror / smooth glass\n"
+               "0.3 = polished surface\n"
+               "0.7 = brushed metal / rough plastic\n"
+               "1.0 = completely matte");
     Float_knob(f, &_ior,       "ior",       "IOR");        SetRange(f, 1.0f, 3.0f);
+    Tooltip(f, "Index of refraction.\n"
+               "1.0 = air, 1.33 = water, 1.5 = glass\n"
+               "1.52 = crown glass, 2.42 = diamond\n"
+               "Controls Fresnel reflections and refraction.");
     Float_knob(f, &_opacity,   "opacity",   "opacity");    SetRange(f, 0.f, 1.f);
+    Tooltip(f, "Surface opacity.\n"
+               "1.0 = fully opaque (default)\n"
+               "0.02 = glass / transparent\n"
+               "0.0 = invisible\n"
+               "Low values enable refraction.");
     Color_knob(f, _emissiveColor, "emissive_color", "emissive color");
+    Tooltip(f, "Self-illumination colour and intensity.\n"
+               "Black = no emission. Bright values make\n"
+               "the surface glow as a light source.");
     Float_knob(f, &_clearcoat, "clearcoat", "clearcoat");  SetRange(f, 0.f, 1.f);
+    Tooltip(f, "Additional clear specular layer on top.\n"
+               "0 = off, 1 = full clearcoat.\n"
+               "Use for car paint, lacquered wood, wet surfaces.");
     Float_knob(f, &_clearcoatRoughness, "clearcoat_roughness", "clearcoat roughness");
     SetRange(f, 0.f, 1.f);
+    Tooltip(f, "Roughness of the clearcoat layer.\n"
+               "0 = glossy clear coat, 1 = matte clear coat.");
 
     Divider(f, "Spectral");
     Enumeration_knob(f, &_spectralPreset, kSpectralPresetNames, "preset", "preset");
@@ -147,14 +192,14 @@ void SpectralSurfaceOp::_ApplyPreset(int preset)
         case 1: // glass
             _diffuseColor[0] = _diffuseColor[1] = _diffuseColor[2] = 0.95f;
             _metallic = 0.0f; _roughness = 0.0f; _ior = 1.52f;
-            _opacity = 0.3f; _abbeNumber = 58.f; _thinFilmThickness = 0.f;
+            _opacity = 0.02f; _abbeNumber = 58.f; _thinFilmThickness = 0.f;
             _metalType = 0;
             _absorptionColor[0]=1.f; _absorptionColor[1]=1.f; _absorptionColor[2]=1.f; _absorptionDensity=0.f;
             break;
         case 2: // diamond
             _diffuseColor[0] = _diffuseColor[1] = _diffuseColor[2] = 0.97f;
             _metallic = 0.0f; _roughness = 0.0f; _ior = 2.42f;
-            _opacity = 0.1f; _abbeNumber = 55.f; _thinFilmThickness = 0.f;
+            _opacity = 0.02f; _abbeNumber = 55.f; _thinFilmThickness = 0.f;
             _metalType = 0;
             _absorptionColor[0]=1.f; _absorptionColor[1]=1.f; _absorptionColor[2]=1.f; _absorptionDensity=0.f;
             break;

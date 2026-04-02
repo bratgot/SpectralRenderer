@@ -640,10 +640,15 @@ extern "C" __global__ void __raygen__spectral()
                 if (matId<0||matId>=int(params.materialCount)) matId=0;
                 GPUMaterial mat = params.materials[matId];
 
-                // Resolve texture at hit UV
-                if (mat.baseColorTexId >= 0) {
+                // Resolve texture at hit UV with texture blend
+                if (mat.baseColorTexId >= 0 && mat.textureBlend > 0.f) {
                     float2 hitUV = make_float2(__uint_as_float(p5), __uint_as_float(p6));
-                    mat.baseColor = sampleTextureGPU(mat.baseColorTexId, hitUV);
+                    float3 texCol = sampleTextureGPU(mat.baseColorTexId, hitUV);
+                    float b = mat.textureBlend;
+                    mat.baseColor = make_float3(
+                        mat.baseColor.x*(1.f-b) + texCol.x*b,
+                        mat.baseColor.y*(1.f-b) + texCol.y*b,
+                        mat.baseColor.z*(1.f-b) + texCol.z*b);
                 }
 
                 float3 N = normalize3(make_float3(
@@ -662,9 +667,11 @@ extern "C" __global__ void __raygen__spectral()
                 float throughput = 1.f;
                 float3 bN=N, bV=V, bOrigin=hitPos;
                 const GPUMaterial* bMat = &mat;
-                GPUMaterial resolvedMat = mat;  // mutable copy for texture resolution
+                GPUMaterial resolvedMat = mat;
                 unsigned int bSeed = seed + 100u;
                 bool isEntering = true;
+                bool insideVolume = false;
+                GPUMaterial volumeMat;  // material of current volume
 
                 for (int bounce = 0; bounce < maxBounces; ++bounce) {
                     if (bounce >= 1) {
@@ -693,9 +700,14 @@ extern "C" __global__ void __raygen__spectral()
                     int bMatId = int(bp4)-1;
                     if (bMatId<0||bMatId>=int(params.materialCount)) bMatId=0;
                     resolvedMat = params.materials[bMatId];  // copy for texture resolution
-                    if (resolvedMat.baseColorTexId >= 0) {
+                    if (resolvedMat.baseColorTexId >= 0 && resolvedMat.textureBlend > 0.f) {
                         float2 bUV = make_float2(__uint_as_float(bp5), __uint_as_float(bp6));
-                        resolvedMat.baseColor = sampleTextureGPU(resolvedMat.baseColorTexId, bUV);
+                        float3 texCol = sampleTextureGPU(resolvedMat.baseColorTexId, bUV);
+                        float b = resolvedMat.textureBlend;
+                        resolvedMat.baseColor = make_float3(
+                            resolvedMat.baseColor.x*(1.f-b) + texCol.x*b,
+                            resolvedMat.baseColor.y*(1.f-b) + texCol.y*b,
+                            resolvedMat.baseColor.z*(1.f-b) + texCol.z*b);
                     }
                     bMat = &resolvedMat;
 
@@ -704,6 +716,26 @@ extern "C" __global__ void __raygen__spectral()
                     bV = normalize3(neg3(bounceDir));
                     float bNdV = dot3raw(rawN, bV);
                     isEntering = (bNdV > 0.f);
+
+                    // Beer-Lambert: absorption inside glass volume
+                    if (insideVolume && bDepth > 0.f && volumeMat.absorptionDensity > 0.f) {
+                        // Spectral transmittance via Gaussian basis
+                        float rB = expf(-((lambda-630.f)*(lambda-630.f))/(2.f*30.f*30.f));
+                        float gB = expf(-((lambda-532.f)*(lambda-532.f))/(2.f*30.f*30.f));
+                        float bB = expf(-((lambda-460.f)*(lambda-460.f))/(2.f*25.f*25.f));
+                        float colAtL = volumeMat.absorptionColor.x*rB + volumeMat.absorptionColor.y*gB + volumeMat.absorptionColor.z*bB;
+                        colAtL = fmaxf(0.001f, fminf(1.f, colAtL));
+                        float sigma = -logf(colAtL) * volumeMat.absorptionDensity;
+                        throughput *= expf(-sigma * bDepth);
+                        if (throughput < 1e-6f) break;
+                    }
+
+                    // Track entering/exiting glass
+                    if (resolvedMat.opacity < 0.99f && resolvedMat.metallic < 0.5f) {
+                        if (isEntering) { insideVolume = true; volumeMat = resolvedMat; }
+                        else { insideVolume = false; }
+                    }
+
                     bN = (bNdV < 0.f) ? neg3(rawN) : rawN;
                     bOrigin = make_float3(bOrig.x+bounceDir.x*bDepth, bOrig.y+bounceDir.y*bDepth, bOrig.z+bounceDir.z*bDepth);
 
