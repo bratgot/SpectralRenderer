@@ -51,6 +51,8 @@ struct GPULight {
     float  colorTemperature;
     int    useColorTemp;  // 0=RGB, 1=blackbody
     float  radius;
+    float  width;
+    float  height;
 };
 
 struct CameraParams {

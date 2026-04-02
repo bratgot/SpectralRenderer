@@ -181,6 +181,20 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                "Reduces visible noise patterns at low sample counts.\n"
                "Enabled by default. Disable for pure random sampling.");
 
+    Divider(f, "AOV outputs");
+    Int_knob(f, &_aoSamples, "ao_samples", "AO samples");
+    SetRange(f, 0, 64);
+    Tooltip(f, "Ambient occlusion samples per pixel.\n"
+               "0 = disabled (no AO output)\n"
+               "8-16 = good quality, 32+ = clean\n"
+               "Output to 'other.ao' channel.");
+
+    Float_knob(f, &_aoRadius, "ao_radius", "AO radius");
+    SetRange(f, 0.1f, 100.f);
+    Tooltip(f, "Maximum distance for AO rays.\n"
+               "Smaller values give tighter contact shadows.\n"
+               "Larger values give broader ambient darkening.");
+
     Bool_knob(f, &_denoise, "denoise", "denoise (GPU)");
     Tooltip(f, "Apply OptiX AI denoiser after GPU rendering.\n"
                "Dramatically cleans up low-spp renders.\n"
@@ -264,8 +278,10 @@ void SpectralRenderIop::_validate(bool forReal)
     ChannelSet channels = Mask_RGBA;
     _chanObjectId   = getChannel("other.objectId");
     _chanMaterialId = getChannel("other.materialId");
+    _chanAO         = getChannel("other.ao");
     channels += _chanObjectId;
     channels += _chanMaterialId;
+    if (_aoSamples > 0) channels += _chanAO;
     info_.channels(channels);
     info_.black_outside(true);
 
@@ -388,6 +404,7 @@ void SpectralRenderIop::engine(
     };
     writeIdChannel(_chanObjectId, _objectIdBuffer);
     writeIdChannel(_chanMaterialId, _materialIdBuffer);
+    writeIdChannel(_chanAO, _aoBuffer);
 }
 
 // ---------------------------------------------------------------------------
@@ -1424,6 +1441,7 @@ void SpectralRenderIop::_EnsureFrameRendered()
     _depthBuffer.assign(size_t(W) * H, 1e30f);
     _objectIdBuffer.assign(size_t(W) * H, 0.f);
     _materialIdBuffer.assign(size_t(W) * H, 0.f);
+    _aoBuffer.assign(size_t(W) * H, 1.f);  // default white (no occlusion)
 
     SpectralCamera cam = _camera;
     cam.imageWidth  = W;
@@ -1483,6 +1501,12 @@ void SpectralRenderIop::_EnsureFrameRendered()
         SpectralIntegrator::DenoiseGPU(W, H, _frameBuffer.data());
     }
 #endif
+
+    // AO pass
+    if (_aoSamples > 0) {
+        SpectralIntegrator::ComputeAO(*_scene, cam, _aoBuffer.data(),
+                                       _aoSamples, _aoRadius);
+    }
 
     _progressiveSppDone = renderSpp;
 

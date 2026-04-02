@@ -26,7 +26,8 @@ void SpectralIntegrator::RenderFrame(
     float*                depthOut,
     int                   maxBounces,
     float*                objectIdOut,
-    float*                materialIdOut)
+    float*                materialIdOut,
+    float*                aoOut)
 {
 #ifdef SPECTRAL_HAS_EMBREE
     SpectralBVH bvh;
@@ -236,6 +237,85 @@ void SpectralIntegrator::RenderFrame(
             if (depthOut) depthOut[i] = depthBuf[i];
             if (objectIdOut) objectIdOut[i] = static_cast<float>(objIdBuf[i]);
             if (materialIdOut) materialIdOut[i] = static_cast<float>(matIdBuf[i]);
+        }
+
+        // ---- Ambient occlusion pass ----
+        if (aoOut && camera.aoSamples > 0) {
+            const int aoSpp = camera.aoSamples;
+            const float aoRadius = camera.aoRadius;
+
+            std::for_each(
+                std::execution::par_unseq,
+                rows.begin(), rows.end(),
+                [&](unsigned int imageY)
+                {
+                    for (unsigned int imageX = 0; imageX < W; ++imageX) {
+                        size_t pixIdx = imageY * W + imageX;
+
+                        // Trace primary ray to get hit
+                        GfRay ray = _MakeRay(camera, imageX, imageY, 0.5f, 0.5f);
+                        SpectralBVH::Hit hit = bvh.Intersect(ray, 0.f);
+
+                        if (!hit.valid()) {
+                            aoOut[pixIdx] = 1.f; // no geometry = fully unoccluded
+                            continue;
+                        }
+
+                        // Interpolate normal
+                        float bw = 1.f - hit.u - hit.v;
+                        GfVec3f N = hit.tri->n0 * bw + hit.tri->n1 * float(hit.u) + hit.tri->n2 * float(hit.v);
+                        float nlen = N.GetLength();
+                        if (nlen > 1e-6f) N /= nlen;
+
+                        GfVec3f V = GfVec3f(-ray.GetDirection()[0], -ray.GetDirection()[1], -ray.GetDirection()[2]);
+                        float vlen = V.GetLength();
+                        if (vlen > 1e-6f) V /= vlen;
+                        if (N[0]*V[0] + N[1]*V[1] + N[2]*V[2] < 0.f) N = -N;
+
+                        GfVec3d worldHit = ray.GetStartPoint() + hit.t * ray.GetDirection();
+                        GfVec3f hitPos = GfVec3f(worldHit);
+                        GfVec3f aoOrigin = hitPos + N * 0.01f;
+
+                        // Build tangent frame
+                        GfVec3f up = (std::abs(N[1]) < 0.999f) ? GfVec3f(0,1,0) : GfVec3f(1,0,0);
+                        GfVec3f T = GfCross(up, N);
+                        float tlen = T.GetLength();
+                        if (tlen > 1e-6f) T /= tlen;
+                        GfVec3f B = GfCross(N, T);
+
+                        int unoccluded = 0;
+                        unsigned int aoSeed = (imageY * W + imageX) * 7919u;
+
+                        for (int s = 0; s < aoSpp; ++s) {
+                            float u1 = _Hash(aoSeed++);
+                            float u2 = _Hash(aoSeed++);
+
+                            // Cosine-weighted hemisphere sample
+                            float r = std::sqrt(u1);
+                            float phi = 6.28318f * u2;
+                            float x = r * std::cos(phi);
+                            float y = r * std::sin(phi);
+                            float z = std::sqrt(std::max(0.f, 1.f - u1));
+
+                            GfVec3f dir = T * x + B * y + N * z;
+                            float dlen = dir.GetLength();
+                            if (dlen > 1e-6f) dir /= dlen;
+
+                            GfRay aoRay;
+                            aoRay.SetPointAndDirection(GfVec3d(aoOrigin), GfVec3d(dir));
+                            SpectralBVH::Hit aoHit = bvh.Intersect(aoRay, 0.f);
+
+                            if (!aoHit.valid() || aoHit.t > aoRadius) {
+                                unoccluded++;
+                            }
+                        }
+
+                        aoOut[pixIdx] = float(unoccluded) / float(aoSpp);
+                    }
+                });
+
+            fprintf(stderr, "SpectralRender: AO pass complete (%d samples, radius=%.1f)\n",
+                    aoSpp, aoRadius);
         }
     }
 
@@ -502,14 +582,16 @@ float SpectralIntegrator::_ShadeSpectral(
     // ---- Direct lighting from explicit lights ----
     if (scene.HasLights()) {
         for (const SpectralLight& light : scene.GetLights()) {
-            GfVec3f L = light.DirectionFrom(hitPos);
+            // Soft shadows: jitter light sample position for area lights
+            float su1 = _Hash(rngSeed++);
+            float su2 = _Hash(rngSeed++);
+            GfVec3f L = light.SampleDirection(hitPos, su1, su2);
 
             // Shadow ray — offset origin along normal to clear surface
             bool inShadow = false;
             GfVec3f shadowOrigin = hitPos + N * 0.01f;
             GfRay shadowRay;
-            shadowRay.SetEnds(GfVec3d(shadowOrigin),
-                GfVec3d(shadowOrigin) + GfVec3d(L) * 10000.0);
+            shadowRay.SetPointAndDirection(GfVec3d(shadowOrigin), GfVec3d(L));
             SpectralBVH::Hit shadowHit = bvh.Intersect(shadowRay, rayTime);
 
             if (shadowHit.valid()) {
@@ -622,13 +704,14 @@ float SpectralIntegrator::_ShadeSpectral(
         float bounceRadiance = 0.f;
         if (scene.HasLights() && !insideTransparent) {
             for (const SpectralLight& light : scene.GetLights()) {
-                GfVec3f L = light.DirectionFrom(bounceOrigin);
+                float bsu1 = _Hash(rngSeed++);
+                float bsu2 = _Hash(rngSeed++);
+                GfVec3f L = light.SampleDirection(bounceOrigin, bsu1, bsu2);
 
                 bool inShadow = false;
                 GfVec3f sOrig = bounceOrigin + bounceN * 0.01f;
                 GfRay shadowRay;
-                shadowRay.SetEnds(GfVec3d(sOrig),
-                    GfVec3d(sOrig) + GfVec3d(L) * 10000.0);
+                shadowRay.SetPointAndDirection(GfVec3d(sOrig), GfVec3d(L));
                 SpectralBVH::Hit shadowHit = bvh.Intersect(shadowRay, rayTime);
 
                 if (shadowHit.valid()) {
@@ -703,6 +786,101 @@ float SpectralIntegrator::_Hash(unsigned int seed)
     seed *= 0x27d4eb2du;
     seed = seed ^ (seed >> 15u);
     return float(seed) / float(0xFFFFFFFFu);
+}
+
+// ---------------------------------------------------------------------------
+// ComputeAO — ambient occlusion pass
+// ---------------------------------------------------------------------------
+void SpectralIntegrator::ComputeAO(
+    const SpectralScene& scene,
+    const SpectralCamera& camera,
+    float* aoOut,
+    int aoSamples,
+    float aoRadius)
+{
+#ifdef SPECTRAL_HAS_EMBREE
+    if (aoSamples <= 0 || !aoOut) return;
+
+    SpectralBVH bvh;
+    bvh.Build(scene);
+
+    const unsigned int W = camera.imageWidth;
+    const unsigned int H = camera.imageHeight;
+
+    std::vector<unsigned int> rows(H);
+    std::iota(rows.begin(), rows.end(), 0u);
+
+    std::for_each(
+        std::execution::par_unseq,
+        rows.begin(), rows.end(),
+        [&](unsigned int imageY)
+        {
+            for (unsigned int imageX = 0; imageX < W; ++imageX) {
+                const size_t pixIdx = imageY * W + imageX;
+
+                GfRay ray = _MakeRay(camera, imageX, imageY, 0.5f, 0.5f);
+                SpectralBVH::Hit hit = bvh.Intersect(ray, 0.f);
+
+                if (!hit.valid()) {
+                    aoOut[pixIdx] = 1.f;
+                    continue;
+                }
+
+                // Compute hit position and normal
+                float w = 1.f - float(hit.u) - float(hit.v);
+                GfVec3f N = hit.tri->n0 * w + hit.tri->n1 * float(hit.u) + hit.tri->n2 * float(hit.v);
+                float nlen = N.GetLength();
+                if (nlen > 1e-6f) N /= nlen;
+
+                GfVec3f V = GfVec3f(-ray.GetDirection());
+                float vlen = V.GetLength();
+                if (vlen > 1e-6f) V /= vlen;
+                if (N[0]*V[0] + N[1]*V[1] + N[2]*V[2] < 0.f) N = -N;
+
+                GfVec3d worldHit = ray.GetStartPoint() + hit.t * ray.GetDirection();
+                GfVec3f hitPos = GfVec3f(worldHit);
+                GfVec3f origin = hitPos + N * 0.01f;
+
+                // Build tangent frame
+                GfVec3f up = (std::abs(N[1]) < 0.999f) ? GfVec3f(0,1,0) : GfVec3f(1,0,0);
+                GfVec3f T = GfCross(up, N);
+                float tlen = T.GetLength();
+                if (tlen > 1e-6f) T /= tlen;
+                GfVec3f B = GfCross(N, T);
+
+                // Shoot AO rays
+                int occluded = 0;
+                for (int s = 0; s < aoSamples; ++s) {
+                    unsigned int seed = (imageY * W + imageX) * 7919 + s * 1231;
+                    float u1 = _Hash(seed);
+                    float u2 = _Hash(seed + 1);
+
+                    // Cosine-weighted hemisphere sample
+                    float r = std::sqrt(u1);
+                    float phi = 6.28318f * u2;
+                    float x = r * std::cos(phi);
+                    float y = r * std::sin(phi);
+                    float z = std::sqrt(std::max(0.f, 1.f - u1));
+                    GfVec3f dir = T * x + B * y + N * z;
+                    float dlen = dir.GetLength();
+                    if (dlen > 1e-6f) dir /= dlen;
+
+                    GfRay aoRay;
+                    aoRay.SetPointAndDirection(GfVec3d(origin), GfVec3d(dir));
+                    SpectralBVH::Hit aoHit = bvh.Intersect(aoRay, 0.f);
+
+                    if (aoHit.valid() && aoHit.t < aoRadius) {
+                        occluded++;
+                    }
+                }
+
+                aoOut[pixIdx] = 1.f - float(occluded) / float(aoSamples);
+            }
+        });
+
+    fprintf(stderr, "SpectralIntegrator: AO pass complete (%d samples, radius %.1f)\n",
+            aoSamples, aoRadius);
+#endif
 }
 
 // ---------------------------------------------------------------------------

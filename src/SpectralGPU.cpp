@@ -360,6 +360,8 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
                 gpuLights[i].colorTemperature = lights[i].colorTemperature;
                 gpuLights[i].useColorTemp = lights[i].enableColorTemperature ? 1 : 0;
                 gpuLights[i].radius    = lights[i].radius;
+                gpuLights[i].width     = lights[i].width;
+                gpuLights[i].height    = lights[i].height;
             }
             size_t lightBytes = gpuLights.size() * sizeof(spectral_gpu::GPULight);
             CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_lights), lightBytes));

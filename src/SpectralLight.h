@@ -105,10 +105,41 @@ struct SpectralLight
     GfVec3f DirectionFrom(const GfVec3f& surfacePos) const
     {
         if (type == Type::Distant || type == Type::Dome) {
-            // Negate stored direction — stored as light's forward, we want toward-light
             return GfVec3f(-direction[0], -direction[1], -direction[2]);
         }
         GfVec3f d = position - surfacePos;
+        float len = d.GetLength();
+        return (len > 1e-6f) ? d / len : GfVec3f(0.f, 1.f, 0.f);
+    }
+
+    // ------------------------------------------------------------------
+    // Sample a random point on the light surface for soft shadows.
+    //   u1, u2: uniform random in [0,1)
+    //   Returns a direction from surfacePos toward the sampled point.
+    // ------------------------------------------------------------------
+    GfVec3f SampleDirection(const GfVec3f& surfacePos, float u1, float u2) const
+    {
+        if (type == Type::Distant || type == Type::Dome) {
+            return GfVec3f(-direction[0], -direction[1], -direction[2]);
+        }
+
+        GfVec3f samplePos = position;
+
+        if (type == Type::Sphere && radius > 0.f) {
+            // Uniform point on sphere: spherical coordinates
+            float theta = 2.f * 3.14159f * u1;
+            float phi = std::acos(1.f - 2.f * u2);
+            float sp = std::sin(phi);
+            samplePos[0] += radius * sp * std::cos(theta);
+            samplePos[1] += radius * sp * std::sin(theta);
+            samplePos[2] += radius * std::cos(phi);
+        } else if (type == Type::Rect) {
+            // Random point on rectangle
+            samplePos[0] += (u1 - 0.5f) * width;
+            samplePos[1] += (u2 - 0.5f) * height;
+        }
+
+        GfVec3f d = samplePos - surfacePos;
         float len = d.GetLength();
         return (len > 1e-6f) ? d / len : GfVec3f(0.f, 1.f, 0.f);
     }

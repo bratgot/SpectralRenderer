@@ -53,6 +53,8 @@ struct SpectralCamera {
     float  shutterClose      = 0.f;   // 0,0 = no motion blur
     float  adaptiveThreshold = 0.05f; // 0 = disabled, 0.05 = default
     bool   blueNoise         = true;  // R2 quasi-random sampling
+    int    aoSamples         = 8;    // ambient occlusion samples (0 = disabled)
+    float  aoRadius          = 5.f;  // AO max ray distance
 };
 
 // ---------------------------------------------------------------------------
@@ -100,7 +102,8 @@ public:
         float* depthOut = nullptr,
         int maxBounces = 4,
         float* objectIdOut = nullptr,
-        float* materialIdOut = nullptr);
+        float* materialIdOut = nullptr,
+        float* aoOut = nullptr);
 
 #ifdef SPECTRAL_HAS_OPTIX
     /// GPU render path using OptiX.
@@ -118,6 +121,14 @@ public:
 
     /// Denoise a framebuffer using OptiX AI denoiser (GPU only).
     static void DenoiseGPU(unsigned int width, unsigned int height, float* pixels);
+
+    /// Compute ambient occlusion into a separate buffer.
+    static void ComputeAO(
+        const SpectralScene& scene,
+        const SpectralCamera& camera,
+        float* aoOut,           // W*H floats, 0=occluded, 1=open
+        int    aoSamples,       // rays per pixel
+        float  aoRadius);       // max ray distance
 #endif  // optional per-pixel depth output
 
 private:

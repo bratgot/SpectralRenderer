@@ -105,6 +105,8 @@ private:
     float _adaptiveThreshold = 0.05f; // adaptive sampling threshold
     bool  _progressive = true;          // progressive refinement mode
     bool  _blueNoise = true;            // R2 quasi-random sampling
+    int   _aoSamples = 0;              // AO samples per pixel (0 = disabled)
+    float _aoRadius  = 5.f;            // AO max ray distance
     int   _progressiveSppDone = 0;      // samples accumulated so far
     bool  _denoise = false;             // OptiX AI denoiser
     float _shutterOpen  = -0.5f;   // shutter open  (relative to frame)
@@ -127,12 +129,14 @@ private:
     std::vector<float>  _materialIdBuffer; // per-pixel material ID
     std::vector<float>  _accBuffer;      // progressive XYZ accumulation (3 per pixel)
     std::vector<int>    _accSampleCount; // samples accumulated per pixel
+    std::vector<float>  _aoBuffer;       // ambient occlusion per pixel
+
+    // Custom channels
+    Channel _chanObjectId   = Chan_Black;
+    Channel _chanMaterialId = Chan_Black;
+    Channel _chanAO         = Chan_Black;
     unsigned int        _fbWidth  = 0;
     unsigned int        _fbHeight = 0;
     std::atomic<bool>   _frameReady { false };
     std::mutex          _renderMutex;
-
-    // Custom output channels
-    Channel             _chanObjectId   = Chan_Black;
-    Channel             _chanMaterialId = Chan_Black;
 };

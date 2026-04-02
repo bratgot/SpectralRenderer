@@ -452,19 +452,50 @@ static __forceinline__ __device__ float3 sampleTextureGPU(int texId, float2 uv)
 }
 
 // ---------------------------------------------------------------------------
-// Shade one hit — direct lights + sky fill
+// Sample a random point on a light surface for soft shadows
+// ---------------------------------------------------------------------------
+static __forceinline__ __device__ float3 sampleLightDir(
+    const GPULight& light, float3 hitPos, float u1, float u2)
+{
+    if (light.type == 0 || light.type == 3)  // distant or dome
+        return normalize3(neg3(light.direction));
+
+    float3 samplePos = light.position;
+
+    if (light.type == 1 && light.radius > 0.f) {
+        // Sphere: uniform point on sphere surface
+        float theta = 6.28318f * u1;
+        float phi = acosf(1.f - 2.f * u2);
+        float sp = sinf(phi);
+        samplePos.x += light.radius * sp * cosf(theta);
+        samplePos.y += light.radius * sp * sinf(theta);
+        samplePos.z += light.radius * cosf(phi);
+    } else if (light.type == 2) {
+        // Rect: random point on rectangle
+        samplePos.x += (u1 - 0.5f) * light.width;
+        samplePos.y += (u2 - 0.5f) * light.height;
+    }
+
+    float3 d = make_float3(samplePos.x-hitPos.x, samplePos.y-hitPos.y, samplePos.z-hitPos.z);
+    return normalize3(d);
+}
+
+// ---------------------------------------------------------------------------
+// Shade one hit — direct lights with soft shadows
 // ---------------------------------------------------------------------------
 static __forceinline__ __device__ float shadeHit(
-    const GPUMaterial& mat, float3 N, float3 V, float3 hitPos, float lambda)
+    const GPUMaterial& mat, float3 N, float3 V, float3 hitPos, float lambda,
+    unsigned int& rngSeed)
 {
     float radiance = 0.f;
 
     if (params.lightCount > 0) {
         for (unsigned int li = 0; li < params.lightCount; ++li) {
             const GPULight& light = params.lights[li];
-            float3 L = lightDirection(light, hitPos);
+            // Jittered light direction for soft shadows
+            float3 L = sampleLightDir(light, hitPos, hashRNG(rngSeed++), hashRNG(rngSeed++));
 
-            // Shadow ray — cull backfaces so rays through convex objects pass through
+            // Shadow ray
             bool inShadow = false;
             float3 sOrig = make_float3(hitPos.x+N.x*0.01f, hitPos.y+N.y*0.01f, hitPos.z+N.z*0.01f);
             unsigned int sp0=0,sp1=0,sp2=0,sp3=__float_as_uint(1e30f),sp4=0,sp5=0,sp6=0;
@@ -570,7 +601,8 @@ extern "C" __global__ void __raygen__spectral()
                 if (depth < minDepth) minDepth = depth;
 
                 // Direct lighting at primary hit
-                radiance = shadeHit(mat, N, V, hitPos, lambda);
+                unsigned int shadowSeed = seed + 50u;
+                radiance = shadeHit(mat, N, V, hitPos, lambda, shadowSeed);
 
                 // Bounce rays with refraction support
                 float throughput = 1.f;
@@ -624,7 +656,7 @@ extern "C" __global__ void __raygen__spectral()
                     // Skip direct lighting inside transparent objects
                     bool insideGlass = (!isEntering && bMat->opacity < 0.99f);
                     if (!insideGlass)
-                        radiance += throughput * shadeHit(*bMat, bN, bV, bOrigin, lambda);
+                        radiance += throughput * shadeHit(*bMat, bN, bV, bOrigin, lambda, bSeed);
                 }
             } else {
                 radiance = 0.f;
