@@ -87,6 +87,28 @@ void SpectralSurfaceOp::knobs(Knob_Callback f)
                "~400nm = cyan-green\n"
                "~500nm = rainbow/iridescent");
 
+    Divider(f, "Texture");
+    Float_knob(f, &_textureBlend, "texture_blend", "texture blend");
+    SetRange(f, 0.f, 1.f);
+    Tooltip(f, "How much the tex pipe texture replaces the base color.\n"
+               "0 = base color only (texture ignored)\n"
+               "1 = full texture (default)\n"
+               "0.5 = 50/50 mix of base color and texture");
+
+    Divider(f, "Volume absorption");
+    Color_knob(f, _absorptionColor, "absorption_color", "volume color");
+    Tooltip(f, "What colour the glass/liquid transmits.\n"
+               "Red = red glass (absorbs green+blue)\n"
+               "Amber = whisky/beer\n"
+               "White = clear (no absorption)");
+    Float_knob(f, &_absorptionDensity, "absorption_density", "density");
+    SetRange(f, 0.f, 10.f);
+    Tooltip(f, "How quickly light is absorbed inside the volume.\n"
+               "0 = clear glass (no absorption)\n"
+               "0.5 = lightly tinted\n"
+               "2.0 = deeply coloured\n"
+               "5+ = very dark / opaque looking");
+
     Divider(f, "Displacement");
     Float_knob(f, &_displacementScale, "displacement_scale", "scale");
     SetRange(f, 0.f, 10.f);
@@ -127,12 +149,14 @@ void SpectralSurfaceOp::_ApplyPreset(int preset)
             _metallic = 0.0f; _roughness = 0.0f; _ior = 1.52f;
             _opacity = 0.3f; _abbeNumber = 58.f; _thinFilmThickness = 0.f;
             _metalType = 0;
+            _absorptionColor[0]=1.f; _absorptionColor[1]=1.f; _absorptionColor[2]=1.f; _absorptionDensity=0.f;
             break;
         case 2: // diamond
             _diffuseColor[0] = _diffuseColor[1] = _diffuseColor[2] = 0.97f;
             _metallic = 0.0f; _roughness = 0.0f; _ior = 2.42f;
             _opacity = 0.1f; _abbeNumber = 55.f; _thinFilmThickness = 0.f;
             _metalType = 0;
+            _absorptionColor[0]=1.f; _absorptionColor[1]=1.f; _absorptionColor[2]=1.f; _absorptionDensity=0.f;
             break;
         case 3: // copper
             _diffuseColor[0] = 0.95f; _diffuseColor[1] = 0.64f; _diffuseColor[2] = 0.54f;
@@ -193,6 +217,7 @@ void SpectralSurfaceOp::_ApplyPreset(int preset)
             _metallic = 0.0f; _roughness = 0.0f; _ior = 1.333f;
             _opacity = 0.15f; _abbeNumber = 55.f; _thinFilmThickness = 0.f;
             _metalType = 0;
+            _absorptionColor[0]=0.4f; _absorptionColor[1]=0.75f; _absorptionColor[2]=0.9f; _absorptionDensity=1.0f;
             break;
         default: // custom — don't change anything
             break;
@@ -211,6 +236,12 @@ void SpectralSurfaceOp::_ApplyPreset(int preset)
         if (Knob* k = op->knob("opacity"))     k->set_value(_opacity);
         if (Knob* k = op->knob("abbe_number")) k->set_value(_abbeNumber);
         if (Knob* k = op->knob("thin_film"))   k->set_value(_thinFilmThickness);
+        if (Knob* k = op->knob("absorption_color")) {
+            k->set_value(_absorptionColor[0], 0);
+            k->set_value(_absorptionColor[1], 1);
+            k->set_value(_absorptionColor[2], 2);
+        }
+        if (Knob* k = op->knob("absorption_density")) k->set_value(_absorptionDensity);
     }
 }
 
@@ -247,6 +278,11 @@ void SpectralSurfaceOp::RegisterParams()
     p.displacementMidpoint = _displacementMidpoint;
     p.displacementFile = (_displacementFile && _displacementFile[0]) ? _displacementFile : "";
     p.metalType = _metalType;
+    p.textureBlend = _textureBlend;
+    p.absorptionColor[0] = _absorptionColor[0];
+    p.absorptionColor[1] = _absorptionColor[1];
+    p.absorptionColor[2] = _absorptionColor[2];
+    p.absorptionDensity = _absorptionDensity;
     // Store Iop pointers if connected
     if (inputs() > 0 && input(0)) {
         Iop* texIop = dynamic_cast<Iop*>(input(0));

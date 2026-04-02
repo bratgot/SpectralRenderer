@@ -72,7 +72,6 @@ public:
         float radiance = 0.f;
         int gathered = 0;
 
-        // Search 3x3x3 grid cells around the query point
         int cx = static_cast<int>(std::floor(pos[0] * _invCell));
         int cy = static_cast<int>(std::floor(pos[1] * _invCell));
         int cz = static_cast<int>(std::floor(pos[2] * _invCell));
@@ -88,32 +87,32 @@ public:
             for (int idx : it->second) {
                 const SpectralPhoton& p = _photons[idx];
 
-                // Distance check
                 GfVec3f d = p.position - pos;
                 float dist2 = d[0]*d[0] + d[1]*d[1] + d[2]*d[2];
                 if (dist2 > r2) continue;
 
-                // Wavelength proximity — only gather photons near our query wavelength
-                // Spectral kernel: 10nm bandwidth Gaussian
+                // Spectral kernel: 25nm bandwidth Gaussian
+                // Wider kernel = more photons contribute = smoother caustics
                 float dLambda = p.wavelength - queryLambda;
-                float spectralWeight = std::exp(-dLambda * dLambda / (2.f * 10.f * 10.f));
-                if (spectralWeight < 0.01f) continue;
+                float spectralWeight = std::exp(-dLambda * dLambda / (2.f * 25.f * 25.f));
+                if (spectralWeight < 0.001f) continue;
 
-                // Cosine weight: photon must arrive from above the surface
+                // Cosine weight
                 float NdotD = -(N[0]*p.direction[0] + N[1]*p.direction[1] + N[2]*p.direction[2]);
                 if (NdotD <= 0.f) continue;
 
-                // Epanechnikov kernel for smooth falloff
-                float kernelW = 1.f - dist2 / r2;
+                // Cone kernel (k=1) for smooth falloff
+                float kernelW = 1.f - std::sqrt(dist2 / r2);
 
-                radiance += p.power * spectralWeight * kernelW * NdotD;
+                radiance += p.power * spectralWeight * kernelW;
                 gathered++;
             }
         }
 
         if (gathered == 0) return 0.f;
 
-        // Density estimation: divide by area of gather disk
+        // Density estimation: divide by disk area
+        // Scale by 1/pi*r^2 and compensate for spectral bandwidth
         float area = 3.14159f * r2;
         return radiance / area;
     }

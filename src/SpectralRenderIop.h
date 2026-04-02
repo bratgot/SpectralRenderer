@@ -54,7 +54,7 @@ public:
     // Input 0: Scene  (GeometryProviderI) — optional
     // Input 1: Camera (CameraOp)          — optional
     // Input 2: BG     (any Iop)           — optional, sets output resolution
-    int  minimum_inputs()               const override { return 1; }
+    int  minimum_inputs()               const override { return 0; }
     int  maximum_inputs()               const override { return 3; }
     const char* input_label(int idx, char*) const override;
     bool test_input(int idx, Op* op)    const override;
@@ -109,7 +109,7 @@ private:
     float _focusDistance = 100.f;    // world units
     int   _proxyMode = 3;              // 0=1/4, 1=1/2, 2=3/4, 3=full
     bool  _caustics = false;          // enable caustic photon mapping
-    int   _causticPhotons = 100000;    // photons to trace
+    int   _causticPhotons = 500000;     // photons to trace
     float _causticRadius = 0.5f;       // gather radius
     int   _aoSamples = 0;              // AO samples per pixel (0 = disabled)
     float _aoRadius  = 5.f;            // AO max ray distance

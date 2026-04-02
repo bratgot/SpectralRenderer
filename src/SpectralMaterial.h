@@ -47,6 +47,9 @@ struct SpectralMaterial
     float   abbeNumber       = 0.0f;   // dispersion (0=none, ~60=crown glass, ~30=flint)
     float   thinFilmThickness = 0.0f;  // thin-film interference thickness in nm (0=disabled)
     int     metalType        = 0;      // 0=none, 1=gold, 2=copper, 3=silver, 4=aluminium, 5=iron, 6=titanium
+    float   textureBlend     = 1.0f;   // 0=base color only, 1=full texture
+    GfVec3f absorptionColor  = GfVec3f(1.f, 1.f, 1.f);  // volume color (white=clear)
+    float   absorptionDensity = 0.f;   // 0=clear, higher=more absorption
 
     // Identifier
     std::string name = "default";
@@ -104,6 +107,39 @@ struct SpectralMaterial
         return emissiveColor[0] * rBasis
              + emissiveColor[1] * gBasis
              + emissiveColor[2] * bBasis;
+    }
+
+    // ------------------------------------------------------------------
+    // Beer-Lambert spectral absorption
+    //
+    //   Returns transmittance for a ray traveling 'distance' through
+    //   this material's volume. T(λ) = exp(-σ(λ) * distance).
+    //
+    //   absorptionColor = what colour survives (red glass = (1,0,0))
+    //   absorptionDensity = how quickly light is absorbed
+    //   σ(λ) = -log(color_at_λ) * density.  White = clear glass.
+    // ------------------------------------------------------------------
+    float SpectralTransmittance(float lambda, float distance) const
+    {
+        if (absorptionDensity <= 0.f || distance <= 0.f)
+            return 1.f;
+
+        auto gauss = [](float l, float center, float sigma) -> float {
+            float t = (l - center) / sigma;
+            return std::exp(-0.5f * t * t);
+        };
+
+        float rBasis = gauss(lambda, 630.f, 30.f);
+        float gBasis = gauss(lambda, 532.f, 30.f);
+        float bBasis = gauss(lambda, 460.f, 25.f);
+
+        float colorAtLambda = absorptionColor[0] * rBasis
+                            + absorptionColor[1] * gBasis
+                            + absorptionColor[2] * bBasis;
+        colorAtLambda = std::max(0.001f, std::min(1.f, colorAtLambda));
+
+        float sigma = -std::log(colorAtLambda) * absorptionDensity;
+        return std::exp(-sigma * distance);
     }
 
     /// Default white material

@@ -80,6 +80,9 @@ private:
     float _displacementScale = 0.0f;    // world units (0=disabled)
     float _displacementMidpoint = 0.0f; // 0.5=centered, 0=outward only
     int   _metalType = 0;                // 0=none, 1=gold, 2=copper, 3=silver, 4=alu, 5=iron, 6=ti
+    float _textureBlend = 1.0f;          // 0=base color only, 1=full texture
+    float _absorptionColor[3] = {1.f, 1.f, 1.f}; // volume color (white=clear)
+    float _absorptionDensity = 0.f;       // 0=clear, higher=darker
     const char* _displacementFile = "";  // displacement map path
 
     void _ApplyPreset(int preset);
@@ -95,6 +98,9 @@ public:
         float displacementMidpoint = 0.0f;
         std::string displacementFile;
         int metalType = 0;
+        float textureBlend = 1.0f;
+        float absorptionColor[3] = {1.f, 1.f, 1.f};
+        float absorptionDensity = 0.f;
         Op* dispIop = nullptr;
         Op* texIop  = nullptr;   // base color texture Iop
     };

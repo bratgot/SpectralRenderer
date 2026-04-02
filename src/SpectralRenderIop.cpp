@@ -221,19 +221,6 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         Tooltip(f, "Distance from camera to the focal plane<br>"
                    "in world units. Objects at this distance<br>"
                    "will be sharp; nearer and farther objects blur.");
-        Divider(f, "Caustics");
-        Bool_knob(f, &_caustics, "caustics", "enable caustics");
-        Tooltip(f, "Spectral caustics via forward specular trace.<br>"
-                   "Traces rays from lights through glass surfaces<br>"
-                   "with per-wavelength Snell's law refraction.<br>"
-                   "Handles multi-interface geometry (prisms, lenses).<br>"
-                   "Use SphereLight or DistantLight (not DomeLight).<br>"
-                   "Glass must have Abbe number > 0 for rainbow effect.");
-        Float_knob(f, &_causticRadius, "caustic_radius", "caustic radius");
-        SetRange(f, 0.1f, 10.f);
-        Tooltip(f, "Acceptance radius for forward-traced caustic rays.<br>"
-                   "Larger = brighter but softer caustics.<br>"
-                   "Smaller = sharper but dimmer. Default 0.5.");
     }
     EndGroup(f);
 
@@ -313,74 +300,69 @@ void SpectralRenderIop::knobs(Knob_Callback f)
     }
     EndGroup(f);
 
-    BeginClosedGroup(f, "spectral_engine", "Spectral rendering engine — algorithms and equations");
+    BeginClosedGroup(f, "spectral_engine", "Spectral rendering engine — how it works");
     {
         Text_knob(f,
-            "<b>Hero wavelength spectral sampling</b><br>"
-            "Samples visible spectrum 380-780nm via CIE 1931 2-degree standard observer.<br>"
-            "Spectral radiance L(lambda) integrated to XYZ: X = integral L(l)*x_bar(l) dl<br>"
-            "XYZ to linear sRGB via 3x3 matrix. Monte Carlo: one wavelength per ray.<br>"
+            "<b>What makes this renderer different</b><br>"
+            "Most renderers (Arnold, V-Ray, RenderMan) work in RGB — every ray carries 3 colour<br>"
+            "channels. SpectralRenderer traces one wavelength per ray (380-780nm), like real light.<br>"
+            "This means dispersion, thin-film interference, fluorescence and spectral caustics<br>"
+            "happen physically — no faking, no post-process tricks.<br>"
             "<br>"
-            "<b>Disney BSDF with GGX microfacet (Burley 2012, Walter 2007)</b><br>"
-            "f = f_diff + f_spec. Diffuse: f_d = (1-metal)*baseColor/pi * F_disney.<br>"
-            "Specular: f_s = D*G*F / (4*NdotV*NdotL). D = GGX: a^2 / (pi*(NdotH^2*(a^2-1)+1)^2).<br>"
-            "G = Smith-GGX height-correlated. F = Schlick or exact conductor.<br>"
+            "<b>The rendering equation (Kajiya 1986)</b><br>"
+            "Lo(p,wo) = Le(p,wo) + integral f(p,wi,wo) * Li(p,wi) * cos(theta) dwi<br>"
+            "In words: outgoing light = emission + all incoming light * surface reflectance.<br>"
+            "We solve this with Monte Carlo integration — trace random rays, average the result.<br>"
+            "More samples = less noise. The spectral version evaluates this per-wavelength.<br>"
             "<br>"
-            "<b>Multiscatter GGX energy compensation (Kulla-Conty 2017)</b><br>"
-            "Single-scatter GGX loses energy at high roughness. Compensation lobe:<br>"
-            "f_ms = F_avg * (1-Ess(V)) * (1-Ess(L)) / (pi*(1-Ess_avg)).<br>"
-            "Ess = directional albedo from analytical fit. Adds ~40-70% energy at rough=1.<br>"
+            "<b>How spectral sampling works</b><br>"
+            "Each sample picks a random wavelength between 380nm (violet) and 780nm (red).<br>"
+            "The ray traces through the scene at that single wavelength. After all samples,<br>"
+            "the accumulated spectral radiance converts to colour via CIE colour matching.<br>"
+            "This is why dispersion works naturally — each wavelength bends differently.<br>"
             "<br>"
-            "<b>Complex IOR metals (Fresnel conductor)</b><br>"
-            "Exact unpolarized reflectance: F = (Rs+Rp)/2 using spectral (n,k).<br>"
-            "Rs = |cosI - n*cosT|^2 / |cosI + n*cosT|^2 (complex arithmetic).<br>"
-            "Measured data for Au, Cu, Ag, Al, Fe, Ti from Palik's Handbook.<br>"
-            "9-point spectral sampling 380-780nm with linear interpolation.<br>"
+            "<b>Materials and shading</b><br>"
+            "Disney BSDF: industry-standard PBR model with metallic/roughness workflow.<br>"
+            "Metals use measured spectral (n,k) optical constants — gold, copper, silver, etc.<br>"
+            "have physically correct colour that shifts with viewing angle. Energy-conserving<br>"
+            "multiscatter GGX prevents rough surfaces from going too dark.<br>"
             "<br>"
-            "<b>Multiple Importance Sampling (Veach 1995)</b><br>"
-            "Combines light sampling (NEE) and BSDF sampling with power heuristic:<br>"
-            "w(pA) = pA^2 / (pA^2 + pB^2). Light PDF: dome=cosine/pi, sphere=1/solidAngle,<br>"
-            "rect=dist^2/(area*cosTheta). BSDF PDF: mixed GGX + cosine hemisphere.<br>"
+            "<b>Glass and dispersion</b><br>"
+            "Transparent materials refract light using Snell's law with the Abbe number<br>"
+            "controlling how much each wavelength bends differently. Higher Abbe = less spread.<br>"
+            "Crown glass (58) gives subtle dispersion. Flint glass (30) gives strong rainbows.<br>"
+            "Diamond (55) with high IOR (2.42) produces dramatic fire effects.<br>"
             "<br>"
-            "<b>Dispersion (Cauchy model via Abbe number)</b><br>"
-            "n(lambda) = n_d + (n_d-1)/V_d * (587.6-lambda)/(656.3-486.1).<br>"
-            "Snell's law: n1*sin(theta1) = n2*sin(theta2) applied per-wavelength.<br>"
-            "Exact Fresnel dielectric for reflect/refract probability.<br>"
+            "<b>Caustics</b><br>"
+            "Light concentrations caused by refraction (glass focusing) or reflection (curved mirrors).<br>"
+            "Uses photon mapping: millions of photons traced from lights through glass, storing<br>"
+            "where each wavelength lands. The renderer gathers nearby photons at each shading point.<br>"
+            "Rainbow caustics emerge because different wavelengths land at different positions.<br>"
             "<br>"
-            "<b>Spectral caustics (forward specular trace)</b><br>"
-            "For each light: trace ray toward shading point through glass.<br>"
-            "Refract at each interface with wavelength-dependent IOR (Abbe).<br>"
-            "Each wavelength exits at a different angle -> rainbow separation.<br>"
-            "Multi-interface: handles prisms, lenses, gems (up to 8 bounces).<br>"
+            "<b>Noise reduction</b><br>"
+            "Multiple Importance Sampling (MIS) combines light and surface sampling strategies<br>"
+            "to reduce noise — especially effective for glossy surfaces under small bright lights.<br>"
+            "Adaptive sampling stops sending rays to pixels that are already clean.<br>"
+            "Blue noise (R2 sequence) distributes samples more evenly than pure random.<br>"
+            "OptiX AI denoiser can clean up remaining noise as a post-process.<br>"
             "<br>"
-            "<b>Thin-film interference (Fabry-Perot)</b><br>"
-            "Phase: delta = 4*pi*n_film*d*cos(theta_t) / lambda.<br>"
-            "Reflectance modulation: F_film = F * (1 + 0.5*cos(delta)).<br>"
-            "Produces iridescent coating effects (soap bubbles, oil slicks).<br>"
+            "<b>Depth of field</b><br>"
+            "Thin lens model: f-stop controls aperture size, focus distance sets the sharp plane.<br>"
+            "Each ray origin is jittered on a circular lens disk — objects away from the focus<br>"
+            "plane blur naturally. Lower f-stop = shallower DOF. f/0 = pinhole (everything sharp).<br>"
             "<br>"
-            "<b>Acceleration structures</b><br>"
-            "CPU: Embree 4 BVH with two-timestep motion blur interpolation.<br>"
-            "GPU: OptiX 8.1 GAS with RTX hardware RT cores.<br>"
-            "Multi-bounce path tracing. Russian roulette: P_rr = min(0.95, throughput).<br>"
+            "<b>Environment and lighting</b><br>"
+            "HDRI environment maps provide image-based lighting from all directions.<br>"
+            "Each shading point samples the hemisphere around its surface normal.<br>"
+            "CIE illuminants (D65, D50, A, etc.) provide physically standardised light spectra.<br>"
+            "Shadow rays pass through glass with Fresnel-weighted transmittance.<br>"
             "<br>"
-            "<b>Adaptive sampling (Welford's online algorithm)</b><br>"
-            "Per-pixel: M2 += (lum - mean) * (lum - new_mean). Variance = M2/(n-1).<br>"
-            "Converged when stddev less than threshold * max(mean, 0.001). Multi-pass batches.<br>"
-            "<br>"
-            "<b>R2 quasi-random sampling</b><br>"
-            "Plastic constant: phi2 = 1.3247..., a1 = 1/phi2, a2 = 1/phi2^2.<br>"
-            "Sample n: x = frac(offset + n*a1), y = frac(offset + n*a2).<br>"
-            "Per-pixel Cranley-Patterson rotation for decorrelation.<br>"
-            "<br>"
-            "<b>DOF thin lens model</b><br>"
-            "Lens radius R = focalLength / (2 * fStop). Uniform disk sampling.<br>"
-            "Origin offset: O' = O + right*dx + up*dy. Dir: focalPoint - O'.<br>"
-            "Focus plane at camera.focusDistance along view axis.<br>"
-            "<br>"
-            "<b>Render-time displacement</b><br>"
-            "OpenSubdiv Catmull-Clark level 2 with face-varying UV refinement.<br>"
-            "Per-vertex: P' = P + N * (texSample - midpoint) * scale.<br>"
-            "Normals recomputed from displaced geometry via area-weighted face normals."
+            "<b>Metal presets — spectral Fresnel conductor</b><br>"
+            "Gold: warm yellow, shifts to white at grazing. Absorbs blue wavelengths.<br>"
+            "Copper: reddish face-on, whitens at edges. Sharp spectral transition at 580nm.<br>"
+            "Silver: near-neutral, very high reflectance across all wavelengths.<br>"
+            "Aluminium: slightly warm neutral, subtle blue-shift at grazing angles.<br>"
+            "Iron/Titanium: dark metals with strong wavelength-dependent absorption."
         );
     }
     EndGroup(f);
@@ -409,9 +391,8 @@ int SpectralRenderIop::knob_changed(Knob* k)
         char buf[128];
         static const char* const proxyLabels[] = { "1/4", "1/2", "3/4", "full" };
         const char* proxyStr = (_proxyMode >= 0 && _proxyMode <= 3) ? proxyLabels[_proxyMode] : "full";
-        snprintf(buf, sizeof(buf), "%s\n%d spp\n%d bounces\n%s%s",
-                 device, _samples, _maxBounces, proxyStr,
-                 _caustics ? "\ncaustics" : "");
+        snprintf(buf, sizeof(buf), "%s\n%d spp\n%d bounces\n%s",
+                 device, _samples, _maxBounces, proxyStr);
         lk->set_text(buf);
     }
 
@@ -1320,6 +1301,11 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                                 mat.displacementScale = entry.second.displacementScale;
                                 mat.displacementMidpoint = entry.second.displacementMidpoint;
                                 mat.metalType = entry.second.metalType;
+                                mat.textureBlend = entry.second.textureBlend;
+                                mat.absorptionColor = GfVec3f(entry.second.absorptionColor[0],
+                                                               entry.second.absorptionColor[1],
+                                                               entry.second.absorptionColor[2]);
+                                mat.absorptionDensity = entry.second.absorptionDensity;
                                 // Load displacement texture from file path
                                 if (!entry.second.displacementFile.empty()
                                     && mat.displacementScale > 0.f) {
@@ -1970,6 +1956,12 @@ void SpectralRenderIop::_EnsureFrameRendered()
     std::lock_guard<std::mutex> lock(_renderMutex);
     if (_frameReady.load()) return;
 
+    // Skip if no scene loaded or empty
+    if (!_scene || _scene->TotalTriangles() == 0) {
+        _frameReady.store(true);
+        return;
+    }
+
     // Use the format from info_ (set by _validate from BG or format knob)
     const Format* fmtPtr = &(info_.format());
     if (!fmtPtr) { _frameReady.store(true); return; }
@@ -2047,9 +2039,9 @@ void SpectralRenderIop::_EnsureFrameRendered()
         fprintf(stderr, "SpectralRender: rendering %dx%d, %zu tris, %d spp, device=%s%s\n",
                 W, H, _scene->TotalTriangles(), renderSpp, deviceStr, passStr);
 
-    // Build caustic photon map / enable MNEE if caustics on
-    pxr::SpectralPhotonMap causticFlag;  // used as enable flag for MNEE
-    const pxr::SpectralPhotonMap* pmap = _caustics ? &causticFlag : nullptr;
+    // Caustics disabled — photon mapping removed for stability.
+    // Will be re-implemented with progressive photon mapping in Phase 8d.
+    const pxr::SpectralPhotonMap* pmap = nullptr;
 
 #ifdef SPECTRAL_HAS_OPTIX
     if (useGPU) {
