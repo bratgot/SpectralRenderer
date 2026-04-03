@@ -68,7 +68,7 @@ find_library(LIB_TBB       tbb              PATHS "${NUKE_LIB_DIR}" NO_DEFAULT_P
 set(USD_LIB_NAMES
     usd_tf usd_gf usd_vt usd_arch usd_js usd_trace usd_work usd_plug
     usd_sdf usd_pcp usd_ar usd_kind
-    usd_usd usd_usdGeom usd_usdShade usd_usdLux usd_usdSkel usd_usdRender
+    usd_usd usd_usdGeom usd_usdShade usd_usdLux usd_usdSkel usd_usdRender usd_usdVol
     usd_hf usd_hd usd_hdx usd_hgi usd_hgiGL usd_hgiInterop
     usd_hdsi usd_hdSt usd_hdar
     usd_usdImaging usd_usdImagingGL usd_usdHydra
@@ -258,13 +258,13 @@ endif()
 # SpectralRender.dll — NDK RenderIop (Nuke plugin)
 # ---------------------------------------------------------------------------
 add_library(SpectralRender SHARED
-    src/SpectralRenderIop.cpp src/SpectralSurfaceOp.cpp
+    src/SpectralRenderIop.cpp src/SpectralSurfaceOp.cpp src/SpectralVDBRead.cpp
 )
 target_include_directories(SpectralRender PRIVATE ${SPECTRAL_INCLUDES})
 target_compile_definitions(SpectralRender PRIVATE ${SPECTRAL_DEFINES})
 target_compile_options(SpectralRender PRIVATE ${SPECTRAL_OPTIONS})
 target_link_libraries(SpectralRender PRIVATE
-    SpectralCore "${LIB_DDIMAGE}" "${LIB_FDKBASE}" "${LIB_TBB}"
+    SpectralCore "${LIB_DDIMAGE}" "${LIB_FDKBASE}" "${LIB_TBB}" "${LIB_NDK}"
     "${LIB_USDABS}" "${LIB_USDENGINE}" "C:/dev/SpectralRenderer/python311.lib" ${USD_LIBS}
     opengl32
 )

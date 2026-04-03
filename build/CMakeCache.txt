@@ -366,6 +366,9 @@ _found_usd_usdShade:FILEPATH=C:/Program Files/Nuke17.0v1/FnUSD/lib/usd_usdShade.
 _found_usd_usdSkel:FILEPATH=C:/Program Files/Nuke17.0v1/FnUSD/lib/usd_usdSkel.lib
 
 //Path to a library.
+_found_usd_usdVol:FILEPATH=C:/Program Files/Nuke17.0v1/FnUSD/lib/usd_usdVol.lib
+
+//Path to a library.
 _found_usd_vt:FILEPATH=C:/Program Files/Nuke17.0v1/FnUSD/lib/usd_vt.lib
 
 //Path to a library.

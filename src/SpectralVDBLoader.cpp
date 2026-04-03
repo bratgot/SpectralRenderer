@@ -14,7 +14,52 @@
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-std::shared_ptr<SpectralVolume> SpectralVDBLoader::Load(const char* filepath)
+// Grid name matching tables (same heuristics as VDBmarcher)
+static bool _matchName(const std::string& n, const char** list) {
+    for (int i = 0; list[i]; ++i) if (n == list[i]) return true;
+    return false;
+}
+static const char* kDensityNames[] = {"density","density_1","smoke","soot","absorption","scatter",nullptr};
+static const char* kTempNames[]    = {"temperature","heat","temp",nullptr};
+static const char* kFlameNames[]   = {"flame","flames","fire","fuel","burn","incandescence","emission",nullptr};
+static const char* kVelNames[]     = {"vel","v","velocity","motion",nullptr};
+static const char* kColorNames[]   = {"Cd","color","colour","rgb","albedo",nullptr};
+
+std::vector<SpectralVDBLoader::GridInfo> SpectralVDBLoader::DiscoverGrids(const char* filepath)
+{
+    std::vector<GridInfo> result;
+    if (!filepath || strlen(filepath) == 0) return result;
+
+    try {
+        openvdb::initialize();
+        openvdb::io::File file(filepath);
+        file.open();
+
+        for (auto it = file.beginName(); it != file.endName(); ++it) {
+            std::string name = it.gridName();
+            auto meta = file.readGridMetadata(name);
+            std::string type = meta->valueType();
+
+            std::string category = "other";
+            if (_matchName(name, kDensityNames) && type == "float") category = "density";
+            else if (_matchName(name, kTempNames) && type == "float") category = "temperature";
+            else if (_matchName(name, kFlameNames) && type == "float") category = "flame";
+            else if (_matchName(name, kVelNames) && (type == "vec3s" || type == "vec3f")) category = "velocity";
+            else if (_matchName(name, kColorNames) && (type == "vec3s" || type == "vec3f")) category = "color";
+            else if (type == "float" && category == "other") category = "float";
+
+            result.push_back({name, type, category});
+        }
+
+        file.close();
+    } catch (const std::exception& e) {
+        fprintf(stderr, "SpectralVDB: discover error: %s\n", e.what());
+    }
+    return result;
+}
+
+std::shared_ptr<SpectralVolume> SpectralVDBLoader::Load(const char* filepath,
+    const char* densityGridName, const char* tempGridName)
 {
     if (!filepath || strlen(filepath) == 0) return nullptr;
 
@@ -25,22 +70,31 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::Load(const char* filepath)
 
         auto vol = std::make_shared<SpectralVolume>();
 
-        // Find density grid (try "density" first, then first float grid)
+        // Find grids by name (override) or auto-detect
         openvdb::FloatGrid::Ptr densityGrid;
         openvdb::FloatGrid::Ptr tempGrid;
+        std::string wantDensity = (densityGridName && strlen(densityGridName) > 0) ? densityGridName : "";
+        std::string wantTemp = (tempGridName && strlen(tempGridName) > 0) ? tempGridName : "";
 
         for (auto it = file.beginName(); it != file.endName(); ++it) {
             auto base = file.readGrid(*it);
             auto fg = openvdb::gridPtrCast<openvdb::FloatGrid>(base);
             if (!fg) continue;
 
-            if (*it == "density" && !densityGrid) {
-                densityGrid = fg;
-            } else if ((*it == "temperature" || *it == "temp") && !tempGrid) {
-                tempGrid = fg;
-            } else if (!densityGrid) {
-                densityGrid = fg;  // fallback: first float grid
+            std::string name = *it;
+            // Explicit name match
+            if (!wantDensity.empty() && name == wantDensity) densityGrid = fg;
+            if (!wantTemp.empty() && name == wantTemp) tempGrid = fg;
+
+            // Auto-detect fallbacks
+            if (!densityGrid && wantDensity.empty()) {
+                if (_matchName(name, kDensityNames)) densityGrid = fg;
             }
+            if (!tempGrid && wantTemp.empty()) {
+                if (_matchName(name, kTempNames)) tempGrid = fg;
+            }
+            // Last resort: first float grid as density
+            if (!densityGrid && wantDensity.empty()) densityGrid = fg;
         }
 
         file.close();

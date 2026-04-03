@@ -60,7 +60,7 @@ public:
     // Input 1: Camera (CameraOp)          — optional
     // Input 2: BG     (any Iop)           — optional, sets output resolution
     int  minimum_inputs()               const override { return 0; }
-    int  maximum_inputs()               const override { return 3; }
+    int  maximum_inputs()               const override { return 4; }
     const char* input_label(int idx, char*) const override;
     bool test_input(int idx, Op* op)    const override;
     Op*  default_input(int idx)         const override;
@@ -114,6 +114,7 @@ private:
     void _BuildCameraFromInput();
     void _BuildLightRig();
     void _LoadVDB();
+    void _applyVolumeShading(std::shared_ptr<pxr::SpectralVolume>& vol);
     void _EnsureFrameRendered();
     std::string _resolveFramePath(int frame) const;
 
@@ -144,11 +145,18 @@ private:
 
     // Volume / VDB
     const char* _vdbFile = "";
-    int    _vdbDensityGrid = 0;
-    int    _vdbTempGrid = 0;
-    int    _vdbFlameGrid = 0;
-    int    _vdbColorGrid = 0;
-    static const char* _vdbGridNames[];  // populated from file
+    int    _vdbDensityGridIdx = 1;  // default "density"
+    int    _vdbTempGridIdx = 0;
+    int    _vdbFlameGridIdx = 0;
+    int    _vdbColorGridIdx = 0;
+    // Override fields (set by Discover Grids)
+    const char* _vdbDensityOverride = "";
+    const char* _vdbTempOverride = "";
+    const char* _vdbFlameOverride = "";
+    const char* _vdbColorOverride = "";
+    static const char* const kVdbGridMenu[];
+    const char* _VdbGridName(int idx, const char* ovr) const;
+    int    _vdbShadingPreset = 0;
     double _vdbExtinction = 5.0;
     double _vdbScattering = 3.0;
     double _vdbDensityMult = 1.0;
@@ -182,7 +190,8 @@ private:
     std::vector<VDBPreviewPoint> _vdbPreviewPoints;
     float _vdbMaxDensity = 1.f;
     bool  _vdbPreviewDirty = true;
-    std::string _vdbLoadedPath;  // cached to avoid reload
+    std::string _vdbLoadedPath;
+    int         _vdbLastLoadedFrame = -999;  // cached to avoid reload
 
     // VDB viewport preview (kept in first declaration above)
 

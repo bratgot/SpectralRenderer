@@ -755,15 +755,17 @@ extern "C" __global__ void __raygen__spectral()
         float b = __uint_as_float(p2);
         bool spp1Hit = (p4 > 0u);
 
-        // Background: dome light color on miss
+        // Background: dome light color on miss (skip when volume for comp)
         if (!spp1Hit) {
             r = 0.f; g = 0.f; b = 0.f;
-            for (unsigned int li = 0; li < params.lightCount; ++li) {
-                const GPULight& L = params.lights[li];
-                if (L.type == 3) { // dome light
-                    r += L.color.x * L.intensity;
-                    g += L.color.y * L.intensity;
-                    b += L.color.z * L.intensity;
+            if (!params.hasVolume) {
+                for (unsigned int li = 0; li < params.lightCount; ++li) {
+                    const GPULight& L = params.lights[li];
+                    if (L.type == 3) {
+                        r += L.color.x * L.intensity;
+                        g += L.color.y * L.intensity;
+                        b += L.color.z * L.intensity;
+                    }
                 }
             }
         }
@@ -958,15 +960,17 @@ extern "C" __global__ void __raygen__spectral()
                         radiance += throughput * shadeHit(*bMat, bN, bV, bOrigin, lambda, bSeed);
                 }
             } else {
-                // Miss — evaluate dome lights for background (match CPU)
+                // Miss — dome background only when no volume (for comp)
                 radiance = 0.f;
-                for (unsigned int li = 0; li < params.lightCount; ++li) {
-                    const GPULight& L = params.lights[li];
-                    if (L.type == 3) { // dome light
-                        float lumR = expf(-((lambda-630.f)*(lambda-630.f))/(2.f*30.f*30.f));
-                        float lumG = expf(-((lambda-532.f)*(lambda-532.f))/(2.f*30.f*30.f));
-                        float lumB = expf(-((lambda-460.f)*(lambda-460.f))/(2.f*25.f*25.f));
-                        radiance += (L.color.x*L.intensity*lumR + L.color.y*L.intensity*lumG + L.color.z*L.intensity*lumB);
+                if (!params.hasVolume) {
+                    for (unsigned int li = 0; li < params.lightCount; ++li) {
+                        const GPULight& L = params.lights[li];
+                        if (L.type == 3) {
+                            float lumR = expf(-((lambda-630.f)*(lambda-630.f))/(2.f*30.f*30.f));
+                            float lumG = expf(-((lambda-532.f)*(lambda-532.f))/(2.f*30.f*30.f));
+                            float lumB = expf(-((lambda-460.f)*(lambda-460.f))/(2.f*25.f*25.f));
+                            radiance += (L.color.x*L.intensity*lumR + L.color.y*L.intensity*lumG + L.color.z*L.intensity*lumB);
+                        }
                     }
                 }
             }

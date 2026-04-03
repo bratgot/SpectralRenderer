@@ -7,6 +7,7 @@
 
 #ifdef SPECTRAL_HAS_VDB
 #include "SpectralVDBLoader.h"
+#include "SpectralVDBRead.h"
 #endif
 
 // PXR — USD stage traversal
@@ -20,6 +21,8 @@
 #include <pxr/usd/usdGeom/tokens.h>
 #include <pxr/usd/usdGeom/primvarsAPI.h>
 #include <pxr/usd/usdShade/material.h>
+#include <pxr/usd/usdVol/volume.h>
+#include <pxr/usd/usdVol/openVDBAsset.h>
 #include <pxr/usd/usdShade/materialBindingAPI.h>
 #include <pxr/usd/usdShade/shader.h>
 #include <pxr/usd/usdShade/tokens.h>
@@ -64,10 +67,6 @@ PXR_NAMESPACE_USING_DIRECTIVE
 // ---------------------------------------------------------------------------
 const char* const SpectralRenderIop::CLASS = "SpectralRender";
 
-// VDB grid names — populated dynamically when file is loaded
-static const char* const kDefaultGridNames[] = { "(none)", "density", "temperature", "flame", "velocity", "color", nullptr };
-const char* SpectralRenderIop::_vdbGridNames[] = { "(none)", "density", "temperature", "flame", "velocity", "color", nullptr };
-
 static Op* SpectralRenderIopCreate(Node* node)
 {
     return new SpectralRenderIop(node);
@@ -83,9 +82,28 @@ SpectralRenderIop::SpectralRenderIop(Node* node)
     : Iop(node)
     , _scene(std::make_unique<pxr::SpectralScene>())
 {
+    inputs(4);  // force 4 visible input pipes
+    fprintf(stderr, "SpectralRender: DLL build %s %s\n", __DATE__, __TIME__);
 }
 
 SpectralRenderIop::~SpectralRenderIop() = default;
+
+// Pre-populated grid menu — common VDB grid names (shared with SpectralVDBRead)
+const char* const SpectralRenderIop::kVdbGridMenu[] = {
+    "(none)", "density", "density_1", "smoke", "soot",
+    "temperature", "temp", "heat",
+    "flame", "fire", "fuel", "burn",
+    "vel", "velocity", "v", "motion",
+    "Cd", "color", "colour", "albedo",
+    nullptr
+};
+
+const char* SpectralRenderIop::_VdbGridName(int idx, const char* ovr) const
+{
+    if (ovr && strlen(ovr) > 0) return ovr;
+    if (idx > 0) return kVdbGridMenu[idx];
+    return nullptr;
+}
 
 const char* SpectralRenderIop::node_help() const
 {
@@ -98,11 +116,10 @@ const char* SpectralRenderIop::node_help() const
         "or a default 50mm perspective.\n\n"
         "Input 2 (BG): Connect any 2D image. Its format sets the\n"
         "output resolution. The BG image is rendered behind the scene.\n\n"
-        "If no scene input is connected, set the 'USD file' knob\n"
-        "to a .usd/.usda/.usdc file path instead.\n\n"
-        "For interactive viewport, use the Hydra delegate\n"
-        "(\"Spectral (CPU)\" in the renderer dropdown).";
-}
+        "Input 3 (Vol): Connect a SpectralVDBRead node.\n"
+        "Volume shading controls are on the Volumes tab.\n\n"
+        "Created by Marten Blumen\n"
+        "github.com/bratgot/SpectralRenderer";}
 
 // ---------------------------------------------------------------------------
 // Input handling
@@ -113,6 +130,7 @@ const char* SpectralRenderIop::input_label(int idx, char*) const
         case 0: return "Scene";
         case 1: return "Cam";
         case 2: return "BG";
+        case 3: return "Vol";
         default: return "";
     }
 }
@@ -123,17 +141,18 @@ bool SpectralRenderIop::test_input(int idx, Op* op) const
 
     switch (idx) {
         case 0: {
-            // Accept any Op that implements GeometryProviderI
-            GeometryProviderI* gp = dynamic_cast<GeometryProviderI*>(op);
-            return (gp != nullptr);
+            // Accept GeometryProviderI (GeoScene, USD scene nodes)
+            return dynamic_cast<GeometryProviderI*>(op) != nullptr;
         }
         case 1: {
-            // Accept CameraOp (covers both classic and CameraSceneOp)
             return dynamic_cast<CameraOp*>(op) != nullptr;
         }
         case 2: {
-            // Accept any Iop for background
             return dynamic_cast<Iop*>(op) != nullptr;
+        }
+        case 3: {
+            // Vol: accept any Op (SpectralVDBRead is a SourceGeomOp)
+            return true;
         }
         default:
             return false;
@@ -172,7 +191,7 @@ void SpectralRenderIop::knobs(Knob_Callback f)
     BeginGroup(f, "render_grp", "Render");
     {
         static const char* const deviceNames[] = { "cpu", "gpu", "auto", nullptr };
-        Enumeration_knob(f, &_deviceMode, deviceNames, "device", "device");
+        Enumeration_knob(f, &_deviceMode, deviceNames, "device_mode", "device mode");
         Tooltip(f, "Rendering device:<br>"
                    "cpu = Embree 4 CPU ray tracing<br>"
                    "gpu = OptiX 8.1 RTX GPU ray tracing<br>"
@@ -191,7 +210,7 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                    "1/2 = half resolution<br>"
                    "3/4 = three-quarter resolution<br>"
                    "full = full output resolution");
-        Int_knob(f, &_samples, "samples", "samples per pixel"); SetRange(f, 1, 256);
+        Int_knob(f, &_samples, "spp", "samples"); SetRange(f, 1, 256);
         Tooltip(f, "Number of spectral samples per pixel.<br>"
                    "Higher values reduce noise. Each sample<br>"
                    "traces one wavelength through the scene.<br>"
@@ -342,48 +361,46 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         );
         File_knob(f, &_vdbFile, "vdb_file", "VDB file");
         Tooltip(f, "OpenVDB volume file (.vdb).\n"
-                   "Supports #### frame padding for sequences.\n"
-                   "Auto-detects density, temperature grids.");
+                   "Supports #### frame padding for sequences.");
         Bool_knob(f, &_vdbAutoSequence, "vdb_auto_sequence", "auto sequence");
-        Tooltip(f, "Treat VDB as a frame sequence.\n"
-                   "Replaces frame numbers with #### padding.\n"
-                   "e.g. explosion.0001.vdb → explosion.####.vdb");
+        ClearFlags(f, Knob::STARTLINE);
         Int_knob(f, &_vdbFrameOffset, "vdb_frame_offset", "frame offset");
+        ClearFlags(f, Knob::STARTLINE);
         SetRange(f, -100, 100);
-        Tooltip(f, "Offset the frame number for VDB sequences.\n"
-                   "Useful for retiming simulations.");
         Obsolete_knob(f, "vdb_orig_file", nullptr);
         String_knob(f, &_vdbOrigFile, "vdb_orig_file", "");
         SetFlags(f, Knob::INVISIBLE);
 
         Divider(f, "3D Viewport");
         Bool_knob(f, &_vdbShowBbox, "vdb_show_bbox", "show bbox");
-        Tooltip(f, "Draw a green wireframe bounding box\n"
-                   "around the volume in the 3D viewer.");
         Bool_knob(f, &_vdbShowPoints, "vdb_show_points", "show points");
-        Tooltip(f, "Draw a point cloud preview of the volume\n"
-                   "density in the 3D viewer. Denser regions\n"
-                   "appear brighter and more opaque.");
+        ClearFlags(f, Knob::STARTLINE);
         Double_knob(f, &_vdbPointDensity, "vdb_point_density", "point density"); SetRange(f, 0.1, 1.0);
-        Tooltip(f, "Proportion of voxels to draw as points.\n"
-                   "1.0 = all voxels (slow), 0.3 = every 3rd,\n"
-                   "0.1 = sparse preview (fast).");
+        ClearFlags(f, Knob::STARTLINE);
         Double_knob(f, &_vdbPointSize, "vdb_point_size", "point size"); SetRange(f, 1, 8);
-        Tooltip(f, "GL point size in pixels for the preview.");
-        Newline(f);
-        Enumeration_knob(f, &_vdbDensityGrid, _vdbGridNames, "vdb_density_grid", "density grid");
-        Tooltip(f, "Grid to use as density. Auto-populated from VDB file.");
-        Enumeration_knob(f, &_vdbTempGrid, _vdbGridNames, "vdb_temp_grid", "temperature grid");
-        Tooltip(f, "Temperature grid for blackbody emission.\n"
-                   "Common names: temperature, temp, heat.");
-        Enumeration_knob(f, &_vdbFlameGrid, _vdbGridNames, "vdb_flame_grid", "flame grid");
-        Tooltip(f, "Flame grid for fire emission intensity.\n"
-                   "Multiplied with emission intensity slider.");
-        Enumeration_knob(f, &_vdbColorGrid, _vdbGridNames, "vdb_color_grid", "color grid");
-        Tooltip(f, "RGB colour grid (Vec3 type).\n"
-                   "Tints the volume per-voxel. Common name: Cd.");
+        ClearFlags(f, Knob::STARTLINE);
 
-        Divider(f, "Volume shading");
+        Divider(f, "Grids");
+        Button(f, "discover_grids", "Discover Grids");
+        Tooltip(f, "Scan VDB file and auto-detect grid names.");
+        Enumeration_knob(f, &_vdbDensityGridIdx, kVdbGridMenu, "vdb_density_grid", "density");
+        String_knob(f, &_vdbDensityOverride, "vdb_density_override", "override");
+        ClearFlags(f, Knob::STARTLINE);
+        Enumeration_knob(f, &_vdbTempGridIdx, kVdbGridMenu, "vdb_temp_grid", "temperature");
+        String_knob(f, &_vdbTempOverride, "vdb_temp_override", "override");
+        ClearFlags(f, Knob::STARTLINE);
+        Enumeration_knob(f, &_vdbFlameGridIdx, kVdbGridMenu, "vdb_flame_grid", "flame");
+        String_knob(f, &_vdbFlameOverride, "vdb_flame_override", "override");
+        ClearFlags(f, Knob::STARTLINE);
+        Enumeration_knob(f, &_vdbColorGridIdx, kVdbGridMenu, "vdb_color_grid", "color");
+        String_knob(f, &_vdbColorOverride, "vdb_color_override", "override");
+        ClearFlags(f, Knob::STARTLINE);
+
+        Divider(f, "Shading Preset");
+        static const char* const volPresets[] = {
+            "Custom", "Smoke", "Fire / Explosion", "Clouds", "Fog / Mist", "Nebula", nullptr
+        };
+        Enumeration_knob(f, &_vdbShadingPreset, volPresets, "vdb_shading_preset", "Shading Preset");
         Double_knob(f, &_vdbExtinction, "vdb_extinction", "extinction"); SetRange(f, 0, 20);
         Tooltip(f, "Extinction coefficient (sigma_t).\n"
                    "Controls how quickly light is absorbed.\n"
@@ -649,14 +666,44 @@ int SpectralRenderIop::knob_changed(Knob* k)
     }
     if (k->is("vdb_frame_offset") || k->is("vdb_file")) {
         _frameReady.store(false);
-        _vdbPreviewDirty = true;
-        _vdbPreviewPoints.clear();
-        _vdbLoadedPath.clear();  // force reload
+        _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
+        _vdbLoadedPath.clear();
         return 1;
     }
     if (k->is("vdb_show_points") || k->is("vdb_point_density") || k->is("vdb_point_size") || k->is("vdb_show_bbox")) {
-        _vdbPreviewDirty = true;
-        _vdbPreviewPoints.clear();
+        _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
+        return 1;
+    }
+    if (k->is("discover_grids")) {
+#ifdef SPECTRAL_HAS_VDB
+        if (!_vdbFile || strlen(_vdbFile) == 0) { error("No VDB file."); return 1; }
+        int frame = int(outputContext().frame()) + _vdbFrameOffset;
+        std::string resolvedPath = _vdbAutoSequence ? _resolveFramePath(frame) : std::string(_vdbFile);
+        auto grids = pxr::SpectralVDBLoader::DiscoverGrids(resolvedPath.c_str());
+        if (grids.empty()) { error("No grids in %s", resolvedPath.c_str()); return 1; }
+        std::string bestD, bestT, bestF, bestC;
+        for (const auto& g : grids) {
+            if (bestD.empty() && g.category == "density") bestD = g.name;
+            if (bestT.empty() && g.category == "temperature") bestT = g.name;
+            if (bestF.empty() && g.category == "flame") bestF = g.name;
+            if (bestC.empty() && g.category == "color") bestC = g.name;
+        }
+        if (bestD.empty()) for (const auto& g : grids) if (g.type == "float") { bestD = g.name; break; }
+        if (!bestD.empty() && knob("vdb_density_override")) knob("vdb_density_override")->set_text(bestD.c_str());
+        if (!bestT.empty() && knob("vdb_temp_override")) knob("vdb_temp_override")->set_text(bestT.c_str());
+        if (!bestF.empty() && knob("vdb_flame_override")) knob("vdb_flame_override")->set_text(bestF.c_str());
+        if (!bestC.empty() && knob("vdb_color_override")) knob("vdb_color_override")->set_text(bestC.c_str());
+        if ((!bestT.empty() || !bestF.empty()) && knob("vdb_shading_preset")) knob("vdb_shading_preset")->set_value(2);
+        std::string msg;
+        for (const auto& g : grids) { msg += g.name + " (" + g.type + ")\\n"; }
+        if (!bestD.empty()) msg += "\\nDensity: " + bestD;
+        if (!bestT.empty()) msg += "\\nTemperature: " + bestT;
+        script_command(("python {nuke.message('" + msg + "')}").c_str());
+        _vdbLoadedPath.clear(); _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
+        _frameReady.store(false);
+#else
+        error("OpenVDB not compiled.");
+#endif
         return 1;
     }
 
@@ -714,6 +761,8 @@ void SpectralRenderIop::_validate(bool forReal)
         _frame = currentFrame;
         _frameReady.store(false);
         _progressiveSppDone = 0;
+        _vdbLastLoadedFrame = -999; // force VDB reload for new frame
+        _volume.reset();
     }
     // ------------------------------------------------------------------
     // Determine output format:
@@ -835,7 +884,7 @@ void SpectralRenderIop::_validate(bool forReal)
         _progressiveSppDone = 0;
     }
 
-    // Load VDB outside forReal — viewport needs it even without rendering
+    // Load VDB for viewport preview — cached per frame, only reloads when frame changes
     _LoadVDB();
 
     // Deep output info: construct from flat IopInfo, which copies format/bbox/channels.
@@ -1438,6 +1487,13 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
 
         // Process meshes
         if (!prim.IsA<UsdGeomMesh>()) continue;
+
+        // Skip SpectralVDBRead placeholder bbox (rendered as volume, not geometry)
+        std::string primName = prim.GetPath().GetString();
+        if (primName.find("SpectralVDBRead") != std::string::npos) {
+            fprintf(stderr, "SpectralRender: skipping VDB placeholder mesh %s\n", primName.c_str());
+            continue;
+        }
 
         UsdGeomMesh mesh(prim);
         if (!mesh) continue;
@@ -2411,6 +2467,56 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
             meshCount, totalTris);
 
     // ------------------------------------------------------------------
+    // Detect USD Volume prims (OpenVDBAsset) in the stage
+    // ------------------------------------------------------------------
+    // Detect volume prims in the USD stage:
+    //   1. Standard UsdVol::Volume + OpenVDBAsset field prims  
+    //   2. (SpectralVDBRead volumes found via input chain in _LoadVDB)
+    // ------------------------------------------------------------------
+#ifdef SPECTRAL_HAS_VDB
+    if (!_volume || !_volume->IsValid()) {
+        for (const auto& prim : stage->Traverse()) {
+            if (!prim.IsA<UsdVolVolume>()) continue;
+
+            UsdVolVolume volumePrim(prim);
+            if (!volumePrim) continue;
+
+            std::string densityPath, tempPath;
+            for (const auto& child : prim.GetChildren()) {
+                if (!child.IsA<UsdVolOpenVDBAsset>()) continue;
+                UsdVolOpenVDBAsset asset(child);
+                if (!asset) continue;
+
+                SdfAssetPath filePath;
+                asset.GetFilePathAttr().Get(&filePath);
+                TfToken fieldName;
+                asset.GetFieldNameAttr().Get(&fieldName);
+
+                std::string resolvedFile = filePath.GetResolvedPath();
+                if (resolvedFile.empty()) resolvedFile = filePath.GetAssetPath();
+
+                if (fieldName == "density" || fieldName == "smoke" || fieldName == "soot") {
+                    densityPath = resolvedFile;
+                } else if (fieldName == "temperature" || fieldName == "temp" || fieldName == "heat") {
+                    tempPath = resolvedFile;
+                }
+            }
+
+            if (!densityPath.empty()) {
+                const char* tempArg = tempPath.empty() ? nullptr : "temperature";
+                _volume = pxr::SpectralVDBLoader::Load(densityPath.c_str(), "density", tempArg);
+                if (_volume && _volume->IsValid()) {
+                    _applyVolumeShading(_volume);
+                    fprintf(stderr, "SpectralRender: loaded USD Volume prim %s (%dx%dx%d)\n",
+                            prim.GetPath().GetText(), _volume->resX, _volume->resY, _volume->resZ);
+                    break;
+                }
+            }
+        }
+    }
+#endif
+
+    // ------------------------------------------------------------------
     // Build camera from USD stage (may be overridden by _BuildCameraFromInput)
     // ------------------------------------------------------------------
     const Format* fmtPtr = &(info_.format());
@@ -2605,134 +2711,64 @@ void SpectralRenderIop::append(Hash& hash)
 void SpectralRenderIop::build_handles(ViewerContext* ctx)
 {
     if (ctx->transform_mode() == VIEWER_2D) return;
-    add_draw_handle(ctx);
+    // _volume already loaded by _validate — just draw
+    if (_volume && _volume->IsValid()) add_draw_handle(ctx);
 }
 
 void SpectralRenderIop::draw_handle(ViewerContext* ctx)
 {
-    if (!_volume || !_volume->IsValid()) {
-        // Only warn once per state change
-        static bool warned = false;
-        if (!warned) {
-            fprintf(stderr, "SpectralVDB viewport: no volume loaded\n");
-            warned = true;
-        }
-        return;
-    }
-    // Reset warning flag when volume exists
-
+    if (!_volume || !_volume->IsValid()) return;
     glPushAttrib(GL_CURRENT_BIT | GL_LINE_BIT | GL_ENABLE_BIT | GL_POINT_BIT);
     glDisable(GL_LIGHTING);
 
-    // 8 corners of volume bbox
     float co[8][3];
     for (int i = 0; i < 8; ++i) {
         co[i][0] = (i & 1) ? _volume->bboxMax[0] : _volume->bboxMin[0];
         co[i][1] = (i & 2) ? _volume->bboxMax[1] : _volume->bboxMin[1];
         co[i][2] = (i & 4) ? _volume->bboxMax[2] : _volume->bboxMin[2];
     }
-
     static const int edges[12][2] = {
-        {0,1},{2,3},{4,5},{6,7},
-        {0,2},{1,3},{4,6},{5,7},
-        {0,4},{1,5},{2,6},{3,7}
+        {0,1},{2,3},{4,5},{6,7},{0,2},{1,3},{4,6},{5,7},{0,4},{1,5},{2,6},{3,7}
     };
 
     if (_vdbShowBbox) {
-        // Green wireframe bbox
-        glLineWidth(1.5f);
-        glColor3f(0.0f, 1.0f, 0.0f);
+        glLineWidth(1.5f); glColor3f(0, 1, 0);
         glBegin(GL_LINES);
-        for (int e = 0; e < 12; ++e) {
-            glVertex3fv(co[edges[e][0]]);
-            glVertex3fv(co[edges[e][1]]);
-        }
-        glEnd();
-
-        // Yellow center cross
-        float cx = 0, cy = 0, cz = 0;
-        for (int i = 0; i < 8; ++i) { cx += co[i][0]; cy += co[i][1]; cz += co[i][2]; }
-        cx /= 8; cy /= 8; cz /= 8;
-        float sz = (_volume->bboxMax - _volume->bboxMin).GetLength() * 0.03f;
-        glColor3f(1.0f, 1.0f, 0.0f);
-        glBegin(GL_LINES);
-        glVertex3f(cx - sz, cy, cz); glVertex3f(cx + sz, cy, cz);
-        glVertex3f(cx, cy - sz, cz); glVertex3f(cx, cy + sz, cz);
-        glVertex3f(cx, cy, cz - sz); glVertex3f(cx, cy, cz + sz);
-        glEnd();
-    } else {
-        // Invisible bbox for F-key framing
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glLineWidth(0.5f);
-        glColor4f(0.2f, 0.2f, 0.2f, 0.01f);
-        glBegin(GL_LINES);
-        for (int e = 0; e < 12; ++e) {
-            glVertex3fv(co[edges[e][0]]);
-            glVertex3fv(co[edges[e][1]]);
-        }
+        for (int e = 0; e < 12; ++e) { glVertex3fv(co[edges[e][0]]); glVertex3fv(co[edges[e][1]]); }
         glEnd();
     }
 
-    // Point cloud preview
     if (_vdbShowPoints) {
         if (_vdbPreviewDirty || _vdbPreviewPoints.empty()) {
-            _vdbPreviewPoints.clear();
-            _vdbMaxDensity = 1e-6f;
-
-            pxr::GfVec3f bMin = _volume->bboxMin;
-            pxr::GfVec3f bSize = _volume->bboxMax - _volume->bboxMin;
-
-            float skip = std::max(1.f, 1.f / float(std::max(0.05, _vdbPointDensity)));
-            int step = std::max(1, int(skip));
-
-            for (int iz = 0; iz < _volume->resZ; iz += step) {
-                for (int iy = 0; iy < _volume->resY; iy += step) {
+            _vdbPreviewPoints.clear(); _vdbMaxDensity = 1e-6f;
+            pxr::GfVec3f bMin = _volume->bboxMin, bSz = _volume->bboxMax - _volume->bboxMin;
+            int step = std::max(1, int(1.f / float(std::max(0.05, _vdbPointDensity))));
+            for (int iz = 0; iz < _volume->resZ; iz += step)
+                for (int iy = 0; iy < _volume->resY; iy += step)
                     for (int ix = 0; ix < _volume->resX; ix += step) {
-                        float u = float(ix) / float(_volume->resX);
-                        float v = float(iy) / float(_volume->resY);
-                        float w = float(iz) / float(_volume->resZ);
+                        float u = float(ix)/_volume->resX, v = float(iy)/_volume->resY, w = float(iz)/_volume->resZ;
                         float d = _volume->SampleDensity(u, v, w);
                         if (d < 0.01f) continue;
-
-                        VDBPreviewPoint pt;
-                        pt.x = bMin[0] + u * bSize[0];
-                        pt.y = bMin[1] + v * bSize[1];
-                        pt.z = bMin[2] + w * bSize[2];
-                        pt.density = d;
                         if (d > _vdbMaxDensity) _vdbMaxDensity = d;
+                        VDBPreviewPoint pt; pt.x = bMin[0]+u*bSz[0]; pt.y = bMin[1]+v*bSz[1]; pt.z = bMin[2]+w*bSz[2]; pt.density = d;
                         _vdbPreviewPoints.push_back(pt);
                     }
-                }
-            }
             _vdbPreviewDirty = false;
-            fprintf(stderr, "SpectralVDB viewport: built %zu preview points (maxDensity=%.3f)\n",
-                    _vdbPreviewPoints.size(), _vdbMaxDensity);
         }
-
         if (!_vdbPreviewPoints.empty()) {
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-            glPointSize(float(_vdbPointSize));
-            glEnable(GL_POINT_SMOOTH);
+            glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+            glPointSize(float(_vdbPointSize)); glEnable(GL_POINT_SMOOTH);
             float inv = 1.f / _vdbMaxDensity;
-
             glBegin(GL_POINTS);
             for (const auto& pt : _vdbPreviewPoints) {
                 float t = std::min(pt.density * inv, 1.f);
-                // Heat ramp: black → red → orange → yellow → white
-                float r = std::min(t * 3.f, 1.f);
-                float g = std::max(0.f, std::min((t - 0.33f) * 3.f, 1.f));
-                float b = std::max(0.f, std::min((t - 0.66f) * 3.f, 1.f));
-                float a = 0.15f + 0.85f * t;
-                glColor4f(r, g, b, a);
+                glColor4f(std::min(t*3,1.f), std::max(0.f,std::min((t-.33f)*3,1.f)),
+                          std::max(0.f,std::min((t-.66f)*3,1.f)), .15f+.85f*t);
                 glVertex3f(pt.x, pt.y, pt.z);
             }
-            glEnd();
-            glDisable(GL_BLEND);
+            glEnd(); glDisable(GL_BLEND);
         }
     }
-
     glPopAttrib();
 }
 
@@ -2741,56 +2777,74 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
 // ---------------------------------------------------------------------------
 void SpectralRenderIop::_LoadVDB()
 {
-#ifdef SPECTRAL_HAS_VDB
-    if (!_vdbFile || strlen(_vdbFile) == 0) {
-        if (_volume) {
-            fprintf(stderr, "SpectralVDB: file path cleared\n");
-            _volume.reset();
-        }
+    // Skip if already loaded for this frame
+    int curFrame = int(outputContext().frame());
+    if (_volume && _volume->IsValid() && _vdbLastLoadedFrame == curFrame) {
+        _applyVolumeShading(_volume);
         return;
     }
+    _vdbLastLoadedFrame = curFrame;
 
-    // Resolve frame path for sequences, or use as-is for single files
-    int frame = int(outputContext().frame()) + _vdbFrameOffset;
-    std::string resolvedPath = _vdbAutoSequence
-        ? _resolveFramePath(frame)
-        : std::string(_vdbFile);
-    if (resolvedPath.empty()) return;
-
-    // Only reload if path or frame changed
-    if (_volume && _volume->IsValid() && _vdbLoadedPath == resolvedPath) return;
-
-    fprintf(stderr, "SpectralVDB: loading '%s' (frame %d)\n", resolvedPath.c_str(), frame);
-
-    _volume = pxr::SpectralVDBLoader::Load(resolvedPath.c_str());
-
-    if (_volume) {
-        _vdbLoadedPath = resolvedPath;
-        _vdbPreviewDirty = true;
-        _vdbPreviewPoints.clear();
-        fprintf(stderr, "SpectralVDB: loaded OK — %dx%dx%d, bbox (%.2f,%.2f,%.2f)→(%.2f,%.2f,%.2f)\n",
-                _volume->resX, _volume->resY, _volume->resZ,
-                _volume->bboxMin[0], _volume->bboxMin[1], _volume->bboxMin[2],
-                _volume->bboxMax[0], _volume->bboxMax[1], _volume->bboxMax[2]);
-        // Copy shading params from knobs
-        _volume->extinction = float(_vdbExtinction);
-        _volume->scattering = float(_vdbScattering);
-        _volume->densityMult = float(_vdbDensityMult);
-        _volume->anisotropy = float(_vdbAnisotropy);
-        _volume->emissionIntensity = float(_vdbEmissionIntensity);
-        _volume->tempMin = float(_vdbTempMin);
-        _volume->tempMax = float(_vdbTempMax);
-        _volume->stepSize = float(_vdbStepSize);
-        _volume->gForward = float(_vdbGForward);
-        _volume->gBackward = float(_vdbGBackward);
-        _volume->lobeMix = float(_vdbLobeMix);
-        _volume->powderStrength = float(_vdbPowder);
-        _volume->jitter = _vdbJitter;
-        _volume->scatterColor = pxr::GfVec3f(_vdbScatterColor[0], _vdbScatterColor[1], _vdbScatterColor[2]);
+    // Path 1: File knob on SpectralRender (fast — no input chain walk)
+#ifdef SPECTRAL_HAS_VDB
+    if (_vdbFile && strlen(_vdbFile) > 0) {
+        int frame = int(outputContext().frame()) + _vdbFrameOffset;
+        std::string resolvedPath = _vdbAutoSequence
+            ? _resolveFramePath(frame)
+            : std::string(_vdbFile);
+        if (!resolvedPath.empty()) {
+            if (!_volume || !_volume->IsValid() || _vdbLoadedPath != resolvedPath) {
+                _volume = pxr::SpectralVDBLoader::Load(resolvedPath.c_str(),
+                    _VdbGridName(_vdbDensityGridIdx, _vdbDensityOverride),
+                    _VdbGridName(_vdbTempGridIdx, _vdbTempOverride));
+                if (_volume) {
+                    _vdbLoadedPath = resolvedPath;
+                    _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
+                    _applyVolumeShading(_volume);
+                }
+            } else {
+                _applyVolumeShading(_volume);
+            }
+            return;
+        }
     }
-#else
-    fprintf(stderr, "SpectralVDB: SPECTRAL_HAS_VDB is NOT defined — VDB support not compiled\n");
 #endif
+
+    // Path 2: Vol input (input 3) for SpectralVDBRead direct connection
+    if (inputs() > 3 && input(3)) {
+        SpectralVDBRead* vdbRead = dynamic_cast<SpectralVDBRead*>(input(3));
+        if (vdbRead) {
+            int renderFrame = int(outputContext().frame());
+            auto vol = vdbRead->GetVolumeAtFrame(renderFrame);
+            if (vol && vol->IsValid()) {
+                _applyVolumeShading(vol);
+                _volume = vol;
+                _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
+                return;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// _applyVolumeShading — copy shading params from knobs to volume
+// ---------------------------------------------------------------------------
+void SpectralRenderIop::_applyVolumeShading(std::shared_ptr<pxr::SpectralVolume>& vol)
+{
+    vol->extinction = float(_vdbExtinction);
+    vol->scattering = float(_vdbScattering);
+    vol->densityMult = float(_vdbDensityMult);
+    vol->anisotropy = float(_vdbAnisotropy);
+    vol->emissionIntensity = float(_vdbEmissionIntensity);
+    vol->tempMin = float(_vdbTempMin);
+    vol->tempMax = float(_vdbTempMax);
+    vol->stepSize = float(_vdbStepSize);
+    vol->gForward = float(_vdbGForward);
+    vol->gBackward = float(_vdbGBackward);
+    vol->lobeMix = float(_vdbLobeMix);
+    vol->powderStrength = float(_vdbPowder);
+    vol->jitter = _vdbJitter;
+    vol->scatterColor = pxr::GfVec3f(_vdbScatterColor[0], _vdbScatterColor[1], _vdbScatterColor[2]);
 }
 
 // ---------------------------------------------------------------------------
@@ -2926,6 +2980,9 @@ void SpectralRenderIop::_EnsureFrameRendered()
     std::lock_guard<std::mutex> lock(_renderMutex);
     if (_frameReady.load()) return;
 
+    // Load volume from SpectralVDBRead (via GeoScene or Vol input)
+    _LoadVDB();
+
     // Skip if no scene content (no geometry AND no volume)
     bool hasGeometry = _scene && _scene->TotalTriangles() > 0;
     bool hasVolume = _volume && _volume->IsValid();
@@ -3038,8 +3095,7 @@ void SpectralRenderIop::_EnsureFrameRendered()
         fprintf(stderr, "SpectralRender: added default dome light for volume (enable Lighting tab for better results)\n");
     }
 
-    // Load VDB volume if specified
-    _LoadVDB();
+    // Volume already loaded at top of _EnsureFrameRendered
 
 #ifdef SPECTRAL_HAS_OPTIX
     if (useGPU) {

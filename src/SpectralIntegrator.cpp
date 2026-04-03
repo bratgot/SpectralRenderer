@@ -269,14 +269,18 @@ void SpectralIntegrator::RenderFrame(
                                     }
                                 }
                             } else {
-                                // Primary ray miss — show dome light environment
+                                // Primary ray miss
                                 radiance = 0.f;
-                                GfVec3f missDir = GfVec3f(ray.GetDirection());
-                                float mLen = missDir.GetLength();
-                                if (mLen > 1e-6f) missDir /= mLen;
-                                for (const SpectralLight& light : scene.GetLights()) {
-                                    if (light.type == SpectralLight::Type::Dome) {
-                                        radiance += light.EnvironmentEmission(missDir, lambda);
+                                // Show dome light environment on miss only when no volume
+                                // (volume scenes: background should be transparent for comp)
+                                if (!volume || !volume->IsValid()) {
+                                    GfVec3f missDir = GfVec3f(ray.GetDirection());
+                                    float mLen = missDir.GetLength();
+                                    if (mLen > 1e-6f) missDir /= mLen;
+                                    for (const SpectralLight& light : scene.GetLights()) {
+                                        if (light.type == SpectralLight::Type::Dome) {
+                                            radiance += light.EnvironmentEmission(missDir, lambda);
+                                        }
                                     }
                                 }
                             }
