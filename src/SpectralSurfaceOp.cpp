@@ -15,10 +15,18 @@
 using namespace DD::Image;
 
 static const char* const kSpectralPresetNames[] = {
-    "custom", "glass", "diamond", "copper", "gold", "silver", "aluminium",
-    "white paper", "concrete", "wood", "skin", "rubber", "water",
-    "CD/DVD", "soap bubble", "highlighter", "kryptonite",
-    "bioluminescence", "plasma", "ruby", "jade", nullptr
+    "custom",
+    "\xe2\x94\x80\xe2\x94\x80 dielectrics \xe2\x94\x80\xe2\x94\x80",
+    "glass", "diamond", "water", "ruby",
+    "\xe2\x94\x80\xe2\x94\x80 metals \xe2\x94\x80\xe2\x94\x80",
+    "copper", "gold", "silver", "aluminium",
+    "\xe2\x94\x80\xe2\x94\x80 organic \xe2\x94\x80\xe2\x94\x80",
+    "skin", "wood", "white paper", "concrete", "rubber", "jade",
+    "\xe2\x94\x80\xe2\x94\x80 spectral \xe2\x94\x80\xe2\x94\x80",
+    "CD/DVD", "soap bubble", "highlighter",
+    "\xe2\x94\x80\xe2\x94\x80 creative \xe2\x94\x80\xe2\x94\x80",
+    "kryptonite", "bioluminescence", "plasma",
+    nullptr
 };
 
 const char* const SpectralSurfaceOp::CLASS = "SpectralSurface";
@@ -295,6 +303,8 @@ int SpectralSurfaceOp::knob_changed(Knob* k)
 void SpectralSurfaceOp::_ApplyPreset(int preset)
 {
     if (preset == 0) return;  // custom — don't change anything
+    // Header entries — do nothing
+    if (preset == 1 || preset == 6 || preset == 11 || preset == 18 || preset == 22) return;
 
     // Reset all advanced features to defaults
     _abbeNumber = 0.f; _thinFilmThickness = 0.f; _metalType = 0;
@@ -306,128 +316,122 @@ void SpectralSurfaceOp::_ApplyPreset(int preset)
     _emissiveColor[0]=0.f; _emissiveColor[1]=0.f; _emissiveColor[2]=0.f;
 
     switch (preset) {
-        case 1: // glass
+        // ── dielectrics ──
+        case 2: // glass
             _diffuseColor[0] = _diffuseColor[1] = _diffuseColor[2] = 0.95f;
             _metallic = 0.0f; _roughness = 0.0f; _ior = 1.52f;
-            _opacity = 0.002f; _abbeNumber = 58.f; _thinFilmThickness = 0.f;
+            _opacity = 0.002f; _abbeNumber = 58.f;
             break;
-        case 2: // diamond
+        case 3: // diamond
             _diffuseColor[0] = _diffuseColor[1] = _diffuseColor[2] = 0.97f;
             _metallic = 0.0f; _roughness = 0.0f; _ior = 2.42f;
-            _opacity = 0.002f; _abbeNumber = 55.f; _thinFilmThickness = 0.f;
+            _opacity = 0.002f; _abbeNumber = 55.f;
             break;
-        case 3: // copper
-            _diffuseColor[0] = 0.95f; _diffuseColor[1] = 0.64f; _diffuseColor[2] = 0.54f;
-            _metallic = 1.0f; _roughness = 0.2f; _ior = 1.1f;
-            _opacity = 1.0f; _abbeNumber = 0.f; _thinFilmThickness = 0.f;
-            _metalType = 2;  // copper spectral IOR
-            break;
-        case 4: // gold
-            _diffuseColor[0] = 1.0f; _diffuseColor[1] = 0.76f; _diffuseColor[2] = 0.33f;
-            _metallic = 1.0f; _roughness = 0.1f; _ior = 0.47f;
-            _opacity = 1.0f; _abbeNumber = 0.f; _thinFilmThickness = 0.f;
-            _metalType = 1;  // gold spectral IOR
-            break;
-        case 5: // silver
-            _diffuseColor[0] = 0.97f; _diffuseColor[1] = 0.96f; _diffuseColor[2] = 0.91f;
-            _metallic = 1.0f; _roughness = 0.05f; _ior = 0.18f;
-            _opacity = 1.0f; _abbeNumber = 0.f; _thinFilmThickness = 0.f;
-            _metalType = 3;  // silver spectral IOR
-            break;
-        case 6: // aluminium
-            _diffuseColor[0] = 0.91f; _diffuseColor[1] = 0.92f; _diffuseColor[2] = 0.92f;
-            _metallic = 1.0f; _roughness = 0.15f; _ior = 1.39f;
-            _opacity = 1.0f; _abbeNumber = 0.f; _thinFilmThickness = 0.f;
-            _metalType = 4;  // aluminium spectral IOR
-            break;
-        case 7: // white paper
-            _diffuseColor[0] = 0.75f; _diffuseColor[1] = 0.73f; _diffuseColor[2] = 0.70f;
-            _metallic = 0.0f; _roughness = 0.9f; _ior = 1.5f;
-            _opacity = 1.0f; _abbeNumber = 0.f; _thinFilmThickness = 0.f;
-            _metalType = 0;
-            break;
-        case 8: // concrete
-            _diffuseColor[0] = 0.55f; _diffuseColor[1] = 0.53f; _diffuseColor[2] = 0.50f;
-            _metallic = 0.0f; _roughness = 0.95f; _ior = 1.5f;
-            _opacity = 1.0f; _abbeNumber = 0.f; _thinFilmThickness = 0.f;
-            _metalType = 0;
-            break;
-        case 9: // wood
-            _diffuseColor[0] = 0.43f; _diffuseColor[1] = 0.30f; _diffuseColor[2] = 0.18f;
-            _metallic = 0.0f; _roughness = 0.7f; _ior = 1.5f;
-            _opacity = 1.0f; _abbeNumber = 0.f; _thinFilmThickness = 0.f;
-            _metalType = 0;
-            break;
-        case 10: // skin
-            _diffuseColor[0] = 0.76f; _diffuseColor[1] = 0.57f; _diffuseColor[2] = 0.45f;
-            _metallic = 0.0f; _roughness = 0.5f; _ior = 1.4f;
-            _opacity = 1.0f; _abbeNumber = 0.f; _thinFilmThickness = 0.f;
-            _metalType = 0;
-            _sssColor[0] = 0.9f; _sssColor[1] = 0.4f; _sssColor[2] = 0.2f;
-            _sssRadius = 0.5f;
-            break;
-        case 11: // rubber
-            _diffuseColor[0] = 0.05f; _diffuseColor[1] = 0.05f; _diffuseColor[2] = 0.05f;
-            _metallic = 0.0f; _roughness = 0.85f; _ior = 1.5f;
-            _opacity = 1.0f; _abbeNumber = 0.f; _thinFilmThickness = 0.f;
-            _metalType = 0;
-            break;
-        case 12: // water
+        case 4: // water
             _diffuseColor[0] = 0.95f; _diffuseColor[1] = 0.95f; _diffuseColor[2] = 0.98f;
             _metallic = 0.0f; _roughness = 0.0f; _ior = 1.333f;
-            _opacity = 0.15f; _abbeNumber = 55.f; _thinFilmThickness = 0.f;
-            _metalType = 0;
+            _opacity = 0.15f; _abbeNumber = 55.f;
             _absorptionColor[0]=0.4f; _absorptionColor[1]=0.75f; _absorptionColor[2]=0.9f; _absorptionDensity=1.0f;
             break;
-        case 13: // CD/DVD
-            _diffuseColor[0]=0.1f; _diffuseColor[1]=0.1f; _diffuseColor[2]=0.12f;
-            _metallic=0.8f; _roughness=0.05f; _ior=1.5f; _opacity=1.0f;
-            _gratingSpacing=0.46f; _gratingStrength=0.25f;
-            break;
-        case 14: // soap bubble
-            _diffuseColor[0]=0.95f; _diffuseColor[1]=0.95f; _diffuseColor[2]=0.98f;
-            _metallic=0.0f; _roughness=0.0f; _ior=1.33f; _opacity=0.05f;
-            _thinFilmThickness=350.f;
-            break;
-        case 15: // highlighter
-            _diffuseColor[0]=0.8f; _diffuseColor[1]=1.0f; _diffuseColor[2]=0.1f;
-            _metallic=0.0f; _roughness=0.8f; _ior=1.5f; _opacity=1.0f;
-            _fluorAbsorb=350.f; _fluorEmit=520.f; _fluorStrength=3.f;
-            break;
-        case 16: // kryptonite
-            _diffuseColor[0]=0.1f; _diffuseColor[1]=0.9f; _diffuseColor[2]=0.15f;
-            _metallic=0.0f; _roughness=0.3f; _ior=1.8f; _opacity=0.4f;
-            _fluorAbsorb=380.f; _fluorEmit=540.f; _fluorStrength=4.f;
-            _absorptionColor[0]=0.2f; _absorptionColor[1]=0.95f; _absorptionColor[2]=0.3f;
-            _absorptionDensity=1.5f;
-            break;
-        case 17: // bioluminescence
-            _diffuseColor[0]=0.05f; _diffuseColor[1]=0.15f; _diffuseColor[2]=0.2f;
-            _metallic=0.0f; _roughness=0.6f; _ior=1.4f; _opacity=1.0f;
-            _emissiveColor[0]=0.0f; _emissiveColor[1]=0.5f; _emissiveColor[2]=0.8f;
-            _fluorAbsorb=400.f; _fluorEmit=480.f; _fluorStrength=2.f;
-            break;
-        case 18: // plasma
-            _diffuseColor[0]=0.02f; _diffuseColor[1]=0.02f; _diffuseColor[2]=0.05f;
-            _metallic=0.0f; _roughness=0.0f; _ior=1.0f; _opacity=0.1f;
-            _emissiveColor[0]=0.6f; _emissiveColor[1]=0.2f; _emissiveColor[2]=1.0f;
-            _fluorAbsorb=350.f; _fluorEmit=450.f; _fluorStrength=3.f;
-            break;
-        case 19: // ruby
+        case 5: // ruby
             _diffuseColor[0]=0.8f; _diffuseColor[1]=0.05f; _diffuseColor[2]=0.1f;
             _metallic=0.0f; _roughness=0.05f; _ior=1.77f; _opacity=0.3f;
             _absorptionColor[0]=0.9f; _absorptionColor[1]=0.05f; _absorptionColor[2]=0.1f;
             _absorptionDensity=3.f; _abbeNumber=45.f;
             _fluorAbsorb=410.f; _fluorEmit=694.f; _fluorStrength=1.5f;
             break;
-        case 20: // jade
+
+        // ── metals ──
+        case 7: // copper
+            _diffuseColor[0] = 0.95f; _diffuseColor[1] = 0.64f; _diffuseColor[2] = 0.54f;
+            _metallic = 1.0f; _roughness = 0.2f; _ior = 1.1f; _opacity = 1.0f;
+            _metalType = 2;
+            break;
+        case 8: // gold
+            _diffuseColor[0] = 1.0f; _diffuseColor[1] = 0.76f; _diffuseColor[2] = 0.33f;
+            _metallic = 1.0f; _roughness = 0.1f; _ior = 0.47f; _opacity = 1.0f;
+            _metalType = 1;
+            break;
+        case 9: // silver
+            _diffuseColor[0] = 0.97f; _diffuseColor[1] = 0.96f; _diffuseColor[2] = 0.91f;
+            _metallic = 1.0f; _roughness = 0.05f; _ior = 0.18f; _opacity = 1.0f;
+            _metalType = 3;
+            break;
+        case 10: // aluminium
+            _diffuseColor[0] = 0.91f; _diffuseColor[1] = 0.92f; _diffuseColor[2] = 0.92f;
+            _metallic = 1.0f; _roughness = 0.15f; _ior = 1.39f; _opacity = 1.0f;
+            _metalType = 4;
+            break;
+
+        // ── organic ──
+        case 12: // skin
+            _diffuseColor[0] = 0.76f; _diffuseColor[1] = 0.57f; _diffuseColor[2] = 0.45f;
+            _metallic = 0.0f; _roughness = 0.5f; _ior = 1.4f; _opacity = 1.0f;
+            _sssColor[0] = 0.9f; _sssColor[1] = 0.4f; _sssColor[2] = 0.2f;
+            _sssRadius = 0.5f;
+            break;
+        case 13: // wood
+            _diffuseColor[0] = 0.43f; _diffuseColor[1] = 0.30f; _diffuseColor[2] = 0.18f;
+            _metallic = 0.0f; _roughness = 0.7f; _ior = 1.5f; _opacity = 1.0f;
+            break;
+        case 14: // white paper
+            _diffuseColor[0] = 0.75f; _diffuseColor[1] = 0.73f; _diffuseColor[2] = 0.70f;
+            _metallic = 0.0f; _roughness = 0.9f; _ior = 1.5f; _opacity = 1.0f;
+            break;
+        case 15: // concrete
+            _diffuseColor[0] = 0.55f; _diffuseColor[1] = 0.53f; _diffuseColor[2] = 0.50f;
+            _metallic = 0.0f; _roughness = 0.95f; _ior = 1.5f; _opacity = 1.0f;
+            break;
+        case 16: // rubber
+            _diffuseColor[0] = 0.05f; _diffuseColor[1] = 0.05f; _diffuseColor[2] = 0.05f;
+            _metallic = 0.0f; _roughness = 0.85f; _ior = 1.5f; _opacity = 1.0f;
+            break;
+        case 17: // jade
             _diffuseColor[0]=0.15f; _diffuseColor[1]=0.5f; _diffuseColor[2]=0.2f;
             _metallic=0.0f; _roughness=0.3f; _ior=1.66f; _opacity=1.0f;
             _sssColor[0]=0.2f; _sssColor[1]=0.7f; _sssColor[2]=0.25f;
             _sssRadius=0.3f;
             break;
-        default: // custom — don't change anything
+
+        // ── spectral ──
+        case 19: // CD/DVD
+            _diffuseColor[0]=0.1f; _diffuseColor[1]=0.1f; _diffuseColor[2]=0.12f;
+            _metallic=0.8f; _roughness=0.05f; _ior=1.5f; _opacity=1.0f;
+            _gratingSpacing=0.46f; _gratingStrength=0.25f;
             break;
+        case 20: // soap bubble
+            _diffuseColor[0]=0.95f; _diffuseColor[1]=0.95f; _diffuseColor[2]=0.98f;
+            _metallic=0.0f; _roughness=0.0f; _ior=1.33f; _opacity=0.05f;
+            _thinFilmThickness=350.f;
+            break;
+        case 21: // highlighter
+            _diffuseColor[0]=0.8f; _diffuseColor[1]=1.0f; _diffuseColor[2]=0.1f;
+            _metallic=0.0f; _roughness=0.8f; _ior=1.5f; _opacity=1.0f;
+            _fluorAbsorb=350.f; _fluorEmit=520.f; _fluorStrength=3.f;
+            break;
+
+        // ── creative ──
+        case 23: // kryptonite
+            _diffuseColor[0]=0.1f; _diffuseColor[1]=0.9f; _diffuseColor[2]=0.15f;
+            _metallic=0.0f; _roughness=0.3f; _ior=1.8f; _opacity=0.4f;
+            _fluorAbsorb=380.f; _fluorEmit=540.f; _fluorStrength=4.f;
+            _absorptionColor[0]=0.2f; _absorptionColor[1]=0.95f; _absorptionColor[2]=0.3f;
+            _absorptionDensity=1.5f;
+            break;
+        case 24: // bioluminescence
+            _diffuseColor[0]=0.05f; _diffuseColor[1]=0.15f; _diffuseColor[2]=0.2f;
+            _metallic=0.0f; _roughness=0.6f; _ior=1.4f; _opacity=1.0f;
+            _emissiveColor[0]=0.0f; _emissiveColor[1]=0.5f; _emissiveColor[2]=0.8f;
+            _fluorAbsorb=400.f; _fluorEmit=480.f; _fluorStrength=2.f;
+            break;
+        case 25: // plasma
+            _diffuseColor[0]=0.02f; _diffuseColor[1]=0.02f; _diffuseColor[2]=0.05f;
+            _metallic=0.0f; _roughness=0.0f; _ior=1.0f; _opacity=0.1f;
+            _emissiveColor[0]=0.6f; _emissiveColor[1]=0.2f; _emissiveColor[2]=1.0f;
+            _fluorAbsorb=350.f; _fluorEmit=450.f; _fluorStrength=3.f;
+            break;
+
+        default: break;
     }
 
     // Force knob UI update

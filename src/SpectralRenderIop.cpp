@@ -526,11 +526,24 @@ void SpectralRenderIop::_validate(bool forReal)
         _chanTransmitR = getChannel("transmission.red"); _chanTransmitG = getChannel("transmission.green"); _chanTransmitB = getChannel("transmission.blue");
         channels += _chanTransmitR; channels += _chanTransmitG; channels += _chanTransmitB;
     }
-    // Cryptomatte: hash + coverage in crypto_object layer
-    _chanCryptoR = getChannel("crypto_object.red"); _chanCryptoG = getChannel("crypto_object.green");
+    // Cryptomatte: Nuke gizmo expects crypto_object00 RGBA
+    _chanCryptoR = getChannel("crypto_object00.red");
+    _chanCryptoG = getChannel("crypto_object00.green");
+    _chanCryptoB = getChannel("crypto_object00.blue");
+    _chanCryptoA = getChannel("crypto_object00.alpha");
     channels += _chanCryptoR; channels += _chanCryptoG;
+    channels += _chanCryptoB; channels += _chanCryptoA;
 
     info_.channels(channels);
+
+    // Cryptomatte metadata — required for Nuke's Cryptomatte gizmo
+    {
+        _cryptoMeta.setData("exr/cryptomatte/a1b2c3/name", "crypto_object");
+        _cryptoMeta.setData("exr/cryptomatte/a1b2c3/hash", "MurmurHash3_32");
+        _cryptoMeta.setData("exr/cryptomatte/a1b2c3/conversion", "uint32_to_float32");
+        _cryptoMeta.setData("exr/cryptomatte/a1b2c3/manifest", "{}");
+        _cryptoMetaReady = true;
+    }
     info_.black_outside(true);
 
     if (forReal) {
@@ -697,26 +710,22 @@ void SpectralRenderIop::engine(
     write3Channel(_chanSpecIndirectR, _chanSpecIndirectG, _chanSpecIndirectB, _specularIndirectBuffer, 3);
     write3Channel(_chanTransmitR, _chanTransmitG, _chanTransmitB, _transmissionBuffer, 3);
 
-    // Cryptomatte: hash (R) + coverage (G)
+    // Cryptomatte: crypto_object00 RGBA
     if (!_cryptoObjectBuffer.empty()) {
-        if (channels & _chanCryptoR) {
-            float* out = row.writable(_chanCryptoR);
+        auto writeCryptoChannel = [&](Channel ch, int comp) {
+            if (!(channels & ch)) return;
+            float* out = row.writable(ch);
             for (int px = x; px < r; ++px) {
                 int proxyX = isProxy ? (px * W / fullW) : px;
                 if (proxyX >= 0 && proxyX < W && bufY >= 0 && bufY < H)
-                    out[px] = _cryptoObjectBuffer[static_cast<size_t>(bufY) * W * 2 + proxyX * 2];
+                    out[px] = _cryptoObjectBuffer[static_cast<size_t>(bufY) * W * 4 + proxyX * 4 + comp];
                 else out[px] = 0.f;
             }
-        }
-        if (channels & _chanCryptoG) {
-            float* out = row.writable(_chanCryptoG);
-            for (int px = x; px < r; ++px) {
-                int proxyX = isProxy ? (px * W / fullW) : px;
-                if (proxyX >= 0 && proxyX < W && bufY >= 0 && bufY < H)
-                    out[px] = _cryptoObjectBuffer[static_cast<size_t>(bufY) * W * 2 + proxyX * 2 + 1];
-                else out[px] = 0.f;
-            }
-        }
+        };
+        writeCryptoChannel(_chanCryptoR, 0);
+        writeCryptoChannel(_chanCryptoG, 1);
+        writeCryptoChannel(_chanCryptoB, 2);
+        writeCryptoChannel(_chanCryptoA, 3);
     }
 }
 
@@ -2120,7 +2129,7 @@ void SpectralRenderIop::_EnsureFrameRendered()
     if (_aovDiffuseIndirect) _diffuseIndirectBuffer.assign(size_t(W) * H * 3, 0.f); else _diffuseIndirectBuffer.clear();
     if (_aovSpecularIndirect) _specularIndirectBuffer.assign(size_t(W) * H * 3, 0.f); else _specularIndirectBuffer.clear();
     if (_aovTransmission)    _transmissionBuffer.assign(size_t(W) * H * 3, 0.f);    else _transmissionBuffer.clear();
-    _cryptoObjectBuffer.assign(size_t(W) * H * 2, 0.f);  // hash + coverage
+    _cryptoObjectBuffer.assign(size_t(W) * H * 4, 0.f);  // RGBA: (hash0, cov0, hash1, cov1)
 
     SpectralCamera cam = _camera;
     cam.imageWidth  = W;
@@ -2190,6 +2199,11 @@ void SpectralRenderIop::_EnsureFrameRendered()
         aovBufs.direct   = _aovDirect   ? _directBuffer.data()   : nullptr;
         aovBufs.indirect = _aovIndirect ? _indirectBuffer.data() : nullptr;
         aovBufs.emission = _aovEmission ? _emissionBuffer.data() : nullptr;
+        aovBufs.diffuseDirect   = _aovDiffuseDirect   ? _diffuseDirectBuffer.data()   : nullptr;
+        aovBufs.specularDirect  = _aovSpecularDirect  ? _specularDirectBuffer.data()  : nullptr;
+        aovBufs.diffuseIndirect = _aovDiffuseIndirect ? _diffuseIndirectBuffer.data() : nullptr;
+        aovBufs.specularIndirect = _aovSpecularIndirect ? _specularIndirectBuffer.data() : nullptr;
+        aovBufs.transmission    = _aovTransmission    ? _transmissionBuffer.data()    : nullptr;
 
         SpectralIntegrator::RenderFrame(*_scene, cam, _frameBuffer.data(),
                                          renderSpp, _depthBuffer.data(), _maxBounces,
@@ -2221,8 +2235,11 @@ void SpectralRenderIop::_EnsureFrameRendered()
                 nullptr);
         }
 
-        // Shading AOV pass: quick CPU render for direct/indirect/emission
-        bool needShadingPass = _aovDirect || _aovIndirect || _aovEmission;
+        // Shading AOV pass: quick CPU render for direct/indirect/emission/LPE
+        bool needShadingPass = _aovDirect || _aovIndirect || _aovEmission ||
+                               _aovDiffuseDirect || _aovSpecularDirect ||
+                               _aovDiffuseIndirect || _aovSpecularIndirect ||
+                               _aovTransmission;
         if (needShadingPass) {
             const int aovSpp = std::min(8, renderSpp);
             std::vector<float> dummyPixels(size_t(W) * H * 4, 0.f);
@@ -2231,6 +2248,11 @@ void SpectralRenderIop::_EnsureFrameRendered()
             aovBufs.direct   = _aovDirect   ? _directBuffer.data()   : nullptr;
             aovBufs.indirect = _aovIndirect ? _indirectBuffer.data() : nullptr;
             aovBufs.emission = _aovEmission ? _emissionBuffer.data() : nullptr;
+            aovBufs.diffuseDirect   = _aovDiffuseDirect   ? _diffuseDirectBuffer.data()   : nullptr;
+            aovBufs.specularDirect  = _aovSpecularDirect  ? _specularDirectBuffer.data()  : nullptr;
+            aovBufs.diffuseIndirect = _aovDiffuseIndirect ? _diffuseIndirectBuffer.data() : nullptr;
+            aovBufs.specularIndirect = _aovSpecularIndirect ? _specularIndirectBuffer.data() : nullptr;
+            aovBufs.transmission    = _aovTransmission    ? _transmissionBuffer.data()    : nullptr;
 
             SpectralIntegrator::RenderFrame(*_scene, cam, dummyPixels.data(),
                                              aovSpp, nullptr, _maxBounces,
@@ -2251,7 +2273,7 @@ void SpectralRenderIop::_EnsureFrameRendered()
     _progressiveSppDone = renderSpp;
 
     // Generate Cryptomatte from objectId buffer
-    // Hash = objectId cast to float, coverage = 1.0 (primary visibility)
+    // Nuke Cryptomatte spec: crypto_object00 RGBA = (id0_hash, coverage0, id1_hash, coverage1)
     if (!_cryptoObjectBuffer.empty() && !_objectIdBuffer.empty()) {
         for (size_t i = 0; i < size_t(W) * H; ++i) {
             float objId = _objectIdBuffer[i];
@@ -2260,11 +2282,14 @@ void SpectralRenderIop::_EnsureFrameRendered()
             h ^= h >> 16; h *= 0x85ebca6b;
             h ^= h >> 13; h *= 0xc2b2ae35;
             h ^= h >> 16;
-            // Store as float (Cryptomatte convention)
+            // Ensure non-NaN/Inf by clearing exponent overflow
+            h &= 0x7fffffff; if ((h & 0x7f800000) == 0x7f800000) h = 0;
             float hashF;
             memcpy(&hashF, &h, sizeof(float));
-            _cryptoObjectBuffer[i * 2 + 0] = hashF;
-            _cryptoObjectBuffer[i * 2 + 1] = (objId > 0.f) ? 1.f : 0.f;
+            _cryptoObjectBuffer[i * 4 + 0] = hashF;           // R: id hash
+            _cryptoObjectBuffer[i * 4 + 1] = (objId > 0.f) ? 1.f : 0.f;  // G: coverage
+            _cryptoObjectBuffer[i * 4 + 2] = 0.f;             // B: second id (none)
+            _cryptoObjectBuffer[i * 4 + 3] = 0.f;             // A: second coverage
         }
     }
 

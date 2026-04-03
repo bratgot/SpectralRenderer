@@ -127,6 +127,23 @@ void SpectralIntegrator::RenderFrame(
         if (trackIndirect) { accIndirectX.resize(numPixels,0); accIndirectY.resize(numPixels,0); accIndirectZ.resize(numPixels,0); }
         if (trackEmission) { accEmissionX.resize(numPixels,0); accEmissionY.resize(numPixels,0); accEmissionZ.resize(numPixels,0); }
 
+        // LPE accumulators
+        bool trackLPE = aovs && (aovs->diffuseDirect || aovs->specularDirect ||
+                                  aovs->diffuseIndirect || aovs->specularIndirect ||
+                                  aovs->transmission);
+        std::vector<float> accDiffDirX, accDiffDirY, accDiffDirZ;
+        std::vector<float> accSpecDirX, accSpecDirY, accSpecDirZ;
+        std::vector<float> accDiffIndX, accDiffIndY, accDiffIndZ;
+        std::vector<float> accSpecIndX, accSpecIndY, accSpecIndZ;
+        std::vector<float> accTransX, accTransY, accTransZ;
+        if (trackLPE) {
+            accDiffDirX.resize(numPixels,0); accDiffDirY.resize(numPixels,0); accDiffDirZ.resize(numPixels,0);
+            accSpecDirX.resize(numPixels,0); accSpecDirY.resize(numPixels,0); accSpecDirZ.resize(numPixels,0);
+            accDiffIndX.resize(numPixels,0); accDiffIndY.resize(numPixels,0); accDiffIndZ.resize(numPixels,0);
+            accSpecIndX.resize(numPixels,0); accSpecIndY.resize(numPixels,0); accSpecIndZ.resize(numPixels,0);
+            accTransX.resize(numPixels,0); accTransY.resize(numPixels,0); accTransZ.resize(numPixels,0);
+        }
+
         // Split into adaptive passes
         const int batchSize = std::max(4, spp / 4);
         const float adaptThreshold = camera.adaptiveThreshold;
@@ -282,6 +299,18 @@ void SpectralIntegrator::RenderFrame(
                                 GfVec3f e = SpectralSpectrum::RadianceToXYZ(comps.emission, lambda);
                                 accEmissionX[pixIdx] += e[0]; accEmissionY[pixIdx] += e[1]; accEmissionZ[pixIdx] += e[2];
                             }
+                            if (trackLPE) {
+                                GfVec3f dd = SpectralSpectrum::RadianceToXYZ(comps.diffuseDirect, lambda);
+                                accDiffDirX[pixIdx] += dd[0]; accDiffDirY[pixIdx] += dd[1]; accDiffDirZ[pixIdx] += dd[2];
+                                GfVec3f sd = SpectralSpectrum::RadianceToXYZ(comps.specularDirect, lambda);
+                                accSpecDirX[pixIdx] += sd[0]; accSpecDirY[pixIdx] += sd[1]; accSpecDirZ[pixIdx] += sd[2];
+                                GfVec3f di = SpectralSpectrum::RadianceToXYZ(comps.diffuseIndirect, lambda);
+                                accDiffIndX[pixIdx] += di[0]; accDiffIndY[pixIdx] += di[1]; accDiffIndZ[pixIdx] += di[2];
+                                GfVec3f si = SpectralSpectrum::RadianceToXYZ(comps.specularIndirect, lambda);
+                                accSpecIndX[pixIdx] += si[0]; accSpecIndY[pixIdx] += si[1]; accSpecIndZ[pixIdx] += si[2];
+                                GfVec3f tr = SpectralSpectrum::RadianceToXYZ(comps.transmission, lambda);
+                                accTransX[pixIdx] += tr[0]; accTransY[pixIdx] += tr[1]; accTransZ[pixIdx] += tr[2];
+                            }
 
                             // Track luminance variance (Y channel ≈ luminance)
                             float lum = xyz[1];
@@ -347,6 +376,19 @@ void SpectralIntegrator::RenderFrame(
             if (trackEmission) {
                 GfVec3f c = SpectralSpectrum::XYZtoRGB(accEmissionX[i]*invN, accEmissionY[i]*invN, accEmissionZ[i]*invN, static_cast<SpectralSpectrum::ColorSpace>(colorSpace));
                 aovs->emission[i*3+0] = std::max(0.f,c[0]); aovs->emission[i*3+1] = std::max(0.f,c[1]); aovs->emission[i*3+2] = std::max(0.f,c[2]);
+            }
+            if (trackLPE) {
+                auto cs = static_cast<SpectralSpectrum::ColorSpace>(colorSpace);
+                auto write3 = [&](float* buf, float ax, float ay, float az) {
+                    if (!buf) return;
+                    GfVec3f c = SpectralSpectrum::XYZtoRGB(ax*invN, ay*invN, az*invN, cs);
+                    buf[i*3+0] = std::max(0.f,c[0]); buf[i*3+1] = std::max(0.f,c[1]); buf[i*3+2] = std::max(0.f,c[2]);
+                };
+                write3(aovs->diffuseDirect,   accDiffDirX[i], accDiffDirY[i], accDiffDirZ[i]);
+                write3(aovs->specularDirect,  accSpecDirX[i], accSpecDirY[i], accSpecDirZ[i]);
+                write3(aovs->diffuseIndirect, accDiffIndX[i], accDiffIndY[i], accDiffIndZ[i]);
+                write3(aovs->specularIndirect,accSpecIndX[i], accSpecIndY[i], accSpecIndZ[i]);
+                write3(aovs->transmission,    accTransX[i],   accTransY[i],   accTransZ[i]);
             }
         }
 
@@ -824,7 +866,13 @@ float SpectralIntegrator::_ShadeSpectral(
 
                 float contrib = bsdf * lightRad * atten * misW * shadowTransmit;
                 radiance += contrib;
-                if (comps) comps->direct += contrib;
+                if (comps) {
+                    comps->direct += contrib;
+                    // LPE decomposition: split by metallic
+                    float specFrac = resolvedMat.metallic + (1.f - resolvedMat.metallic) * std::pow(1.f - std::abs(N[0]*V[0]+N[1]*V[1]+N[2]*V[2]), 5.f);
+                    comps->specularDirect += contrib * specFrac;
+                    comps->diffuseDirect  += contrib * (1.f - specFrac);
+                }
             }
         }
     }
@@ -992,6 +1040,7 @@ float SpectralIntegrator::_ShadeSpectral(
     bool isEntering = true;
     const SpectralMaterial* insideVolumeMat = nullptr;  // Beer-Lambert tracking
     float pathMinRoughness = 0.f;  // path regularization for rough glass
+    int firstBounceType = 0;  // 0=none, 1=diffuse, 2=specular, 3=transmission
 
     for (int bounce = 0; bounce < maxBounces; ++bounce) {
         // Russian roulette after bounce 1
@@ -1018,6 +1067,16 @@ float SpectralIntegrator::_ShadeSpectral(
 
         if (bounceThroughput <= 0.f) break;
         pathThroughput *= bounceThroughput;
+
+        // Classify first bounce for LPE decomposition
+        if (bounce == 0 && comps) {
+            if (transmitted)
+                firstBounceType = 3;  // transmission
+            else if (regularizedMat.metallic > 0.5f || regularizedMat.roughness < 0.3f)
+                firstBounceType = 2;  // specular
+            else
+                firstBounceType = 1;  // diffuse
+        }
 
         // Beer-Lambert: update volume tracking based on transmission
         if (transmitted) {
@@ -1154,7 +1213,17 @@ float SpectralIntegrator::_ShadeSpectral(
             bounceRadiance += bounceMat->SpectralEmission(lambda);
         }
         radiance += pathThroughput * bounceRadiance;
-        if (comps) comps->indirect += pathThroughput * bounceRadiance;
+        if (comps) {
+            float indContrib = pathThroughput * bounceRadiance;
+            comps->indirect += indContrib;
+            // LPE indirect decomposition based on first bounce type
+            if (firstBounceType == 3)
+                comps->transmission += indContrib;
+            else if (firstBounceType == 2)
+                comps->specularIndirect += indContrib;
+            else
+                comps->diffuseIndirect += indContrib;
+        }
     }
 
     return radiance;

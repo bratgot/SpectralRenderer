@@ -108,6 +108,12 @@ public:
         float* indirect = nullptr;  // 3 floats per pixel
         float* emission = nullptr;  // 3 floats per pixel
         float* pRef     = nullptr;  // 3 floats per pixel (undisplaced position)
+        // LPE decomposition
+        float* diffuseDirect   = nullptr;
+        float* specularDirect  = nullptr;
+        float* diffuseIndirect = nullptr;
+        float* specularIndirect = nullptr;
+        float* transmission    = nullptr;
     };
 
     static void RenderFrame(
@@ -204,6 +210,12 @@ private:
         float direct   = 0.f;  // direct lighting
         float indirect = 0.f;  // bounce/indirect
         float emission = 0.f;  // emissive
+        // LPE decomposition
+        float diffuseDirect   = 0.f;
+        float specularDirect  = 0.f;
+        float diffuseIndirect = 0.f;
+        float specularIndirect = 0.f;
+        float transmission    = 0.f;
     };
 
     // Spectral shading — returns spectral radiance at a single wavelength

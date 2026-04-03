@@ -20,6 +20,7 @@ PXR_NAMESPACE_USING_DIRECTIVE
 #include <DDImage/Knobs.h>
 #include <DDImage/Row.h>
 #include <DDImage/Format.h>
+#include <DDImage/MetaData.h>
 #include <DDImage/GeometryProviderI.h>
 #include <DDImage/OpState.h>
 
@@ -61,6 +62,15 @@ public:
     Op*  default_input(int idx)         const override;
 
     void _validate(bool forReal)        override;
+
+    // Cryptomatte metadata for Nuke gizmo
+    MetaData::Bundle _cryptoMeta;
+    bool _cryptoMetaReady = false;
+    const MetaData::Bundle& _fetchMetaData(const char* key) override
+    {
+        if (_cryptoMetaReady) return _cryptoMeta;
+        return Iop::_fetchMetaData(key);
+    }
     void _request(int x, int y, int r, int t,
                   ChannelMask channels, int count) override;
     void engine(int y, int x, int r,
@@ -197,6 +207,7 @@ private:
 
     // Cryptomatte
     Channel _chanCryptoR = Chan_Black, _chanCryptoG = Chan_Black;
+    Channel _chanCryptoB = Chan_Black, _chanCryptoA = Chan_Black;
     unsigned int        _fbWidth  = 0;
     unsigned int        _fbHeight = 0;
     unsigned int        _fbFullWidth  = 0;
