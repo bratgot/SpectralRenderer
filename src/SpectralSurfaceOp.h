@@ -32,7 +32,7 @@ public:
     const char* input_label(int idx, char*) const override {
         switch(idx) {
             case 0: return "tex";
-            case 1: return "map";
+            case 1: return "disp/bump";
             default: return "";
         }
     }
@@ -84,6 +84,7 @@ private:
     float _absorptionColor[3] = {1.f, 1.f, 1.f}; // volume color (white=clear)
     float _absorptionDensity = 0.f;       // 0=clear, higher=darker
     int   _mapMode = 0;                      // 0=bump, 1=displacement
+    int   _dispType = 0;                     // 0=scalar, 1=vector tangent, 2=vector object
     float _bumpStrength = 1.0f;              // bump map intensity
     float _gratingSpacing = 0.f;
     float _gratingStrength = 1.f;
@@ -111,6 +112,7 @@ public:
         float absorptionColor[3] = {1.f, 1.f, 1.f};
         float absorptionDensity = 0.f;
         int mapMode = 0;
+        int dispType = 0;
         float bumpStrength = 1.0f;
         float gratingSpacing = 0.f;
         float gratingStrength = 1.f;

@@ -1041,8 +1041,10 @@ float SpectralIntegrator::_ShadeSpectral(
     const SpectralMaterial* insideVolumeMat = nullptr;  // Beer-Lambert tracking
     float pathMinRoughness = 0.f;  // path regularization for rough glass
     int firstBounceType = 0;  // 0=none, 1=diffuse, 2=specular, 3=transmission
+    int refractionCount = 0;  // separate counter for glass paths
+    int effectiveMaxBounces = maxBounces;
 
-    for (int bounce = 0; bounce < maxBounces; ++bounce) {
+    for (int bounce = 0; bounce < effectiveMaxBounces; ++bounce) {
         // Russian roulette after bounce 1
         if (bounce >= 1) {
             float rrProb = std::min(0.95f, pathThroughput);
@@ -1089,6 +1091,11 @@ float SpectralIntegrator::_ShadeSpectral(
             } else if (!isEntering) {
                 insideVolumeMat = nullptr;
             }
+
+            // Allow extra bounces for glass paths (camera.refractionBounces)
+            refractionCount++;
+            effectiveMaxBounces = std::max(maxBounces, maxBounces + refractionCount);
+            if (effectiveMaxBounces > 32) effectiveMaxBounces = 32;
         }
 
         // Trace bounce ray

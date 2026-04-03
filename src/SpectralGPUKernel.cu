@@ -166,22 +166,6 @@ static __forceinline__ __device__ float spectralReflectance(const GPUMaterial& m
     return fmaxf(0.f, fminf(1.f, r));
 }
 
-static __forceinline__ __device__ float skySpectral(float3 dir, float lambda)
-{
-    dir = normalize3(dir);
-    float t = fmaxf(0.f, fminf(1.f, dir.y*0.5f+0.5f));
-    float scatter = 1.f;
-    if (lambda > 400.f) { float ratio=460.f/lambda; scatter=ratio*ratio*ratio*ratio; }
-    return 0.7f + (0.4f*scatter - 0.7f)*t;
-}
-
-static __forceinline__ __device__ float3 skyColor(float3 dir)
-{
-    dir = normalize3(dir);
-    float t = fmaxf(0.f, fminf(1.f, dir.y*0.5f+0.5f));
-    return make_float3(0.72f+(0.35f-0.72f)*t, 0.70f+(0.55f-0.70f)*t, 0.68f+(0.82f-0.68f)*t);
-}
-
 static __forceinline__ __device__ float3 shadeNormal(float3 n)
 {
     n = normalize3(n);
@@ -216,14 +200,6 @@ static __forceinline__ __device__ float lightEmission(const GPULight& light, flo
                  + light.color.z*spectralGauss(lambda,460.f,25.f);
     }
     return spectrum * light.intensity;
-}
-
-static __forceinline__ __device__ float3 lightDirection(const GPULight& light, float3 hitPos)
-{
-    if (light.type == 0 || light.type == 3) // distant or dome
-        return normalize3(neg3(light.direction));
-    float3 d = make_float3(light.position.x-hitPos.x, light.position.y-hitPos.y, light.position.z-hitPos.z);
-    return normalize3(d);
 }
 
 static __forceinline__ __device__ float spotAttenuation(const GPULight& light, float3 hitPos)

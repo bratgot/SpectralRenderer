@@ -43,7 +43,8 @@ struct SpectralMaterial
     float   bumpStrength   = 1.0f; // bump map intensity multiplier
     int     displacementTexId = -1; // displacement map
     float   displacementScale = 0.f; // world units, 0 = disabled
-    float   displacementMidpoint = 0.0f; // 0.5 = centered, 0 = outward only
+    float   displacementMidpoint = 0.f;
+    int     displacementMode = 0;  // 0=scalar (height along N), 1=vector tangent, 2=vector object
 
     // Spectral-specific properties
     float   abbeNumber       = 0.0f;   // dispersion (0=none, ~60=crown glass, ~30=flint)

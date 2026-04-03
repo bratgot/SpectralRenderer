@@ -110,6 +110,7 @@ private:
     int   _frame      = 1;
     int   _samples    = 1;
     int   _maxBounces = 4;
+    int   _refractionBounces = 8;  // separate limit for glass paths
     int   _tileSize   = 64;
     int   _deviceMode = 0;         // 0=cpu, 1=gpu, 2=auto
     int   _colorSpace = 0;         // 0=sRGB, 1=ACEScg, 2=ACES 2065-1

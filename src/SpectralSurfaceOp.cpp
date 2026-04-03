@@ -124,7 +124,7 @@ void SpectralSurfaceOp::knobs(Knob_Callback f)
     BeginClosedGroup(f, "spectral_grp", "Spectral");
     {
         Float_knob(f, &_abbeNumber, "abbe_number", "dispersion (Abbe)");
-        SetRange(f, 0.f, 100.f);
+        SetRange(f, 0.f, 50.f);
         Tooltip(f, "Abbe number controls chromatic dispersion.\n"
                    "0 = none, 60 = crown glass, 30 = flint, 55 = diamond.\n"
                    "Uses Sellmeier equation for physically accurate dispersion.");
@@ -159,6 +159,12 @@ void SpectralSurfaceOp::knobs(Knob_Callback f)
         Tooltip(f, "Vertex offset in world units (displacement mode).");
         Float_knob(f, &_displacementMidpoint, "displacement_midpoint", "midpoint");
         SetRange(f, -1.f, 1.f);
+        static const char* const kDispTypeNames[] = { "scalar", "vector tangent", "vector object", nullptr };
+        Enumeration_knob(f, &_dispType, kDispTypeNames, "disp_type", "disp type");
+        Tooltip(f, "Displacement map type:\n"
+                   "scalar = height map (red channel along normal)\n"
+                   "vector tangent = RGB in tangent space\n"
+                   "vector object = RGB as XYZ offset in object space");
     }
     EndGroup(f);
 
@@ -523,6 +529,7 @@ void SpectralSurfaceOp::RegisterParams()
         }
     }
     p.mapMode = _mapMode;
+    p.dispType = _dispType;
     p.bumpStrength = _bumpStrength;
     p.gratingSpacing = _gratingSpacing;
     p.gratingStrength = _gratingStrength;

@@ -12,6 +12,7 @@
 #include <pxr/usd/usdGeom/mesh.h>
 #include <pxr/usd/usdGeom/camera.h>
 #include <pxr/usd/usdGeom/xformCache.h>
+#include <pxr/usd/usdGeom/pointInstancer.h>
 #include <pxr/usd/usdGeom/tokens.h>
 #include <pxr/usd/usdGeom/primvarsAPI.h>
 #include <pxr/usd/usdShade/material.h>
@@ -29,6 +30,9 @@
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/gf/vec3d.h>
+#include <pxr/base/gf/rotation.h>
+#include <pxr/base/gf/quath.h>
+#include <pxr/base/gf/quatd.h>
 #include <pxr/base/gf/vec4d.h>
 #include <pxr/base/gf/camera.h>
 #include <pxr/base/gf/frustum.h>
@@ -185,10 +189,15 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                    "traces one wavelength through the scene.<br>"
                    "1 = normal-shaded preview, 16+ = spectral.");
         Int_knob(f, &_maxBounces, "max_bounces", "max bounces"); SetRange(f, 1, 16);
-        Tooltip(f, "Maximum number of light bounces per ray.<br>"
+        Tooltip(f, "Maximum ray bounce depth for all paths.<br>"
                    "1 = direct lighting only<br>"
                    "4 = good for most scenes (default)<br>"
-                   "8+ = needed for complex glass and caustics");
+                   "8+ = complex glass and caustics");
+        Int_knob(f, &_refractionBounces, "refraction_bounces", "refraction bounces"); SetRange(f, 1, 32);
+        Tooltip(f, "Maximum bounces for transmission/refraction paths.<br>"
+                   "Glass needs at least 4 (enter+exit+reflection).<br>"
+                   "Nested glass (ice in water) needs 8+.<br>"
+                   "Default 8. Does not affect diffuse/specular depth.");
         Int_knob(f, &_tileSize, "tile_size", "tile size"); SetRange(f, 16, 256);
         Tooltip(f, "Tile size in pixels for parallel rendering.<br>"
                    "Smaller tiles = better load balancing.<br>"
@@ -1045,6 +1054,112 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                     _lightIntensity);
         }
 
+        // ---- USD PointInstancer (flatten instances at load time) ----
+        if (prim.IsA<UsdGeomPointInstancer>()) {
+            UsdGeomPointInstancer instancer(prim);
+            if (!instancer) continue;
+
+            VtVec3fArray positions;
+            instancer.GetPositionsAttr().Get(&positions, timeOpen);
+            if (positions.empty()) continue;
+
+            VtIntArray protoIndices;
+            instancer.GetProtoIndicesAttr().Get(&protoIndices, timeOpen);
+
+            VtQuathArray orientations;
+            instancer.GetOrientationsAttr().Get(&orientations, timeOpen);
+
+            VtVec3fArray scales;
+            instancer.GetScalesAttr().Get(&scales, timeOpen);
+
+            SdfPathVector protoTargets;
+            instancer.GetPrototypesRel().GetTargets(&protoTargets);
+
+            GfMatrix4d instancerXf = xfCache.GetLocalToWorldTransform(prim);
+
+            fprintf(stderr, "SpectralRender: PointInstancer '%s' — %zu instances, %zu prototypes\n",
+                    prim.GetPath().GetText(), positions.size(), protoTargets.size());
+
+            // For each instance, find its prototype mesh and add transformed triangles
+            for (size_t inst = 0; inst < positions.size(); ++inst) {
+                int protoIdx = (inst < protoIndices.size()) ? protoIndices[inst] : 0;
+                if (protoIdx < 0 || protoIdx >= (int)protoTargets.size()) continue;
+
+                UsdPrim protoPrim = stage->GetPrimAtPath(protoTargets[protoIdx]);
+                if (!protoPrim || !protoPrim.IsA<UsdGeomMesh>()) continue;
+
+                UsdGeomMesh protoMesh(protoPrim);
+                VtVec3fArray protoPoints;
+                protoMesh.GetPointsAttr().Get(&protoPoints, timeOpen);
+                if (protoPoints.empty()) continue;
+
+                VtIntArray protoFaceVertexCounts, protoFaceVertexIndices;
+                protoMesh.GetFaceVertexCountsAttr().Get(&protoFaceVertexCounts, timeOpen);
+                protoMesh.GetFaceVertexIndicesAttr().Get(&protoFaceVertexIndices, timeOpen);
+
+                // Build instance transform
+                GfMatrix4d instMat(1.0);
+                if (inst < scales.size()) {
+                    GfVec3f s = scales[inst];
+                    instMat = GfMatrix4d(s[0],0,0,0, 0,s[1],0,0, 0,0,s[2],0, 0,0,0,1);
+                }
+                if (inst < orientations.size()) {
+                    GfQuatd q(orientations[inst]);
+                    GfMatrix4d rotMat(1.0); rotMat.SetRotate(GfRotation(q));
+                    instMat = instMat * rotMat;
+                }
+                GfVec3f pos = positions[inst];
+                GfMatrix4d transMat(1.0); transMat.SetTranslate(GfVec3d(pos));
+                instMat = instMat * transMat * instancerXf;
+
+                // Transform prototype points
+                VtVec3fArray xfPoints(protoPoints.size());
+                for (size_t v = 0; v < protoPoints.size(); ++v) {
+                    GfVec3d wp = instMat.Transform(GfVec3d(protoPoints[v]));
+                    xfPoints[v] = GfVec3f(wp);
+                }
+
+                // Compute normals
+                VtVec3fArray xfNormals(protoPoints.size(), GfVec3f(0.f));
+                for (size_t fi = 0; fi + 2 < protoFaceVertexIndices.size(); fi += 3) {
+                    int i0 = protoFaceVertexIndices[fi];
+                    int i1 = protoFaceVertexIndices[fi+1];
+                    int i2 = protoFaceVertexIndices[fi+2];
+                    if (i0 >= (int)xfPoints.size() || i1 >= (int)xfPoints.size() || i2 >= (int)xfPoints.size()) continue;
+                    GfVec3f fn = GfCross(xfPoints[i1]-xfPoints[i0], xfPoints[i2]-xfPoints[i0]);
+                    xfNormals[i0] += fn; xfNormals[i1] += fn; xfNormals[i2] += fn;
+                }
+                for (auto& n : xfNormals) { float l = n.GetLength(); if (l > 1e-8f) n /= l; }
+
+                // Add triangles (simple fan triangulation for non-tri faces)
+                int objectId = _scene->NextObjectId();
+                int matId = 0;
+                size_t idx = 0;
+                SpectralMeshData meshData;
+                meshData.id = prim.GetPath().AppendChild(TfToken("inst_" + std::to_string(inst)));
+                meshData.objectId = objectId;
+                meshData.visible = true;
+
+                for (int fc : protoFaceVertexCounts) {
+                    for (int t = 0; t < fc - 2; ++t) {
+                        int i0 = protoFaceVertexIndices[idx];
+                        int i1 = protoFaceVertexIndices[idx + t + 1];
+                        int i2 = protoFaceVertexIndices[idx + t + 2];
+                        if (i0 >= (int)xfPoints.size() || i1 >= (int)xfPoints.size() || i2 >= (int)xfPoints.size()) continue;
+                        SpectralTriangle tri;
+                        tri.v0 = xfPoints[i0]; tri.v1 = xfPoints[i1]; tri.v2 = xfPoints[i2];
+                        tri.n0 = xfNormals[i0]; tri.n1 = xfNormals[i1]; tri.n2 = xfNormals[i2];
+                        tri.materialId = matId;
+                        tri.objectId = objectId;
+                        meshData.triangles.push_back(tri);
+                    }
+                    idx += fc;
+                }
+                _scene->SetMeshData(meshData.id, std::move(meshData));
+            }
+            continue;
+        }
+
         // Process meshes
         if (!prim.IsA<UsdGeomMesh>()) continue;
 
@@ -1382,6 +1497,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                                 mat.thinFilmThickness = entry.second.thinFilmThickness;
                                 mat.displacementScale = entry.second.displacementScale;
                                 mat.displacementMidpoint = entry.second.displacementMidpoint;
+                                mat.displacementMode = entry.second.dispType;
                                 mat.metalType = entry.second.metalType;
                                 mat.textureBlend = entry.second.textureBlend;
                                 mat.absorptionColor = GfVec3f(entry.second.absorptionColor[0],
@@ -1731,18 +1847,45 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
 
                                     auto samplePx = [&](int x, int y) -> float {
                                         int idx = (y * texW + x) * texCh;
-                                        return texPx[idx]; // use red channel
+                                        return texPx[idx]; // red channel
+                                    };
+                                    auto samplePx3 = [&](int x, int y) -> GfVec3f {
+                                        int idx = (y * texW + x) * texCh;
+                                        float r = texPx[idx];
+                                        float g = (texCh > 1) ? texPx[idx+1] : 0.f;
+                                        float b = (texCh > 2) ? texPx[idx+2] : 0.f;
+                                        return GfVec3f(r, g, b);
                                     };
 
-                                    float c00 = samplePx(x0,y0), c10 = samplePx(x1,y0);
-                                    float c01 = samplePx(x0,y1), c11 = samplePx(x1,y1);
-                                    float val = (c00*(1-dx)+c10*dx)*(1-dy) + (c01*(1-dx)+c11*dx)*dy;
+                                    if (dispMat.displacementMode == 0) {
+                                        // Scalar displacement: height along normal
+                                        float c00 = samplePx(x0,y0), c10 = samplePx(x1,y0);
+                                        float c01 = samplePx(x0,y1), c11 = samplePx(x1,y1);
+                                        float val = (c00*(1-dx)+c10*dx)*(1-dy) + (c01*(1-dx)+c11*dx)*dy;
+                                        float offset = (val - midpoint) * scale;
+                                        GfVec3f N = normals[i];
+                                        float nlen = N.GetLength();
+                                        if (nlen > 1e-6f) N /= nlen;
+                                        points[i] += N * offset;
+                                    } else {
+                                        // Vector displacement: RGB → XYZ offset
+                                        GfVec3f c00 = samplePx3(x0,y0), c10 = samplePx3(x1,y0);
+                                        GfVec3f c01 = samplePx3(x0,y1), c11 = samplePx3(x1,y1);
+                                        GfVec3f val = (c00*(1-dx)+c10*dx)*(1-dy) + (c01*(1-dx)+c11*dx)*dy;
+                                        GfVec3f offset = (val - GfVec3f(midpoint)) * scale;
 
-                                    float offset = (val - midpoint) * scale;
-                                    GfVec3f N = normals[i];
-                                    float nlen = N.GetLength();
-                                    if (nlen > 1e-6f) N /= nlen;
-                                    points[i] += N * offset;
+                                        if (dispMat.displacementMode == 1) {
+                                            // Tangent space: build tangent frame from normal
+                                            GfVec3f N = normals[i].GetNormalized();
+                                            GfVec3f up = (std::abs(N[1]) < 0.999f) ? GfVec3f(0,1,0) : GfVec3f(1,0,0);
+                                            GfVec3f T = GfCross(up, N).GetNormalized();
+                                            GfVec3f B = GfCross(N, T);
+                                            points[i] += T * offset[0] + B * offset[1] + N * offset[2];
+                                        } else {
+                                            // Object space: RGB maps directly to XYZ
+                                            points[i] += offset;
+                                        }
+                                    }
                                 }
 
                                 // Step 3: Recompute normals from displaced geometry
@@ -2148,6 +2291,7 @@ void SpectralRenderIop::_EnsureFrameRendered()
     }
 
     cam.adaptiveThreshold = _adaptiveThreshold;
+    cam.refractionBounces = _refractionBounces;
     cam.blueNoise = _blueNoise;
     cam.fStop = _fStop;
     cam.focusDistance = _focusDistance;

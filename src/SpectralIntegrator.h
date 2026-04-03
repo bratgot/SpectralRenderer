@@ -56,6 +56,7 @@ struct SpectralCamera {
     bool   blueNoise         = true;  // R2 quasi-random sampling
     int    aoSamples         = 8;    // ambient occlusion samples (0 = disabled)
     float  aoRadius          = 5.f;  // AO max ray distance
+    int    refractionBounces = 8;    // separate limit for glass paths
     float  focalLength       = 50.f; // mm
     float  fStop             = 0.f;  // 0 = pinhole (no DOF)
     float  focusDistance     = 100.f; // world units
