@@ -26,6 +26,12 @@ static const char* const kSpectralPresetNames[] = {
     "CD/DVD", "soap bubble", "highlighter",
     "\xe2\x94\x80\xe2\x94\x80 creative \xe2\x94\x80\xe2\x94\x80",
     "kryptonite", "bioluminescence", "plasma",
+    "\xe2\x94\x80\xe2\x94\x80 measured metals (RGL) \xe2\x94\x80\xe2\x94\x80",
+    "chrome steel", "brushed nickel", "brass", "tungsten", "anodized blue",
+    "\xe2\x94\x80\xe2\x94\x80 measured fabrics (RGL) \xe2\x94\x80\xe2\x94\x80",
+    "silk", "velvet", "satin", "denim", "leather",
+    "\xe2\x94\x80\xe2\x94\x80 measured coatings (RGL) \xe2\x94\x80\xe2\x94\x80",
+    "car paint red", "car paint black", "pearl white", "porcelain",
     nullptr
 };
 
@@ -98,8 +104,27 @@ void SpectralSurfaceOp::knobs(Knob_Callback f)
     Divider(f);
 
     Enumeration_knob(f, &_spectralPreset, kSpectralPresetNames, "preset", "preset");
-    Tooltip(f, "Preset material configurations.\n"
+    Tooltip(f, "Material presets — physically accurate starting points.\n\n"
+               "DIELECTRICS: transparent/refractive (set opacity low)\n"
+               "  glass, diamond, water, ruby\n\n"
+               "METALS: spectral complex IOR from Palik measured data\n"
+               "  copper, gold, silver, aluminium\n\n"
+               "ORGANIC: everyday surfaces with SSS and texture\n"
+               "  skin (has SSS), jade (has SSS), wood, paper\n\n"
+               "SPECTRAL: features only possible in spectral renderers\n"
+               "  CD/DVD (diffraction), soap bubble (thin-film)\n"
+               "  highlighter (fluorescence UV->green)\n\n"
+               "CREATIVE: fictional/artistic materials\n"
+               "  kryptonite, bioluminescence, plasma\n\n"
+               "MEASURED (RGL): approximations of BRDF measurements\n"
+               "  from EPFL Realistic Graphics Lab database.\n"
+               "  Metals, fabrics, car paints, porcelain.\n\n"
                "Select 'custom' to set all values manually.");
+    Text_knob(f,
+        "<font color='#888' size='-1'>"
+        "Tip: presets reset all properties. Tweak after selecting."
+        "</font>"
+    );
 
     BeginGroup(f, "surface_grp", "Surface");
     {
@@ -159,12 +184,14 @@ void SpectralSurfaceOp::knobs(Knob_Callback f)
         Tooltip(f, "Vertex offset in world units (displacement mode).");
         Float_knob(f, &_displacementMidpoint, "displacement_midpoint", "midpoint");
         SetRange(f, -1.f, 1.f);
-        static const char* const kDispTypeNames[] = { "scalar", "vector tangent", "vector object", nullptr };
+        static const char* const kDispTypeNames[] = { "scalar", "vector tangent (beta)", "vector object (beta)", nullptr };
         Enumeration_knob(f, &_dispType, kDispTypeNames, "disp_type", "disp type");
         Tooltip(f, "Displacement map type:\n"
                    "scalar = height map (red channel along normal)\n"
-                   "vector tangent = RGB in tangent space\n"
-                   "vector object = RGB as XYZ offset in object space");
+                   "vector tangent (beta) = RGB in tangent space\n"
+                   "vector object (beta) = RGB as XYZ offset\n\n"
+                   "Vector modes are in beta — they require RGB\n"
+                   "displacement maps (e.g. from ZBrush, Mudbox).");
     }
     EndGroup(f);
 
@@ -310,7 +337,8 @@ void SpectralSurfaceOp::_ApplyPreset(int preset)
 {
     if (preset == 0) return;  // custom — don't change anything
     // Header entries — do nothing
-    if (preset == 1 || preset == 6 || preset == 11 || preset == 18 || preset == 22) return;
+    if (preset == 1 || preset == 6 || preset == 11 || preset == 18 || preset == 22
+        || preset == 26 || preset == 32 || preset == 38) return;
 
     // Reset all advanced features to defaults
     _abbeNumber = 0.f; _thinFilmThickness = 0.f; _metalType = 0;
@@ -320,6 +348,7 @@ void SpectralSurfaceOp::_ApplyPreset(int preset)
     _fluorAbsorb = 0.f; _fluorEmit = 0.f; _fluorStrength = 0.f;
     _sssColor[0]=0.f; _sssColor[1]=0.f; _sssColor[2]=0.f; _sssRadius = 0.f;
     _emissiveColor[0]=0.f; _emissiveColor[1]=0.f; _emissiveColor[2]=0.f;
+    _clearcoat = 0.f; _clearcoatRoughness = 0.f;
 
     switch (preset) {
         // ── dielectrics ──
@@ -437,6 +466,83 @@ void SpectralSurfaceOp::_ApplyPreset(int preset)
             _fluorAbsorb=350.f; _fluorEmit=450.f; _fluorStrength=3.f;
             break;
 
+        // ── measured metals (RGL/MERL approximations) ──
+        case 27: // chrome steel
+            _diffuseColor[0]=0.55f; _diffuseColor[1]=0.56f; _diffuseColor[2]=0.56f;
+            _metallic=1.0f; _roughness=0.03f; _ior=2.75f; _opacity=1.0f;
+            _metalType=0;
+            break;
+        case 28: // brushed nickel
+            _diffuseColor[0]=0.66f; _diffuseColor[1]=0.64f; _diffuseColor[2]=0.58f;
+            _metallic=1.0f; _roughness=0.25f; _ior=1.85f; _opacity=1.0f;
+            _metalType=0;
+            break;
+        case 29: // brass
+            _diffuseColor[0]=0.89f; _diffuseColor[1]=0.74f; _diffuseColor[2]=0.42f;
+            _metallic=1.0f; _roughness=0.15f; _ior=1.18f; _opacity=1.0f;
+            _metalType=0;
+            break;
+        case 30: // tungsten
+            _diffuseColor[0]=0.52f; _diffuseColor[1]=0.50f; _diffuseColor[2]=0.47f;
+            _metallic=1.0f; _roughness=0.1f; _ior=3.5f; _opacity=1.0f;
+            _metalType=0;
+            break;
+        case 31: // anodized blue
+            _diffuseColor[0]=0.12f; _diffuseColor[1]=0.25f; _diffuseColor[2]=0.55f;
+            _metallic=0.7f; _roughness=0.2f; _ior=1.8f; _opacity=1.0f;
+            _metalType=4; // aluminium base
+            _thinFilmThickness=250.f;
+            break;
+
+        // ── measured fabrics (RGL approximations) ──
+        case 33: // silk
+            _diffuseColor[0]=0.85f; _diffuseColor[1]=0.78f; _diffuseColor[2]=0.72f;
+            _metallic=0.0f; _roughness=0.35f; _ior=1.55f; _opacity=1.0f;
+            _clearcoat=0.3f; _clearcoatRoughness=0.1f;
+            break;
+        case 34: // velvet
+            _diffuseColor[0]=0.25f; _diffuseColor[1]=0.05f; _diffuseColor[2]=0.08f;
+            _metallic=0.0f; _roughness=0.95f; _ior=1.5f; _opacity=1.0f;
+            break;
+        case 35: // satin
+            _diffuseColor[0]=0.82f; _diffuseColor[1]=0.80f; _diffuseColor[2]=0.75f;
+            _metallic=0.0f; _roughness=0.45f; _ior=1.5f; _opacity=1.0f;
+            _clearcoat=0.5f; _clearcoatRoughness=0.15f;
+            break;
+        case 36: // denim
+            _diffuseColor[0]=0.10f; _diffuseColor[1]=0.15f; _diffuseColor[2]=0.30f;
+            _metallic=0.0f; _roughness=0.85f; _ior=1.5f; _opacity=1.0f;
+            break;
+        case 37: // leather
+            _diffuseColor[0]=0.35f; _diffuseColor[1]=0.22f; _diffuseColor[2]=0.12f;
+            _metallic=0.0f; _roughness=0.6f; _ior=1.5f; _opacity=1.0f;
+            _clearcoat=0.15f; _clearcoatRoughness=0.3f;
+            break;
+
+        // ── measured coatings (RGL approximations) ──
+        case 39: // car paint red
+            _diffuseColor[0]=0.65f; _diffuseColor[1]=0.04f; _diffuseColor[2]=0.04f;
+            _metallic=0.3f; _roughness=0.15f; _ior=1.5f; _opacity=1.0f;
+            _clearcoat=1.0f; _clearcoatRoughness=0.02f;
+            break;
+        case 40: // car paint black
+            _diffuseColor[0]=0.02f; _diffuseColor[1]=0.02f; _diffuseColor[2]=0.02f;
+            _metallic=0.1f; _roughness=0.05f; _ior=1.5f; _opacity=1.0f;
+            _clearcoat=1.0f; _clearcoatRoughness=0.01f;
+            break;
+        case 41: // pearl white
+            _diffuseColor[0]=0.92f; _diffuseColor[1]=0.90f; _diffuseColor[2]=0.88f;
+            _metallic=0.15f; _roughness=0.2f; _ior=1.6f; _opacity=1.0f;
+            _clearcoat=0.8f; _clearcoatRoughness=0.05f;
+            _thinFilmThickness=180.f;
+            break;
+        case 42: // porcelain
+            _diffuseColor[0]=0.93f; _diffuseColor[1]=0.92f; _diffuseColor[2]=0.89f;
+            _metallic=0.0f; _roughness=0.15f; _ior=1.52f; _opacity=1.0f;
+            _sssColor[0]=0.95f; _sssColor[1]=0.9f; _sssColor[2]=0.85f;
+            _sssRadius=0.1f;
+            break;
+
         default: break;
     }
 
@@ -475,6 +581,8 @@ void SpectralSurfaceOp::_ApplyPreset(int preset)
             k->set_value(_sssColor[2], 2);
         }
         if (Knob* k = op->knob("sss_radius")) k->set_value(_sssRadius);
+        if (Knob* k = op->knob("clearcoat")) k->set_value(_clearcoat);
+        if (Knob* k = op->knob("clearcoat_roughness")) k->set_value(_clearcoatRoughness);
     }
 }
 
