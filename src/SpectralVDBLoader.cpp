@@ -59,7 +59,7 @@ std::vector<SpectralVDBLoader::GridInfo> SpectralVDBLoader::DiscoverGrids(const 
 }
 
 std::shared_ptr<SpectralVolume> SpectralVDBLoader::Load(const char* filepath,
-    const char* densityGridName, const char* tempGridName)
+    const char* densityGridName, const char* tempGridName, int maxRes)
 {
     if (!filepath || strlen(filepath) == 0) return nullptr;
 
@@ -76,25 +76,34 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::Load(const char* filepath,
         std::string wantDensity = (densityGridName && strlen(densityGridName) > 0) ? densityGridName : "";
         std::string wantTemp = (tempGridName && strlen(tempGridName) > 0) ? tempGridName : "";
 
+        // Find grids — only read the ones we need, skip the rest
         for (auto it = file.beginName(); it != file.endName(); ++it) {
-            auto base = file.readGrid(*it);
-            auto fg = openvdb::gridPtrCast<openvdb::FloatGrid>(base);
-            if (!fg) continue;
-
             std::string name = *it;
-            // Explicit name match
-            if (!wantDensity.empty() && name == wantDensity) densityGrid = fg;
-            if (!wantTemp.empty() && name == wantTemp) tempGrid = fg;
 
-            // Auto-detect fallbacks
-            if (!densityGrid && wantDensity.empty()) {
-                if (_matchName(name, kDensityNames)) densityGrid = fg;
+            // Check if this grid name matches what we want BEFORE reading it
+            bool isDensity = false, isTemp = false;
+            if (!densityGrid) {
+                if (!wantDensity.empty() && name == wantDensity) isDensity = true;
+                else if (wantDensity.empty() && _matchName(name, kDensityNames)) isDensity = true;
             }
-            if (!tempGrid && wantTemp.empty()) {
-                if (_matchName(name, kTempNames)) tempGrid = fg;
+            if (!tempGrid) {
+                if (!wantTemp.empty() && name == wantTemp) isTemp = true;
+                else if (wantTemp.empty() && _matchName(name, kTempNames)) isTemp = true;
             }
-            // Last resort: first float grid as density
-            if (!densityGrid && wantDensity.empty()) densityGrid = fg;
+
+            // Only read grid from disk if we actually need it
+            if (isDensity || isTemp || (!densityGrid && wantDensity.empty())) {
+                auto base = file.readGrid(name);
+                auto fg = openvdb::gridPtrCast<openvdb::FloatGrid>(base);
+                if (!fg) continue;
+
+                if (isDensity) densityGrid = fg;
+                else if (isTemp) tempGrid = fg;
+                else if (!densityGrid) densityGrid = fg; // first float as fallback
+            }
+
+            // Early exit once we have everything
+            if (densityGrid && (tempGrid || wantTemp.empty())) break;
         }
 
         file.close();
@@ -111,8 +120,7 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::Load(const char* filepath,
         vol->bboxMin = GfVec3f(float(wMin.x()), float(wMin.y()), float(wMin.z()));
         vol->bboxMax = GfVec3f(float(wMax.x()), float(wMax.y()), float(wMax.z()));
 
-        // Resample to uniform grid (max 128^3)
-        int maxRes = 128;
+        // Resample to uniform grid (maxRes from parameter)
         auto dim = bbox.dim();
         float maxDim = float(std::max({dim.x(), dim.y(), dim.z()}));
         if (maxDim < 1) maxDim = 1;
@@ -173,6 +181,59 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::Load(const char* filepath,
         return vol;
     } catch (const std::exception& e) {
         fprintf(stderr, "SpectralVDB: error loading '%s': %s\n", filepath, e.what());
+        return nullptr;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LoadMetadataOnly — read only bbox from VDB file header (~1ms)
+// ---------------------------------------------------------------------------
+std::shared_ptr<SpectralVolume> SpectralVDBLoader::LoadMetadataOnly(
+    const char* filepath, const char* densityGridName)
+{
+    if (!filepath || strlen(filepath) == 0) return nullptr;
+
+    try {
+        openvdb::initialize();
+        openvdb::io::File file(filepath);
+        file.open();
+
+        auto vol = std::make_shared<SpectralVolume>();
+        std::string wantDensity = (densityGridName && strlen(densityGridName) > 0) ? densityGridName : "";
+
+        // Read only the density grid — skip all others
+        for (auto it = file.beginName(); it != file.endName(); ++it) {
+            std::string name = *it;
+
+            bool match = false;
+            if (!wantDensity.empty() && name == wantDensity) match = true;
+            else if (wantDensity.empty() && _matchName(name, kDensityNames)) match = true;
+            else if (wantDensity.empty()) match = true; // first float
+
+            if (!match) continue;
+
+            // Read just this one grid for its bbox
+            auto base = file.readGrid(name);
+            auto fg = openvdb::gridPtrCast<openvdb::FloatGrid>(base);
+            if (!fg) continue;
+
+            auto bbox = fg->evalActiveVoxelBoundingBox();
+            auto wMin = fg->indexToWorld(bbox.min());
+            auto wMax = fg->indexToWorld(bbox.max());
+            vol->bboxMin = GfVec3f(float(wMin.x()), float(wMin.y()), float(wMin.z()));
+            vol->bboxMax = GfVec3f(float(wMax.x()), float(wMax.y()), float(wMax.z()));
+            auto dim = bbox.dim();
+            vol->resX = dim.x(); vol->resY = dim.y(); vol->resZ = dim.z();
+            // No density array — just bbox for viewport wireframe
+            vol->density.clear();
+            vol->temperature.clear();
+            break;
+        }
+
+        file.close();
+        return vol;
+    } catch (const std::exception& e) {
+        fprintf(stderr, "SpectralVDB: metadata error '%s': %s\n", filepath, e.what());
         return nullptr;
     }
 }

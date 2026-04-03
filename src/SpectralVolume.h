@@ -44,6 +44,7 @@ struct SpectralVolume {
     GfVec3f scatterColor = GfVec3f(1.f);
 
     bool IsValid() const { return !density.empty() && resX > 0; }
+    bool HasBbox() const { return resX > 0 && resY > 0 && resZ > 0; }
 
     // Sample density at normalised coordinates [0,1]^3
     float SampleDensity(float u, float v, float w) const {

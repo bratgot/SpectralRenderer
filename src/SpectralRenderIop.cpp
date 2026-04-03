@@ -372,7 +372,14 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         SetFlags(f, Knob::INVISIBLE);
 
         Divider(f, "3D Viewport");
+        Bool_knob(f, &_vdbFastScrub, "vdb_fast_scrub", "fast scrub");
+        Tooltip(f, "When enabled, timeline scrubbing only reads\n"
+                   "VDB file headers (~1ms) instead of loading\n"
+                   "full voxel data (~200ms). Shows bbox only\n"
+                   "during scrub, full points when stopped.\n"
+                   "Disable for real-time point cloud updates.");
         Bool_knob(f, &_vdbShowBbox, "vdb_show_bbox", "show bbox");
+        ClearFlags(f, Knob::STARTLINE);
         Bool_knob(f, &_vdbShowPoints, "vdb_show_points", "show points");
         ClearFlags(f, Knob::STARTLINE);
         Double_knob(f, &_vdbPointDensity, "vdb_point_density", "point density"); SetRange(f, 0.1, 1.0);
@@ -670,8 +677,9 @@ int SpectralRenderIop::knob_changed(Knob* k)
         _vdbLoadedPath.clear();
         return 1;
     }
-    if (k->is("vdb_show_points") || k->is("vdb_point_density") || k->is("vdb_point_size") || k->is("vdb_show_bbox")) {
+    if (k->is("vdb_show_points") || k->is("vdb_point_density") || k->is("vdb_point_size") || k->is("vdb_show_bbox") || k->is("vdb_fast_scrub")) {
         _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
+        if (k->is("vdb_fast_scrub")) _vdbLoadedPath.clear(); // force reload with new mode
         return 1;
     }
     if (k->is("discover_grids")) {
@@ -2711,13 +2719,13 @@ void SpectralRenderIop::append(Hash& hash)
 void SpectralRenderIop::build_handles(ViewerContext* ctx)
 {
     if (ctx->transform_mode() == VIEWER_2D) return;
-    // _volume already loaded by _validate — just draw
-    if (_volume && _volume->IsValid()) add_draw_handle(ctx);
+    // _volume loaded by _validate — draw if bbox is valid (even metadata-only)
+    if (_volume && _volume->HasBbox()) add_draw_handle(ctx);
 }
 
 void SpectralRenderIop::draw_handle(ViewerContext* ctx)
 {
-    if (!_volume || !_volume->IsValid()) return;
+    if (!_volume || !_volume->HasBbox()) return;
     glPushAttrib(GL_CURRENT_BIT | GL_LINE_BIT | GL_ENABLE_BIT | GL_POINT_BIT);
     glDisable(GL_LIGHTING);
 
@@ -2738,7 +2746,7 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
         glEnd();
     }
 
-    if (_vdbShowPoints) {
+    if (_vdbShowPoints && !_vdbIsMetadataOnly) {
         if (_vdbPreviewDirty || _vdbPreviewPoints.empty()) {
             _vdbPreviewPoints.clear(); _vdbMaxDensity = 1e-6f;
             pxr::GfVec3f bMin = _volume->bboxMin, bSz = _volume->bboxMax - _volume->bboxMin;
@@ -2785,7 +2793,7 @@ void SpectralRenderIop::_LoadVDB()
     }
     _vdbLastLoadedFrame = curFrame;
 
-    // Path 1: File knob on SpectralRender (fast — no input chain walk)
+    // Path 1: File knob on SpectralRender
 #ifdef SPECTRAL_HAS_VDB
     if (_vdbFile && strlen(_vdbFile) > 0) {
         int frame = int(outputContext().frame()) + _vdbFrameOffset;
@@ -2794,16 +2802,25 @@ void SpectralRenderIop::_LoadVDB()
             : std::string(_vdbFile);
         if (!resolvedPath.empty()) {
             if (!_volume || !_volume->IsValid() || _vdbLoadedPath != resolvedPath) {
-                _volume = pxr::SpectralVDBLoader::Load(resolvedPath.c_str(),
-                    _VdbGridName(_vdbDensityGridIdx, _vdbDensityOverride),
-                    _VdbGridName(_vdbTempGridIdx, _vdbTempOverride));
+                if (_vdbFastScrub) {
+                    // Metadata only — just bbox, ~1ms
+                    _volume = pxr::SpectralVDBLoader::LoadMetadataOnly(resolvedPath.c_str(),
+                        _VdbGridName(_vdbDensityGridIdx, _vdbDensityOverride));
+                    _vdbIsMetadataOnly = true;
+                    _vdbIsPreviewRes = true;
+                } else {
+                    // Full load at viewport res (64³)
+                    _volume = pxr::SpectralVDBLoader::Load(resolvedPath.c_str(),
+                        _VdbGridName(_vdbDensityGridIdx, _vdbDensityOverride),
+                        _VdbGridName(_vdbTempGridIdx, _vdbTempOverride),
+                        64);
+                    _vdbIsMetadataOnly = false;
+                    _vdbIsPreviewRes = true;
+                }
                 if (_volume) {
                     _vdbLoadedPath = resolvedPath;
                     _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
-                    _applyVolumeShading(_volume);
                 }
-            } else {
-                _applyVolumeShading(_volume);
             }
             return;
         }
@@ -2824,6 +2841,33 @@ void SpectralRenderIop::_LoadVDB()
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// _LoadVDBForRender — reload at full 128³ if currently at preview res
+// ---------------------------------------------------------------------------
+void SpectralRenderIop::_LoadVDBForRender()
+{
+#ifdef SPECTRAL_HAS_VDB
+    if ((_vdbIsPreviewRes || _vdbIsMetadataOnly) && _vdbFile && strlen(_vdbFile) > 0) {
+        int frame = int(outputContext().frame()) + _vdbFrameOffset;
+        std::string resolvedPath = _vdbAutoSequence
+            ? _resolveFramePath(frame)
+            : std::string(_vdbFile);
+        if (!resolvedPath.empty()) {
+            _volume = pxr::SpectralVDBLoader::Load(resolvedPath.c_str(),
+                _VdbGridName(_vdbDensityGridIdx, _vdbDensityOverride),
+                _VdbGridName(_vdbTempGridIdx, _vdbTempOverride),
+                128);  // full render resolution
+            _vdbIsPreviewRes = false;
+            _vdbIsMetadataOnly = false;
+            if (_volume) {
+                _vdbLoadedPath = resolvedPath;
+                _applyVolumeShading(_volume);
+            }
+        }
+    }
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -2980,8 +3024,9 @@ void SpectralRenderIop::_EnsureFrameRendered()
     std::lock_guard<std::mutex> lock(_renderMutex);
     if (_frameReady.load()) return;
 
-    // Load volume from SpectralVDBRead (via GeoScene or Vol input)
-    _LoadVDB();
+    // Load volume — upgrade to full 128³ for render if currently at 64³ preview
+    _LoadVDB();          // ensures volume is loaded (may be 64³ preview)
+    _LoadVDBForRender(); // upgrades to 128³ if needed
 
     // Skip if no scene content (no geometry AND no volume)
     bool hasGeometry = _scene && _scene->TotalTriangles() > 0;

@@ -114,6 +114,7 @@ private:
     void _BuildCameraFromInput();
     void _BuildLightRig();
     void _LoadVDB();
+    void _LoadVDBForRender();
     void _applyVolumeShading(std::shared_ptr<pxr::SpectralVolume>& vol);
     void _EnsureFrameRendered();
     std::string _resolveFramePath(int frame) const;
@@ -182,6 +183,7 @@ private:
     // VDB viewport preview
     bool   _vdbShowBbox = true;
     bool   _vdbShowPoints = true;
+    bool   _vdbFastScrub = true;  // metadata-only during scrub for instant timeline
     double _vdbPointDensity = 0.3;
     double _vdbPointSize = 3.0;
 
@@ -191,7 +193,9 @@ private:
     float _vdbMaxDensity = 1.f;
     bool  _vdbPreviewDirty = true;
     std::string _vdbLoadedPath;
-    int         _vdbLastLoadedFrame = -999;  // cached to avoid reload
+    bool   _vdbIsPreviewRes = false;
+    bool   _vdbIsMetadataOnly = false;  // true when only bbox loaded (fast scrub)
+    int    _vdbLastLoadedFrame = -999;  // cached to avoid reload
 
     // VDB viewport preview (kept in first declaration above)
 
