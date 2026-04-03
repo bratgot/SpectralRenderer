@@ -164,6 +164,16 @@ private:
     std::vector<float>  _indirectBuffer; // indirect/bounce lighting (r, g, b)
     std::vector<float>  _emissionBuffer; // emission (r, g, b)
 
+    // LPE decomposition buffers
+    std::vector<float>  _diffuseDirectBuffer;
+    std::vector<float>  _specularDirectBuffer;
+    std::vector<float>  _diffuseIndirectBuffer;
+    std::vector<float>  _specularIndirectBuffer;
+    std::vector<float>  _transmissionBuffer;
+
+    // Cryptomatte
+    std::vector<float>  _cryptoObjectBuffer;  // (hash, coverage) pairs
+
     // Custom channels
     Channel _chanObjectId   = Chan_Black;
     Channel _chanMaterialId = Chan_Black;
@@ -177,6 +187,16 @@ private:
     Channel _chanDirectR = Chan_Black, _chanDirectG = Chan_Black, _chanDirectB = Chan_Black;
     Channel _chanIndirectR = Chan_Black, _chanIndirectG = Chan_Black, _chanIndirectB = Chan_Black;
     Channel _chanEmissionR = Chan_Black, _chanEmissionG = Chan_Black, _chanEmissionB = Chan_Black;
+
+    // LPE channels
+    Channel _chanDiffDirectR = Chan_Black, _chanDiffDirectG = Chan_Black, _chanDiffDirectB = Chan_Black;
+    Channel _chanSpecDirectR = Chan_Black, _chanSpecDirectG = Chan_Black, _chanSpecDirectB = Chan_Black;
+    Channel _chanDiffIndirectR = Chan_Black, _chanDiffIndirectG = Chan_Black, _chanDiffIndirectB = Chan_Black;
+    Channel _chanSpecIndirectR = Chan_Black, _chanSpecIndirectG = Chan_Black, _chanSpecIndirectB = Chan_Black;
+    Channel _chanTransmitR = Chan_Black, _chanTransmitG = Chan_Black, _chanTransmitB = Chan_Black;
+
+    // Cryptomatte
+    Channel _chanCryptoR = Chan_Black, _chanCryptoG = Chan_Black;
     unsigned int        _fbWidth  = 0;
     unsigned int        _fbHeight = 0;
     unsigned int        _fbFullWidth  = 0;

@@ -264,58 +264,42 @@ void SpectralRenderIop::knobs(Knob_Callback f)
 
     BeginClosedGroup(f, "aov_grp", "AOV outputs");
     {
-        Int_knob(f, &_aoSamples, "ao_samples", "AO samples"); SetRange(f, 0, 64);
-        Tooltip(f, "Ambient occlusion samples per pixel.<br>"
-                   "0 = disabled (no AO output channel)<br>"
-                   "8-16 = good quality<br>"
-                   "32+ = clean result<br>"
-                   "Output written to the other.ao channel.");
-        Float_knob(f, &_aoRadius, "ao_radius", "AO radius"); SetRange(f, 0.1f, 100.f);
-        Tooltip(f, "Maximum distance for ambient occlusion rays.<br>"
-                   "Smaller values give tighter contact shadows.<br>"
-                   "Larger values give broader ambient darkening.");
-        Newline(f);
+        Divider(f, "Geometry");
         Bool_knob(f, &_aovNormals, "aov_normals", "N");
-        Tooltip(f, "Output world-space surface normals<br>"
-                   "to the N.red, N.green, N.blue channels.");
         Bool_knob(f, &_aovPosition, "aov_position", "P");
-        Tooltip(f, "Output world-space hit position<br>"
-                   "to the P.red, P.green, P.blue channels.");
         Bool_knob(f, &_aovPRef, "aov_pref", "Pref");
-        Tooltip(f, "Reference position in object/local space.<br>"
-                   "Stays constant across animation and deformation.<br>"
-                   "Used for sticky texture projections and mattes<br>"
-                   "that follow deforming or animated geometry.");
         Bool_knob(f, &_aovUV, "aov_uv", "UV");
-        Tooltip(f, "Output texture coordinates to<br>"
-                   "the uv.red and uv.green channels.");
         Bool_knob(f, &_aovAlbedo, "aov_albedo", "albedo");
-        Tooltip(f, "Output resolved surface base colour<br>"
-                   "(with textures applied) to the albedo layer.");
+        Tooltip(f, "N = world normals, P = world position,<br>"
+                   "Pref = undisplaced object-space position,<br>"
+                   "UV = texture coordinates, albedo = surface colour.");
+
+        Divider(f, "Lighting");
         Bool_knob(f, &_aovDirect, "aov_direct", "direct");
-        Tooltip(f, "Output direct lighting component to<br>"
-                   "the direct layer. On GPU renders this<br>"
-                   "requires an extra CPU pass at low spp.");
         Bool_knob(f, &_aovIndirect, "aov_indirect", "indirect");
-        Tooltip(f, "Output indirect/bounce lighting component<br>"
-                   "to the indirect layer. On GPU renders this<br>"
-                   "requires an extra CPU pass at low spp.");
         Bool_knob(f, &_aovEmission, "aov_emission", "emission");
-        Tooltip(f, "Output emissive surface contribution<br>"
-                   "to the emission layer.");
-        Newline(f);
-        Text_knob(f, "<font color='#888' size='-1'>LPE decomposition (CPU)</font>");
+        Tooltip(f, "Light decomposition for comp relighting.<br>"
+                   "beauty = direct + indirect + emission.");
+
+        Divider(f, "LPE decomposition");
         Bool_knob(f, &_aovDiffuseDirect, "aov_diffuse_direct", "diffuse direct");
-        Tooltip(f, "LPE C&lt;RD&gt;L — diffuse response to direct light.<br>"
-                   "Useful for relighting in comp.");
         Bool_knob(f, &_aovSpecularDirect, "aov_specular_direct", "specular direct");
-        Tooltip(f, "LPE C&lt;RS&gt;L — specular response to direct light.");
+        Newline(f);
         Bool_knob(f, &_aovDiffuseIndirect, "aov_diffuse_indirect", "diffuse indirect");
-        Tooltip(f, "LPE C&lt;RD&gt;+L — diffuse response to indirect light.");
         Bool_knob(f, &_aovSpecularIndirect, "aov_specular_indirect", "specular indirect");
-        Tooltip(f, "LPE C&lt;RS&gt;+L — specular response to indirect light.");
+        Newline(f);
         Bool_knob(f, &_aovTransmission, "aov_transmission", "transmission");
-        Tooltip(f, "LPE C&lt;TS&gt;L — light transmitted through glass.");
+        Tooltip(f, "Light Path Expression decomposition.<br>"
+                   "diffuse direct = C&lt;RD&gt;L<br>"
+                   "specular direct = C&lt;RS&gt;L<br>"
+                   "diffuse indirect = C&lt;RD&gt;+L<br>"
+                   "specular indirect = C&lt;RS&gt;+L<br>"
+                   "transmission = C&lt;TS&gt;L");
+
+        Divider(f, "Utility");
+        Int_knob(f, &_aoSamples, "ao_samples", "AO samples"); SetRange(f, 0, 64);
+        Float_knob(f, &_aoRadius, "ao_radius", "AO radius"); SetRange(f, 0.1f, 100.f);
+        Tooltip(f, "Ambient occlusion. 0 samples = disabled.");
     }
     EndGroup(f);
 
@@ -522,6 +506,30 @@ void SpectralRenderIop::_validate(bool forReal)
         _chanEmissionR = getChannel("emission.red"); _chanEmissionG = getChannel("emission.green"); _chanEmissionB = getChannel("emission.blue");
         channels += _chanEmissionR; channels += _chanEmissionG; channels += _chanEmissionB;
     }
+    if (_aovDiffuseDirect) {
+        _chanDiffDirectR = getChannel("diffuse_direct.red"); _chanDiffDirectG = getChannel("diffuse_direct.green"); _chanDiffDirectB = getChannel("diffuse_direct.blue");
+        channels += _chanDiffDirectR; channels += _chanDiffDirectG; channels += _chanDiffDirectB;
+    }
+    if (_aovSpecularDirect) {
+        _chanSpecDirectR = getChannel("specular_direct.red"); _chanSpecDirectG = getChannel("specular_direct.green"); _chanSpecDirectB = getChannel("specular_direct.blue");
+        channels += _chanSpecDirectR; channels += _chanSpecDirectG; channels += _chanSpecDirectB;
+    }
+    if (_aovDiffuseIndirect) {
+        _chanDiffIndirectR = getChannel("diffuse_indirect.red"); _chanDiffIndirectG = getChannel("diffuse_indirect.green"); _chanDiffIndirectB = getChannel("diffuse_indirect.blue");
+        channels += _chanDiffIndirectR; channels += _chanDiffIndirectG; channels += _chanDiffIndirectB;
+    }
+    if (_aovSpecularIndirect) {
+        _chanSpecIndirectR = getChannel("specular_indirect.red"); _chanSpecIndirectG = getChannel("specular_indirect.green"); _chanSpecIndirectB = getChannel("specular_indirect.blue");
+        channels += _chanSpecIndirectR; channels += _chanSpecIndirectG; channels += _chanSpecIndirectB;
+    }
+    if (_aovTransmission) {
+        _chanTransmitR = getChannel("transmission.red"); _chanTransmitG = getChannel("transmission.green"); _chanTransmitB = getChannel("transmission.blue");
+        channels += _chanTransmitR; channels += _chanTransmitG; channels += _chanTransmitB;
+    }
+    // Cryptomatte: hash + coverage in crypto_object layer
+    _chanCryptoR = getChannel("crypto_object.red"); _chanCryptoG = getChannel("crypto_object.green");
+    channels += _chanCryptoR; channels += _chanCryptoG;
+
     info_.channels(channels);
     info_.black_outside(true);
 
@@ -683,6 +691,33 @@ void SpectralRenderIop::engine(
     write3Channel(_chanDirectR, _chanDirectG, _chanDirectB, _directBuffer, 3);
     write3Channel(_chanIndirectR, _chanIndirectG, _chanIndirectB, _indirectBuffer, 3);
     write3Channel(_chanEmissionR, _chanEmissionG, _chanEmissionB, _emissionBuffer, 3);
+    write3Channel(_chanDiffDirectR, _chanDiffDirectG, _chanDiffDirectB, _diffuseDirectBuffer, 3);
+    write3Channel(_chanSpecDirectR, _chanSpecDirectG, _chanSpecDirectB, _specularDirectBuffer, 3);
+    write3Channel(_chanDiffIndirectR, _chanDiffIndirectG, _chanDiffIndirectB, _diffuseIndirectBuffer, 3);
+    write3Channel(_chanSpecIndirectR, _chanSpecIndirectG, _chanSpecIndirectB, _specularIndirectBuffer, 3);
+    write3Channel(_chanTransmitR, _chanTransmitG, _chanTransmitB, _transmissionBuffer, 3);
+
+    // Cryptomatte: hash (R) + coverage (G)
+    if (!_cryptoObjectBuffer.empty()) {
+        if (channels & _chanCryptoR) {
+            float* out = row.writable(_chanCryptoR);
+            for (int px = x; px < r; ++px) {
+                int proxyX = isProxy ? (px * W / fullW) : px;
+                if (proxyX >= 0 && proxyX < W && bufY >= 0 && bufY < H)
+                    out[px] = _cryptoObjectBuffer[static_cast<size_t>(bufY) * W * 2 + proxyX * 2];
+                else out[px] = 0.f;
+            }
+        }
+        if (channels & _chanCryptoG) {
+            float* out = row.writable(_chanCryptoG);
+            for (int px = x; px < r; ++px) {
+                int proxyX = isProxy ? (px * W / fullW) : px;
+                if (proxyX >= 0 && proxyX < W && bufY >= 0 && bufY < H)
+                    out[px] = _cryptoObjectBuffer[static_cast<size_t>(bufY) * W * 2 + proxyX * 2 + 1];
+                else out[px] = 0.f;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2080,6 +2115,12 @@ void SpectralRenderIop::_EnsureFrameRendered()
     if (_aovDirect)   _directBuffer.assign(size_t(W) * H * 3, 0.f); else _directBuffer.clear();
     if (_aovIndirect) _indirectBuffer.assign(size_t(W) * H * 3, 0.f); else _indirectBuffer.clear();
     if (_aovEmission) _emissionBuffer.assign(size_t(W) * H * 3, 0.f); else _emissionBuffer.clear();
+    if (_aovDiffuseDirect)   _diffuseDirectBuffer.assign(size_t(W) * H * 3, 0.f);   else _diffuseDirectBuffer.clear();
+    if (_aovSpecularDirect)  _specularDirectBuffer.assign(size_t(W) * H * 3, 0.f);  else _specularDirectBuffer.clear();
+    if (_aovDiffuseIndirect) _diffuseIndirectBuffer.assign(size_t(W) * H * 3, 0.f); else _diffuseIndirectBuffer.clear();
+    if (_aovSpecularIndirect) _specularIndirectBuffer.assign(size_t(W) * H * 3, 0.f); else _specularIndirectBuffer.clear();
+    if (_aovTransmission)    _transmissionBuffer.assign(size_t(W) * H * 3, 0.f);    else _transmissionBuffer.clear();
+    _cryptoObjectBuffer.assign(size_t(W) * H * 2, 0.f);  // hash + coverage
 
     SpectralCamera cam = _camera;
     cam.imageWidth  = W;
@@ -2208,6 +2249,24 @@ void SpectralRenderIop::_EnsureFrameRendered()
     }
 
     _progressiveSppDone = renderSpp;
+
+    // Generate Cryptomatte from objectId buffer
+    // Hash = objectId cast to float, coverage = 1.0 (primary visibility)
+    if (!_cryptoObjectBuffer.empty() && !_objectIdBuffer.empty()) {
+        for (size_t i = 0; i < size_t(W) * H; ++i) {
+            float objId = _objectIdBuffer[i];
+            // MurmurHash3-style bit mixing for stable float ID
+            uint32_t h = static_cast<uint32_t>(objId);
+            h ^= h >> 16; h *= 0x85ebca6b;
+            h ^= h >> 13; h *= 0xc2b2ae35;
+            h ^= h >> 16;
+            // Store as float (Cryptomatte convention)
+            float hashF;
+            memcpy(&hashF, &h, sizeof(float));
+            _cryptoObjectBuffer[i * 2 + 0] = hashF;
+            _cryptoObjectBuffer[i * 2 + 1] = (objId > 0.f) ? 1.f : 0.f;
+        }
+    }
 
     // If this was a preview pass, schedule refinement
     if (_progressive && _progressiveSppDone < _samples) {
