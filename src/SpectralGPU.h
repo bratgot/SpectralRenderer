@@ -114,6 +114,7 @@ private:
     CUdeviceptr            _d_params       = 0;
     CUdeviceptr            _d_volumeDensity = 0;
     CUdeviceptr            _d_volumeTemp    = 0;
+    size_t                 _volCachedSize   = 0;
 
     // Current allocation sizes
     unsigned int           _allocW = 0;

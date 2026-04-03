@@ -24,7 +24,7 @@ if(EXISTS "${OPTIX_ROOT}/include/optix.h" AND EXISTS "${CUDA_TOOLKIT_ROOT}/bin/n
 
     add_custom_command(OUTPUT "${PTX_OUTPUT}"
         COMMAND "${CUDA_TOOLKIT_ROOT}/bin/nvcc.exe"
-            -ptx -O3 --use_fast_math
+            -ptx -O3 --use_fast_math --ftz=true --prec-div=false --prec-sqrt=false
             -I "${OPTIX_ROOT}/include"
             -I "${CUDA_TOOLKIT_ROOT}/include"
             -I "${CMAKE_CURRENT_SOURCE_DIR}/src"

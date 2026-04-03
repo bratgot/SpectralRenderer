@@ -1,6 +1,6 @@
 ^C:\DEV\SPECTRALRENDERER\HDSPECTRAL_PHASE1\HDSPECTRAL\BUILD\CMAKEFILES\F0674633EA0A78D0AC6B5A15F13FCDA3\SPECTRALGPUKERNEL.PTX.RULE
 setlocal
-"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" -ptx -O3 --use_fast_math -I "C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.1.0/include" -I "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/include" -I C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/src -o C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build/SpectralGPUKernel.ptx C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/src/SpectralGPUKernel.cu
+"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" -ptx -O3 --use_fast_math --ftz=true --prec-div=false --prec-sqrt=false -I "C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.1.0/include" -I "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/include" -I C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/src -o C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build/SpectralGPUKernel.ptx C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/src/SpectralGPUKernel.cu
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone

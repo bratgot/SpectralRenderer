@@ -8,6 +8,8 @@
 
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <cstdlib>
+#include <cstdio>
 
 #include <cstdio>
 #include <cstring>
@@ -132,6 +134,18 @@ bool SpectralGPU::Initialize(const std::string& ptxSource)
     ctxOptions.logCallbackFunction = _OptixLogCallback;
     ctxOptions.logCallbackLevel    = 3;  // warnings + errors
     OPTIX_CHECK(optixDeviceContextCreate(cuCtx, &ctxOptions, &_optixContext));
+
+    // Enable disk cache — avoids recompiling PTX on subsequent launches
+    optixDeviceContextSetCacheEnabled(_optixContext, 1);
+    // Cache in user's temp dir
+    const char* tmpDir = getenv("TEMP");
+    if (!tmpDir) tmpDir = getenv("TMP");
+    if (tmpDir) {
+        std::string cachePath = std::string(tmpDir) + "\\SpectralRenderer_optix_cache";
+        optixDeviceContextSetCacheLocation(_optixContext, cachePath.c_str());
+        optixDeviceContextSetCacheDatabaseSizes(_optixContext, 256 * 1024 * 1024, 512 * 1024 * 1024);
+        fprintf(stderr, "SpectralGPU: OptiX disk cache at %s\n", cachePath.c_str());
+    }
 
     fprintf(stderr, "SpectralGPU: OptiX context created\n");
 
@@ -590,9 +604,13 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
         launchParams.volJitter = volume->jitter ? 1 : 0;
 
         size_t densBytes = volume->density.size() * sizeof(float);
-        if (_d_volumeDensity) cudaFree(reinterpret_cast<void*>(_d_volumeDensity));
-        _d_volumeDensity = 0;
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_volumeDensity), densBytes));
+        // Only re-upload if size changed (volume data is cached on GPU)
+        if (densBytes != _volCachedSize) {
+            if (_d_volumeDensity) cudaFree(reinterpret_cast<void*>(_d_volumeDensity));
+            _d_volumeDensity = 0;
+            CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_volumeDensity), densBytes));
+            _volCachedSize = densBytes;
+        }
         CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_volumeDensity), volume->density.data(),
                               densBytes, cudaMemcpyHostToDevice));
         launchParams.volumeDensity = reinterpret_cast<float*>(_d_volumeDensity);

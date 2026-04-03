@@ -121,6 +121,7 @@ void SpectralIntegrator::RenderFrame(
         std::vector<float> accLumSum(numPixels, 0.f);   // for variance
         std::vector<float> accLumSqSum(numPixels, 0.f); // for variance
         std::vector<int>   accCount(numPixels, 0);
+        std::vector<float> accAlpha(numPixels, 0.f);
         std::vector<bool>  converged(numPixels, false);
         std::vector<float> depthBuf(numPixels, 1e30f);
         std::vector<int>   objIdBuf(numPixels, 0);
@@ -281,6 +282,7 @@ void SpectralIntegrator::RenderFrame(
                             }
 
                             // Volume ray marching (Beer-Lambert + HG phase)
+                            float finalVolTrans = 1.f;  // 1.0 = fully transparent (no volume)
                             if (volume && volume->IsValid()) {
                                 // Ray-AABB intersection
                                 GfVec3f ro(ray.GetStartPoint());
@@ -393,7 +395,15 @@ void SpectralIntegrator::RenderFrame(
 
                                     // Composite: volume over surface
                                     radiance = volRadiance + volTransmittance * radiance;
+                                    finalVolTrans = volTransmittance;
                                 }
+                            }
+
+                            // Per-sample alpha
+                            {
+                                float sampleAlpha = hit.valid() ? 1.f : 0.f;
+                                sampleAlpha = 1.f - finalVolTrans * (1.f - sampleAlpha);
+                                accAlpha[pixIdx] += sampleAlpha;
                             }
 
                             // Firefly clamp: limit extreme spectral outliers
@@ -485,7 +495,7 @@ void SpectralIntegrator::RenderFrame(
             px[0] = std::max(0.f, rgb[0]);
             px[1] = std::max(0.f, rgb[1]);
             px[2] = std::max(0.f, rgb[2]);
-            px[3] = 1.0f;
+            px[3] = (n > 0) ? std::min(1.f, accAlpha[i] / float(n)) : 0.f;
 
             if (depthOut) depthOut[i] = depthBuf[i];
             if (objectIdOut) objectIdOut[i] = static_cast<float>(objIdBuf[i]);
