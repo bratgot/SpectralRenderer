@@ -121,14 +121,45 @@ public:
     }
 
     // ------------------------------------------------------------------
-    // XYZ → linear sRGB (D65 white point, Rec.709 primaries)
+    // XYZ → linear RGB conversion matrices
     // ------------------------------------------------------------------
+    enum class ColorSpace { sRGB = 0, ACEScg = 1, ACES2065 = 2 };
+
+    // XYZ → linear sRGB (D65 white point, Rec.709 primaries)
     static GfVec3f XYZtoLinearRGB(float X, float Y, float Z)
     {
         float r =  3.2406f * X - 1.5372f * Y - 0.4986f * Z;
         float g = -0.9689f * X + 1.8758f * Y + 0.0415f * Z;
         float b =  0.0557f * X - 0.2040f * Y + 1.0570f * Z;
         return GfVec3f(r, g, b);
+    }
+
+    // XYZ → ACEScg (AP1 primaries, D60 adapted)
+    static GfVec3f XYZtoACEScg(float X, float Y, float Z)
+    {
+        float r =  1.6410f * X - 0.3249f * Y - 0.2364f * Z;
+        float g = -0.6636f * X + 1.6153f * Y + 0.0168f * Z;
+        float b =  0.0117f * X - 0.0083f * Y + 0.9884f * Z;
+        return GfVec3f(r, g, b);
+    }
+
+    // XYZ → ACES 2065-1 (AP0 primaries, D60)
+    static GfVec3f XYZtoACES2065(float X, float Y, float Z)
+    {
+        float r =  1.0498f * X + 0.0000f * Y - 0.0001f * Z;
+        float g = -0.4959f * X + 1.3735f * Y + 0.0982f * Z;
+        float b =  0.0000f * X + 0.0000f * Y + 0.9913f * Z;
+        return GfVec3f(r, g, b);
+    }
+
+    // Convert using specified color space
+    static GfVec3f XYZtoRGB(float X, float Y, float Z, ColorSpace cs)
+    {
+        switch (cs) {
+            case ColorSpace::ACEScg:  return XYZtoACEScg(X, Y, Z);
+            case ColorSpace::ACES2065: return XYZtoACES2065(X, Y, Z);
+            default:                   return XYZtoLinearRGB(X, Y, Z);
+        }
     }
 
     // ------------------------------------------------------------------

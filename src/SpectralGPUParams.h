@@ -84,6 +84,7 @@ struct LaunchParams {
 
     int                spp;
     int                maxBounces;
+    int                colorSpace;   // 0=sRGB, 1=ACEScg, 2=ACES2065
 
     float3*            normals;
     int*               materialIds;

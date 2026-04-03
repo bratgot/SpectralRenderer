@@ -122,7 +122,8 @@ public:
         const AOVBuffers* aovs = nullptr,
         float* aoOut = nullptr,
         const SpectralPhotonMap* photonMap = nullptr,
-        float gatherRadius = 0.5f);
+        float gatherRadius = 0.5f,
+        int colorSpace = 0);
 
 #ifdef SPECTRAL_HAS_OPTIX
     /// GPU render path using OptiX.
@@ -132,7 +133,8 @@ public:
         float* pixels,
         int spp = 1,
         float* depthOut = nullptr,
-        int maxBounces = 4);
+        int maxBounces = 4,
+        int colorSpace = 0);
 
     static bool IsGPUAvailable();
     static void DenoiseGPU(unsigned int width, unsigned int height, float* pixels);

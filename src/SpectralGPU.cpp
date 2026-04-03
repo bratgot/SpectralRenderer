@@ -501,7 +501,8 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
 // ---------------------------------------------------------------------------
 bool SpectralGPU::Render(const SpectralCamera& camera,
                           unsigned int width, unsigned int height,
-                          float* pixels, float* depth, int spp, int maxBounces)
+                          float* pixels, float* depth, int spp, int maxBounces,
+                          int colorSpace)
 {
     if (!_pipeline || !_gasHandle) return false;
     if (width == 0 || height == 0) return false;
@@ -539,6 +540,7 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     launchParams.height      = height;
     launchParams.traversable = _gasHandle;
     launchParams.spp         = spp;
+    launchParams.colorSpace  = colorSpace;
     launchParams.normals     = reinterpret_cast<float3*>(_d_normals);
     launchParams.materialIds = reinterpret_cast<int*>(_d_materialIds);
     launchParams.triCount    = _triCount;

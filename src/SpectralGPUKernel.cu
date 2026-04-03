@@ -812,9 +812,23 @@ extern "C" __global__ void __raygen__spectral()
         }
 
         float inv=1.f/float(spp); X*=inv; Y*=inv; Z*=inv;
-        float r= 3.2406f*X-1.5372f*Y-0.4986f*Z;
-        float g=-0.9689f*X+1.8758f*Y+0.0415f*Z;
-        float b= 0.0557f*X-0.2040f*Y+1.0570f*Z;
+        float r, g, b;
+        if (params.colorSpace == 1) {
+            // ACEScg (AP1, D60)
+            r= 1.6410f*X-0.3249f*Y-0.2364f*Z;
+            g=-0.6636f*X+1.6153f*Y+0.0168f*Z;
+            b= 0.0117f*X-0.0083f*Y+0.9884f*Z;
+        } else if (params.colorSpace == 2) {
+            // ACES 2065-1 (AP0, D60)
+            r= 1.0498f*X+0.0000f*Y-0.0001f*Z;
+            g=-0.4959f*X+1.3735f*Y+0.0982f*Z;
+            b= 0.0000f*X+0.0000f*Y+0.9913f*Z;
+        } else {
+            // sRGB (Rec.709, D65)
+            r= 3.2406f*X-1.5372f*Y-0.4986f*Z;
+            g=-0.9689f*X+1.8758f*Y+0.0415f*Z;
+            b= 0.0557f*X-0.2040f*Y+1.0570f*Z;
+        }
         params.framebuffer[pixIdx] = make_float4(fmaxf(0.f,r),fmaxf(0.f,g),fmaxf(0.f,b),1.f);
         if (params.depthbuffer) params.depthbuffer[pixIdx] = minDepth;
     }

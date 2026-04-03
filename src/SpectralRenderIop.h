@@ -102,6 +102,14 @@ private:
     int   _maxBounces = 4;
     int   _tileSize   = 64;
     int   _deviceMode = 0;         // 0=cpu, 1=gpu, 2=auto
+    int   _colorSpace = 0;         // 0=sRGB, 1=ACEScg, 2=ACES 2065-1
+
+    // LPE-style AOV decomposition
+    bool  _aovDiffuseDirect  = false;
+    bool  _aovSpecularDirect = false;
+    bool  _aovDiffuseIndirect = false;
+    bool  _aovSpecularIndirect = false;
+    bool  _aovTransmission   = false;
     float _adaptiveThreshold = 0.05f; // adaptive sampling threshold
     bool  _progressive = true;          // progressive refinement mode
     bool  _blueNoise = true;            // R2 quasi-random sampling

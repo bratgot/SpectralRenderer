@@ -165,6 +165,13 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                    "cpu = Embree 4 CPU ray tracing<br>"
                    "gpu = OptiX 8.1 RTX GPU ray tracing<br>"
                    "auto = GPU if available, otherwise CPU");
+        static const char* const csNames[] = { "sRGB", "ACEScg", "ACES 2065-1", nullptr };
+        Enumeration_knob(f, &_colorSpace, csNames, "color_space", "color space");
+        Tooltip(f, "Output color space for spectral-to-RGB conversion.<br>"
+                   "sRGB = standard (Rec.709 primaries, D65)<br>"
+                   "ACEScg = ACES working space (AP1, D60)<br>"
+                   "ACES 2065-1 = ACES interchange (AP0, D60)<br>"
+                   "ACEScg recommended for compositing pipelines.");
         static const char* const proxyNames[] = { "1/4", "1/2", "3/4", "full", nullptr };
         Enumeration_knob(f, &_proxyMode, proxyNames, "proxy", "proxy");
         Tooltip(f, "Render resolution proxy.<br>"
@@ -295,8 +302,20 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                    "requires an extra CPU pass at low spp.");
         Bool_knob(f, &_aovEmission, "aov_emission", "emission");
         Tooltip(f, "Output emissive surface contribution<br>"
-                   "to the emission layer. On GPU renders this<br>"
-                   "requires an extra CPU pass at low spp.");
+                   "to the emission layer.");
+        Newline(f);
+        Text_knob(f, "<font color='#888' size='-1'>LPE decomposition (CPU)</font>");
+        Bool_knob(f, &_aovDiffuseDirect, "aov_diffuse_direct", "diffuse direct");
+        Tooltip(f, "LPE C&lt;RD&gt;L — diffuse response to direct light.<br>"
+                   "Useful for relighting in comp.");
+        Bool_knob(f, &_aovSpecularDirect, "aov_specular_direct", "specular direct");
+        Tooltip(f, "LPE C&lt;RS&gt;L — specular response to direct light.");
+        Bool_knob(f, &_aovDiffuseIndirect, "aov_diffuse_indirect", "diffuse indirect");
+        Tooltip(f, "LPE C&lt;RD&gt;+L — diffuse response to indirect light.");
+        Bool_knob(f, &_aovSpecularIndirect, "aov_specular_indirect", "specular indirect");
+        Tooltip(f, "LPE C&lt;RS&gt;+L — specular response to indirect light.");
+        Bool_knob(f, &_aovTransmission, "aov_transmission", "transmission");
+        Tooltip(f, "LPE C&lt;TS&gt;L — light transmitted through glass.");
     }
     EndGroup(f);
 
@@ -408,8 +427,10 @@ int SpectralRenderIop::knob_changed(Knob* k)
         char buf[128];
         static const char* const proxyLabels[] = { "1/4", "1/2", "3/4", "full" };
         const char* proxyStr = (_proxyMode >= 0 && _proxyMode <= 3) ? proxyLabels[_proxyMode] : "full";
-        snprintf(buf, sizeof(buf), "%s\n%d spp\n%d bounces\n%s",
-                 device, _samples, _maxBounces, proxyStr);
+        static const char* const csLabels[] = { "sRGB", "ACEScg", "ACES" };
+        const char* csStr = (_colorSpace >= 0 && _colorSpace <= 2) ? csLabels[_colorSpace] : "sRGB";
+        snprintf(buf, sizeof(buf), "%s\n%d spp\n%d bounces\n%s\n%s",
+                 device, _samples, _maxBounces, proxyStr, csStr);
         lk->set_text(buf);
     }
 
@@ -2113,7 +2134,8 @@ void SpectralRenderIop::_EnsureFrameRendered()
 #ifdef SPECTRAL_HAS_OPTIX
     if (useGPU) {
         SpectralIntegrator::RenderFrameGPU(*_scene, cam, _frameBuffer.data(),
-                                            renderSpp, _depthBuffer.data(), _maxBounces);
+                                            renderSpp, _depthBuffer.data(), _maxBounces,
+                                            _colorSpace);
         // Note: GPU caustics use CPU gathering pass below
     } else
 #endif
@@ -2131,7 +2153,8 @@ void SpectralRenderIop::_EnsureFrameRendered()
         SpectralIntegrator::RenderFrame(*_scene, cam, _frameBuffer.data(),
                                          renderSpp, _depthBuffer.data(), _maxBounces,
                                          _objectIdBuffer.data(), _materialIdBuffer.data(),
-                                         &aovBufs, nullptr, pmap, _causticRadius);
+                                         &aovBufs, nullptr, pmap, _causticRadius,
+                                         _colorSpace);
     }
 
     // Denoise — works for both GPU and CPU renders
@@ -2171,7 +2194,7 @@ void SpectralRenderIop::_EnsureFrameRendered()
             SpectralIntegrator::RenderFrame(*_scene, cam, dummyPixels.data(),
                                              aovSpp, nullptr, _maxBounces,
                                              nullptr, nullptr, &aovBufs, nullptr,
-                                             pmap, _causticRadius);
+                                             pmap, _causticRadius, _colorSpace);
 
             fprintf(stderr, "SpectralRender: shading AOVs computed (%d spp CPU pass)\n", aovSpp);
         }

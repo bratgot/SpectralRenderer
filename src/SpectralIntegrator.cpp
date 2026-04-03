@@ -35,7 +35,8 @@ void SpectralIntegrator::RenderFrame(
     const AOVBuffers*     aovs,
     float*                aoOut,
     const SpectralPhotonMap* photonMap,
-    float                 gatherRadius)
+    float                 gatherRadius,
+    int                   colorSpace)
 {
 #ifdef SPECTRAL_HAS_EMBREE
     SpectralBVH bvh;
@@ -321,8 +322,9 @@ void SpectralIntegrator::RenderFrame(
             int n = accCount[i];
             if (n == 0) n = 1;
             float invN = 1.f / float(n);
-            GfVec3f rgb = SpectralSpectrum::XYZtoLinearRGB(
-                accX[i] * invN, accY[i] * invN, accZ[i] * invN);
+            GfVec3f rgb = SpectralSpectrum::XYZtoRGB(
+                accX[i] * invN, accY[i] * invN, accZ[i] * invN,
+                static_cast<SpectralSpectrum::ColorSpace>(colorSpace));
             float* px = pixels + i * 4;
             px[0] = std::max(0.f, rgb[0]);
             px[1] = std::max(0.f, rgb[1]);
@@ -335,15 +337,15 @@ void SpectralIntegrator::RenderFrame(
 
             // Write shading component AOVs
             if (trackDirect) {
-                GfVec3f c = SpectralSpectrum::XYZtoLinearRGB(accDirectX[i]*invN, accDirectY[i]*invN, accDirectZ[i]*invN);
+                GfVec3f c = SpectralSpectrum::XYZtoRGB(accDirectX[i]*invN, accDirectY[i]*invN, accDirectZ[i]*invN, static_cast<SpectralSpectrum::ColorSpace>(colorSpace));
                 aovs->direct[i*3+0] = std::max(0.f,c[0]); aovs->direct[i*3+1] = std::max(0.f,c[1]); aovs->direct[i*3+2] = std::max(0.f,c[2]);
             }
             if (trackIndirect) {
-                GfVec3f c = SpectralSpectrum::XYZtoLinearRGB(accIndirectX[i]*invN, accIndirectY[i]*invN, accIndirectZ[i]*invN);
+                GfVec3f c = SpectralSpectrum::XYZtoRGB(accIndirectX[i]*invN, accIndirectY[i]*invN, accIndirectZ[i]*invN, static_cast<SpectralSpectrum::ColorSpace>(colorSpace));
                 aovs->indirect[i*3+0] = std::max(0.f,c[0]); aovs->indirect[i*3+1] = std::max(0.f,c[1]); aovs->indirect[i*3+2] = std::max(0.f,c[2]);
             }
             if (trackEmission) {
-                GfVec3f c = SpectralSpectrum::XYZtoLinearRGB(accEmissionX[i]*invN, accEmissionY[i]*invN, accEmissionZ[i]*invN);
+                GfVec3f c = SpectralSpectrum::XYZtoRGB(accEmissionX[i]*invN, accEmissionY[i]*invN, accEmissionZ[i]*invN, static_cast<SpectralSpectrum::ColorSpace>(colorSpace));
                 aovs->emission[i*3+0] = std::max(0.f,c[0]); aovs->emission[i*3+1] = std::max(0.f,c[1]); aovs->emission[i*3+2] = std::max(0.f,c[2]);
             }
         }
@@ -1624,7 +1626,8 @@ void SpectralIntegrator::RenderFrameGPU(
     float*                pixels,
     int                   spp,
     float*                depthOut,
-    int                   maxBounces)
+    int                   maxBounces,
+    int                   colorSpace)
 {
     SpectralGPU* gpu = _GetGPU();
     if (!gpu) {
@@ -1640,7 +1643,7 @@ void SpectralIntegrator::RenderFrameGPU(
     }
 
     if (!gpu->Render(camera, camera.imageWidth, camera.imageHeight,
-                     pixels, depthOut, spp, maxBounces)) {
+                     pixels, depthOut, spp, maxBounces, colorSpace)) {
         fprintf(stderr, "SpectralIntegrator: GPU render failed, using CPU\n");
         RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces);
         return;
