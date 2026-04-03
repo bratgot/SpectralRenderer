@@ -1699,6 +1699,53 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                 subIn.scheme            = scheme;
                 subIn.level             = 2;
 
+                // Read crease edges from USD
+                {
+                    VtIntArray creaseIndices, creaseLengths;
+                    VtFloatArray creaseSharpnesses;
+                    mesh.GetCreaseIndicesAttr().Get(&creaseIndices, timeOpen);
+                    mesh.GetCreaseLengthsAttr().Get(&creaseLengths, timeOpen);
+                    mesh.GetCreaseSharpnessesAttr().Get(&creaseSharpnesses, timeOpen);
+
+                    if (!creaseLengths.empty() && !creaseSharpnesses.empty()) {
+                        // Expand crease chains into edge pairs for OpenSubdiv
+                        VtIntArray edgePairs;
+                        VtFloatArray edgeSharpnesses;
+                        size_t idx = 0;
+                        for (size_t c = 0; c < creaseLengths.size(); ++c) {
+                            int len = creaseLengths[c];
+                            float sharpness = (c < creaseSharpnesses.size())
+                                ? creaseSharpnesses[c] : creaseSharpnesses.back();
+                            for (int e = 0; e < len - 1 && idx + 1 < creaseIndices.size(); ++e) {
+                                edgePairs.push_back(creaseIndices[idx]);
+                                edgePairs.push_back(creaseIndices[idx + 1]);
+                                edgeSharpnesses.push_back(sharpness);
+                                ++idx;
+                            }
+                            if (len > 0) ++idx;  // advance past chain end
+                        }
+                        subIn.creaseIndices = edgePairs;
+                        subIn.creaseSharpnesses = edgeSharpnesses;
+
+                        if (!edgePairs.empty())
+                            fprintf(stderr, "SpectralRender: %zu crease edges (sharpness %.1f-%.1f)\n",
+                                    edgeSharpnesses.size(),
+                                    *std::min_element(edgeSharpnesses.begin(), edgeSharpnesses.end()),
+                                    *std::max_element(edgeSharpnesses.begin(), edgeSharpnesses.end()));
+                    }
+
+                    // Read corner vertices
+                    VtIntArray cornerIndices;
+                    VtFloatArray cornerSharpnesses;
+                    mesh.GetCornerIndicesAttr().Get(&cornerIndices, timeOpen);
+                    mesh.GetCornerSharpnessesAttr().Get(&cornerSharpnesses, timeOpen);
+                    if (!cornerIndices.empty() && !cornerSharpnesses.empty()) {
+                        subIn.cornerIndices = cornerIndices;
+                        subIn.cornerSharpnesses = cornerSharpnesses;
+                        fprintf(stderr, "SpectralRender: %zu corner vertices\n", cornerIndices.size());
+                    }
+                }
+
                 if (normalsInterp == UsdGeomTokens->vertex &&
                     static_cast<int>(normals.size()) == static_cast<int>(points.size())) {
                     subIn.normals = normals;

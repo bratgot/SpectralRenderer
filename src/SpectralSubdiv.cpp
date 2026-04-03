@@ -125,6 +125,20 @@ bool SpectralSubdiv::Refine(const Input& input, Output& output)
         desc.fvarChannels    = &uvChannel;
     }
 
+    // Crease edges
+    if (!input.creaseIndices.empty() && !input.creaseSharpnesses.empty()) {
+        desc.numCreases = static_cast<int>(input.creaseSharpnesses.size());
+        desc.creaseVertexIndexPairs = input.creaseIndices.cdata();
+        desc.creaseWeights = input.creaseSharpnesses.cdata();
+    }
+
+    // Corner vertices
+    if (!input.cornerIndices.empty() && !input.cornerSharpnesses.empty()) {
+        desc.numCorners = static_cast<int>(input.cornerIndices.size());
+        desc.cornerVertexIndices = input.cornerIndices.cdata();
+        desc.cornerWeights = input.cornerSharpnesses.cdata();
+    }
+
     // ------------------------------------------------------------------
     // Create topology refiner
     // ------------------------------------------------------------------

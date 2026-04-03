@@ -103,7 +103,7 @@ void SpectralSurfaceOp::knobs(Knob_Callback f)
     );
     Divider(f);
 
-    Enumeration_knob(f, &_spectralPreset, kSpectralPresetNames, "preset", "preset");
+    Enumeration_knob(f, &_spectralPreset, kSpectralPresetNames, "preset", "Preset");
     Tooltip(f, "Material presets — physically accurate starting points.\n\n"
                "DIELECTRICS: transparent/refractive (set opacity low)\n"
                "  glass, diamond, water, ruby\n\n"

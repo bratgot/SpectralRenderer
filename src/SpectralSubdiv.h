@@ -57,6 +57,14 @@ public:
         VtVec2fArray        uvs;
         VtIntArray          uvIndices;    // face-varying UV indices (if empty, use faceVertexIndices)
         bool                uvIsFaceVarying = true;
+
+        // Optional: crease edges (pairs of vertex indices + sharpness)
+        VtIntArray          creaseIndices;      // pairs: [v0,v1, v2,v3, ...]
+        VtFloatArray        creaseSharpnesses;  // one per crease edge
+
+        // Optional: corner vertices (single vertex index + sharpness)
+        VtIntArray          cornerIndices;
+        VtFloatArray        cornerSharpnesses;
     };
 
     struct Output {
