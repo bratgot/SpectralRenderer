@@ -19,6 +19,7 @@
 #include "SpectralScene.h"
 #include "SpectralSpectrum.h"
 #include "SpectralBSDF.h"
+#include "SpectralVolume.h"
 
 #ifdef SPECTRAL_HAS_EMBREE
 #include "SpectralBVH.h"
@@ -130,7 +131,8 @@ public:
         float* aoOut = nullptr,
         const SpectralPhotonMap* photonMap = nullptr,
         float gatherRadius = 0.5f,
-        int colorSpace = 0);
+        int colorSpace = 0,
+        const SpectralVolume* volume = nullptr);
 
 #ifdef SPECTRAL_HAS_OPTIX
     /// GPU render path using OptiX.
@@ -141,7 +143,8 @@ public:
         int spp = 1,
         float* depthOut = nullptr,
         int maxBounces = 4,
-        int colorSpace = 0);
+        int colorSpace = 0,
+        const SpectralVolume* volume = nullptr);
 
     static bool IsGPUAvailable();
     static void DenoiseGPU(unsigned int width, unsigned int height, float* pixels);

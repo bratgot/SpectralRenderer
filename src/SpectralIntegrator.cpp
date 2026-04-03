@@ -36,11 +36,21 @@ void SpectralIntegrator::RenderFrame(
     float*                aoOut,
     const SpectralPhotonMap* photonMap,
     float                 gatherRadius,
-    int                   colorSpace)
+    int                   colorSpace,
+    const SpectralVolume* volume)
 {
 #ifdef SPECTRAL_HAS_EMBREE
     SpectralBVH bvh;
     bvh.Build(scene);
+
+    // Volume debug
+    if (volume && volume->IsValid())
+        fprintf(stderr, "SpectralRender: volume active — %dx%dx%d, ext=%.1f, bbox (%.2f,%.2f,%.2f)→(%.2f,%.2f,%.2f)\n",
+                volume->resX, volume->resY, volume->resZ, volume->extinction,
+                volume->bboxMin[0], volume->bboxMin[1], volume->bboxMin[2],
+                volume->bboxMax[0], volume->bboxMax[1], volume->bboxMax[2]);
+    else
+        fprintf(stderr, "SpectralRender: no volume\n");
 
     const unsigned int W = camera.imageWidth;
     const unsigned int H = camera.imageHeight;
@@ -267,6 +277,122 @@ void SpectralIntegrator::RenderFrame(
                                     if (light.type == SpectralLight::Type::Dome) {
                                         radiance += light.EnvironmentEmission(missDir, lambda);
                                     }
+                                }
+                            }
+
+                            // Volume ray marching (Beer-Lambert + HG phase)
+                            if (volume && volume->IsValid()) {
+                                // Ray-AABB intersection
+                                GfVec3f ro(ray.GetStartPoint());
+                                GfVec3f rd(ray.GetDirection());
+                                float rdLen = rd.GetLength();
+                                if (rdLen > 1e-8f) rd /= rdLen;
+
+                                GfVec3f invDir(1.f/(std::abs(rd[0])>1e-8f?rd[0]:1e-8f),
+                                               1.f/(std::abs(rd[1])>1e-8f?rd[1]:1e-8f),
+                                               1.f/(std::abs(rd[2])>1e-8f?rd[2]:1e-8f));
+                                GfVec3f t0v = GfVec3f(
+                                    (volume->bboxMin[0]-ro[0])*invDir[0],
+                                    (volume->bboxMin[1]-ro[1])*invDir[1],
+                                    (volume->bboxMin[2]-ro[2])*invDir[2]);
+                                GfVec3f t1v = GfVec3f(
+                                    (volume->bboxMax[0]-ro[0])*invDir[0],
+                                    (volume->bboxMax[1]-ro[1])*invDir[1],
+                                    (volume->bboxMax[2]-ro[2])*invDir[2]);
+                                float tNear = std::max({std::min(t0v[0],t1v[0]),
+                                                        std::min(t0v[1],t1v[1]),
+                                                        std::min(t0v[2],t1v[2])});
+                                float tFar  = std::min({std::max(t0v[0],t1v[0]),
+                                                        std::max(t0v[1],t1v[1]),
+                                                        std::max(t0v[2],t1v[2])});
+                                tNear = std::max(tNear, 0.f);
+
+                                // Surface hit limits the far distance
+                                float surfaceT = hit.valid() ? float(hit.t) : 1e30f;
+                                tFar = std::min(tFar, surfaceT);
+
+                                if (tNear < tFar) {
+                                    // Step size: auto = 1/2 voxel in world space
+                                    GfVec3f bboxSize = volume->bboxMax - volume->bboxMin;
+                                    float voxelSize = std::max({bboxSize[0]/volume->resX,
+                                                                bboxSize[1]/volume->resY,
+                                                                bboxSize[2]/volume->resZ});
+                                    float dt = (volume->stepSize > 0.01f) ? volume->stepSize : voxelSize * 0.5f;
+                                    int maxSteps = 512;
+
+                                    // Jitter first step
+                                    float jitterOff = volume->jitter ? _Hash(seed + 77) * dt : 0.f;
+                                    float t = tNear + jitterOff;
+
+                                    float volTransmittance = 1.f;
+                                    float volRadiance = 0.f;
+
+                                    // Get primary light direction for in-scatter
+                                    GfVec3f lightDir(0, -1, 0);
+                                    GfVec3f lightColor(1.f);
+                                    if (scene.HasLights()) {
+                                        const auto& lights = scene.GetLights();
+                                        // Use brightest light
+                                        float maxI = 0;
+                                        for (const auto& L : lights) {
+                                            float li = L.color.GetLength() * L.intensity;
+                                            if (li > maxI && L.type != SpectralLight::Type::Dome) {
+                                                maxI = li;
+                                                lightDir = L.direction;
+                                                lightColor = L.color * L.intensity;
+                                            }
+                                        }
+                                    }
+
+                                    for (int step = 0; step < maxSteps && t < tFar; ++step, t += dt) {
+                                        GfVec3f p = ro + rd * t;
+                                        GfVec3f uv = volume->WorldToNorm(p);
+                                        float density = volume->SampleDensity(uv[0], uv[1], uv[2]);
+
+                                        if (density < 1e-5f) continue;
+
+                                        // Beer-Lambert extinction
+                                        float sigma_t = density * volume->extinction;
+                                        float stepTrans = std::exp(-sigma_t * dt);
+                                        float absorption = 1.f - stepTrans;
+
+                                        // Henyey-Greenstein phase function
+                                        float cosTheta = -(rd[0]*lightDir[0] + rd[1]*lightDir[1] + rd[2]*lightDir[2]);
+                                        float g = volume->gForward;
+                                        float denom = 1.f + g*g - 2.f*g*cosTheta;
+                                        float phase = (1.f - g*g) / (4.f * 3.14159f * std::pow(std::max(denom,1e-4f), 1.5f));
+
+                                        // In-scatter: light * phase * scattering * scatter_color
+                                        float scatter = volume->scattering * density;
+
+                                        // Powder effect (Schneider & Vos 2015)
+                                        float powder = 1.f;
+                                        if (volume->powderStrength > 0.01f) {
+                                            powder = 1.f - std::exp(-density * volume->powderStrength * 2.f);
+                                        }
+
+                                        // Spectral response of scatter
+                                        float scatterR = scatter * phase * lightColor[0] * volume->scatterColor[0] * powder;
+
+                                        // Emission from temperature (blackbody approximation)
+                                        float emission = 0.f;
+                                        if (volume->emissionIntensity > 0.01f) {
+                                            float temp = volume->SampleTemperature(uv[0], uv[1], uv[2]);
+                                            if (temp > volume->tempMin) {
+                                                float tNorm = std::min((temp - volume->tempMin) / (volume->tempMax - volume->tempMin + 1e-6f), 1.f);
+                                                emission = tNorm * tNorm * volume->emissionIntensity * density;
+                                            }
+                                        }
+
+                                        // Accumulate
+                                        volRadiance += volTransmittance * absorption * (scatterR + emission);
+                                        volTransmittance *= stepTrans;
+
+                                        if (volTransmittance < 0.001f) break;
+                                    }
+
+                                    // Composite: volume over surface
+                                    radiance = volRadiance + volTransmittance * radiance;
                                 }
                             }
 
@@ -1042,10 +1168,9 @@ float SpectralIntegrator::_ShadeSpectral(
     const SpectralMaterial* insideVolumeMat = nullptr;  // Beer-Lambert tracking
     float pathMinRoughness = 0.f;  // path regularization for rough glass
     int firstBounceType = 0;  // 0=none, 1=diffuse, 2=specular, 3=transmission
-    int refractionCount = 0;  // separate counter for glass paths
-    int effectiveMaxBounces = maxBounces;
+    int refractionCount = 0;  // track glass bounces
 
-    for (int bounce = 0; bounce < effectiveMaxBounces; ++bounce) {
+    for (int bounce = 0; bounce < maxBounces; ++bounce) {
         // Russian roulette after bounce 1
         if (bounce >= 1) {
             float rrProb = std::min(0.95f, pathThroughput);
@@ -1093,10 +1218,8 @@ float SpectralIntegrator::_ShadeSpectral(
                 insideVolumeMat = nullptr;
             }
 
-            // Allow extra bounces for glass paths (camera.refractionBounces)
+            // Track refraction depth
             refractionCount++;
-            effectiveMaxBounces = std::max(maxBounces, maxBounces + refractionCount);
-            if (effectiveMaxBounces > 32) effectiveMaxBounces = 32;
         }
 
         // Trace bounce ray
@@ -1704,30 +1827,35 @@ void SpectralIntegrator::RenderFrameGPU(
     int                   spp,
     float*                depthOut,
     int                   maxBounces,
-    int                   colorSpace)
+    int                   colorSpace,
+    const SpectralVolume* volume)
 {
     SpectralGPU* gpu = _GetGPU();
     if (!gpu) {
         fprintf(stderr, "SpectralIntegrator: GPU unavailable, using CPU\n");
-        RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces);
+        RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces,
+                    nullptr, nullptr, nullptr, nullptr, nullptr, 0.5f, colorSpace, volume);
         return;
     }
 
     if (!gpu->BuildAccel(scene)) {
         fprintf(stderr, "SpectralIntegrator: GPU accel build failed, using CPU\n");
-        RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces);
+        RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces,
+                    nullptr, nullptr, nullptr, nullptr, nullptr, 0.5f, colorSpace, volume);
         return;
     }
 
     if (!gpu->Render(camera, camera.imageWidth, camera.imageHeight,
-                     pixels, depthOut, spp, maxBounces, colorSpace)) {
+                     pixels, depthOut, spp, maxBounces, colorSpace, volume)) {
         fprintf(stderr, "SpectralIntegrator: GPU render failed, using CPU\n");
-        RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces);
+        RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces,
+                    nullptr, nullptr, nullptr, nullptr, nullptr, 0.5f, colorSpace, volume);
         return;
     }
 
-    fprintf(stderr, "SpectralIntegrator: GPU render complete (%dx%d)\n",
-            camera.imageWidth, camera.imageHeight);
+    fprintf(stderr, "SpectralIntegrator: GPU render complete (%dx%d)%s\n",
+            camera.imageWidth, camera.imageHeight,
+            (volume && volume->IsValid()) ? " +volume" : "");
 }
 
 void SpectralIntegrator::DenoiseGPU(

@@ -583,6 +583,153 @@ static __forceinline__ __device__ float shadeHit(
 }
 
 // ---------------------------------------------------------------------------
+// GPU Volume ray marching — Beer-Lambert + HG phase + emission
+// ---------------------------------------------------------------------------
+static __forceinline__ __device__ float sampleVolumeDensity(float u, float v, float w)
+{
+    int ix = max(0, min(int(u * params.volResX), params.volResX - 1));
+    int iy = max(0, min(int(v * params.volResY), params.volResY - 1));
+    int iz = max(0, min(int(w * params.volResZ), params.volResZ - 1));
+    return params.volumeDensity[iz * params.volResY * params.volResX + iy * params.volResX + ix]
+           * params.volDensityMult;
+}
+
+static __forceinline__ __device__ float sampleVolumeTemp(float u, float v, float w)
+{
+    if (!params.volumeTemperature) return 0.f;
+    int ix = max(0, min(int(u * params.volResX), params.volResX - 1));
+    int iy = max(0, min(int(v * params.volResY), params.volResY - 1));
+    int iz = max(0, min(int(w * params.volResZ), params.volResZ - 1));
+    return params.volumeTemperature[iz * params.volResY * params.volResX + iy * params.volResX + ix];
+}
+
+static __forceinline__ __device__ void marchVolume(
+    float3 ro, float3 rdRaw, float surfaceT, float lambda, unsigned int seed,
+    float& outRadiance, float& outTransmittance)
+{
+    outRadiance = 0.f;
+    outTransmittance = 1.f;
+
+    // MUST normalize ray direction — makeRay returns unnormalized
+    float rdLen = sqrtf(rdRaw.x*rdRaw.x + rdRaw.y*rdRaw.y + rdRaw.z*rdRaw.z);
+    if (rdLen < 1e-8f) return;
+    float3 rd = make_float3(rdRaw.x/rdLen, rdRaw.y/rdLen, rdRaw.z/rdLen);
+    // Scale surfaceT to match normalized direction
+    surfaceT *= rdLen;
+
+    // Ray-AABB slab test
+    float3 invDir = make_float3(
+        1.f / (fabsf(rd.x) > 1e-8f ? rd.x : 1e-8f),
+        1.f / (fabsf(rd.y) > 1e-8f ? rd.y : 1e-8f),
+        1.f / (fabsf(rd.z) > 1e-8f ? rd.z : 1e-8f));
+    float3 t0 = make_float3(
+        (params.volBboxMin.x - ro.x) * invDir.x,
+        (params.volBboxMin.y - ro.y) * invDir.y,
+        (params.volBboxMin.z - ro.z) * invDir.z);
+    float3 t1 = make_float3(
+        (params.volBboxMax.x - ro.x) * invDir.x,
+        (params.volBboxMax.y - ro.y) * invDir.y,
+        (params.volBboxMax.z - ro.z) * invDir.z);
+    float tNear = fmaxf(fmaxf(fminf(t0.x,t1.x), fminf(t0.y,t1.y)), fminf(t0.z,t1.z));
+    float tFar  = fminf(fminf(fmaxf(t0.x,t1.x), fmaxf(t0.y,t1.y)), fmaxf(t0.z,t1.z));
+    tNear = fmaxf(tNear, 0.f);
+    tFar  = fminf(tFar, surfaceT);
+
+    if (tNear >= tFar) return;
+
+    // Step size: auto = half voxel
+    float3 bSize = make_float3(
+        params.volBboxMax.x - params.volBboxMin.x,
+        params.volBboxMax.y - params.volBboxMin.y,
+        params.volBboxMax.z - params.volBboxMin.z);
+    float voxelSize = fmaxf(fmaxf(bSize.x / params.volResX,
+                                    bSize.y / params.volResY),
+                                    bSize.z / params.volResZ);
+    float dt = (params.volStepSize > 0.01f) ? params.volStepSize : voxelSize * 0.5f;
+
+    // Jitter first step
+    float jitterOff = params.volJitter ? hashRNG(seed) * dt : 0.f;
+    float t = tNear + jitterOff;
+
+    // Find primary directional light for in-scatter (skip dome lights type=3)
+    float3 lightDir = make_float3(0.f, -1.f, 0.f);
+    float3 lightCol = make_float3(0.5f, 0.5f, 0.5f);
+    if (params.lightCount > 0) {
+        float maxI = 0.f;
+        for (unsigned int li = 0; li < params.lightCount; ++li) {
+            const GPULight& L = params.lights[li];
+            if (L.type == 3) continue; // skip dome lights
+            float intensity = (L.color.x + L.color.y + L.color.z) * 0.333f * L.intensity;
+            if (intensity > maxI) {
+                maxI = intensity;
+                float dl = sqrtf(L.direction.x*L.direction.x + L.direction.y*L.direction.y + L.direction.z*L.direction.z);
+                if (dl > 1e-6f) lightDir = make_float3(L.direction.x/dl, L.direction.y/dl, L.direction.z/dl);
+                lightCol = make_float3(L.color.x * L.intensity, L.color.y * L.intensity, L.color.z * L.intensity);
+            }
+        }
+        // If only dome lights, use dome color with default downward direction
+        if (maxI < 0.001f) {
+            for (unsigned int li = 0; li < params.lightCount; ++li) {
+                const GPULight& L = params.lights[li];
+                if (L.type == 3) {
+                    lightCol = make_float3(L.color.x * L.intensity, L.color.y * L.intensity, L.color.z * L.intensity);
+                    break;
+                }
+            }
+        }
+    }
+    float lightLum = 0.2126f * lightCol.x + 0.7152f * lightCol.y + 0.0722f * lightCol.z;
+
+    for (int step = 0; step < 512 && t < tFar; ++step, t += dt) {
+        float px = ro.x + rd.x * t;
+        float py = ro.y + rd.y * t;
+        float pz = ro.z + rd.z * t;
+
+        float u = (bSize.x > 1e-6f) ? (px - params.volBboxMin.x) / bSize.x : 0.5f;
+        float v = (bSize.y > 1e-6f) ? (py - params.volBboxMin.y) / bSize.y : 0.5f;
+        float w = (bSize.z > 1e-6f) ? (pz - params.volBboxMin.z) / bSize.z : 0.5f;
+
+        float density = sampleVolumeDensity(u, v, w);
+        if (density < 1e-5f) continue;
+
+        // Beer-Lambert
+        float sigma_t = density * params.volExtinction;
+        float stepTrans = expf(-sigma_t * dt);
+        float absorption = 1.f - stepTrans;
+
+        // HG phase
+        float cosTheta = -(rd.x*lightDir.x + rd.y*lightDir.y + rd.z*lightDir.z);
+        float g = params.volGForward;
+        float denom = 1.f + g*g - 2.f*g*cosTheta;
+        float phase = (1.f - g*g) / (4.f * 3.14159265f * powf(fmaxf(denom, 1e-4f), 1.5f));
+
+        float scatter = params.volScattering * density * phase * lightLum;
+
+        // Powder
+        float powder = 1.f;
+        if (params.volPowder > 0.01f)
+            powder = 1.f - expf(-density * params.volPowder * 2.f);
+
+        scatter *= powder;
+
+        // Emission
+        float emission = 0.f;
+        if (params.volEmissionIntensity > 0.01f) {
+            float temp = sampleVolumeTemp(u, v, w);
+            if (temp > params.volTempMin) {
+                float tNorm = fminf((temp - params.volTempMin) / (params.volTempMax - params.volTempMin + 1e-6f), 1.f);
+                emission = tNorm * tNorm * params.volEmissionIntensity * density;
+            }
+        }
+
+        outRadiance += outTransmittance * absorption * (scatter + emission);
+        outTransmittance *= stepTrans;
+
+        if (outTransmittance < 0.001f) break;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // __raygen__spectral
 // ---------------------------------------------------------------------------
 extern "C" __global__ void __raygen__spectral()
@@ -595,19 +742,51 @@ extern "C" __global__ void __raygen__spectral()
     const float W=float(dim.x), H=float(dim.y);
 
     if (spp <= 1) {
-        // Normal-as-colour
+        // Normal-as-colour (or volume density preview for spp=1)
         float3 origin, dir;
         unsigned int dofSeed = pixIdx * 7919u;
         makeRay(px+0.5f, py+0.5f, W, H, origin, dir, dofSeed);
         unsigned int p0=0,p1=0,p2=0,p3=__float_as_uint(1e30f),p4=0,p5=0,p6=0;
         optixTrace(params.traversable, origin, dir, 1e-4f,1e30f,0.f,
                    OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0, p0,p1,p2,p3,p4,p5,p6);
-        params.framebuffer[pixIdx] = make_float4(
-            __uint_as_float(p0),__uint_as_float(p1),__uint_as_float(p2),1.f);
+
+        float r = __uint_as_float(p0);
+        float g = __uint_as_float(p1);
+        float b = __uint_as_float(p2);
+        bool spp1Hit = (p4 > 0u);
+
+        // Background: dome light color on miss
+        if (!spp1Hit) {
+            r = 0.f; g = 0.f; b = 0.f;
+            for (unsigned int li = 0; li < params.lightCount; ++li) {
+                const GPULight& L = params.lights[li];
+                if (L.type == 3) { // dome light
+                    r += L.color.x * L.intensity;
+                    g += L.color.y * L.intensity;
+                    b += L.color.z * L.intensity;
+                }
+            }
+        }
+
+        // Volume overlay for spp=1
+        float spp1Alpha = spp1Hit ? 1.f : 0.f;
+        if (params.hasVolume && params.volumeDensity) {
+            float surfT = spp1Hit ? __uint_as_float(p3) : 1e30f;
+            float volRad = 0.f, volTrans = 1.f;
+            marchVolume(origin, dir, surfT, 550.f, dofSeed + 200u, volRad, volTrans);
+            float grey = volRad * 2.f; // boost for visibility
+            r = grey + volTrans * r;
+            g = grey + volTrans * g;
+            b = grey + volTrans * b;
+            spp1Alpha = 1.f - volTrans * (1.f - spp1Alpha);
+        }
+
+        params.framebuffer[pixIdx] = make_float4(r, g, b, spp1Alpha);
         if (params.depthbuffer) params.depthbuffer[pixIdx] = __uint_as_float(p3);
     } else {
         // Spectral with BSDF + lights + bounces
         float X=0.f, Y=0.f, Z=0.f;
+        float alphaAccum = 0.f;
         float minDepth = 1e30f;
         const int maxBounces = params.maxBounces;
 
@@ -779,8 +958,31 @@ extern "C" __global__ void __raygen__spectral()
                         radiance += throughput * shadeHit(*bMat, bN, bV, bOrigin, lambda, bSeed);
                 }
             } else {
+                // Miss — evaluate dome lights for background (match CPU)
                 radiance = 0.f;
+                for (unsigned int li = 0; li < params.lightCount; ++li) {
+                    const GPULight& L = params.lights[li];
+                    if (L.type == 3) { // dome light
+                        float lumR = expf(-((lambda-630.f)*(lambda-630.f))/(2.f*30.f*30.f));
+                        float lumG = expf(-((lambda-532.f)*(lambda-532.f))/(2.f*30.f*30.f));
+                        float lumB = expf(-((lambda-460.f)*(lambda-460.f))/(2.f*25.f*25.f));
+                        radiance += (L.color.x*L.intensity*lumR + L.color.y*L.intensity*lumG + L.color.z*L.intensity*lumB);
+                    }
+                }
             }
+
+            // GPU volume ray marching — single pass for radiance + transmittance
+            float sampleAlpha = isHit ? 1.f : 0.f;
+            if (params.hasVolume && params.volumeDensity) {
+                float surfT = isHit ? depth : 1e30f;
+                float volRad = 0.f, volTrans = 1.f;
+                marchVolume(origin, dir, surfT, lambda, seed + 200u, volRad, volTrans);
+                // Composite: volume over surface/background
+                radiance = volRad + volTrans * radiance;
+                // Alpha: volume opacity + surface behind
+                sampleAlpha = 1.f - volTrans * (1.f - sampleAlpha);
+            }
+            alphaAccum += sampleAlpha;
 
             float cx,cy,cz; cieXYZ(lambda,cx,cy,cz);
             float scale = 400.f/106.856895f;
@@ -805,7 +1007,8 @@ extern "C" __global__ void __raygen__spectral()
             g=-0.9689f*X+1.8758f*Y+0.0415f*Z;
             b= 0.0557f*X-0.2040f*Y+1.0570f*Z;
         }
-        params.framebuffer[pixIdx] = make_float4(fmaxf(0.f,r),fmaxf(0.f,g),fmaxf(0.f,b),1.f);
+        params.framebuffer[pixIdx] = make_float4(fmaxf(0.f,r),fmaxf(0.f,g),fmaxf(0.f,b),
+                                                    alphaAccum / float(spp));
         if (params.depthbuffer) params.depthbuffer[pixIdx] = minDepth;
     }
 }

@@ -21,6 +21,7 @@
 #ifdef SPECTRAL_HAS_OPTIX
 
 #include "SpectralScene.h"
+#include "SpectralVolume.h"
 #include "SpectralGPUParams.h"
 
 #include <pxr/pxr.h>
@@ -63,7 +64,8 @@ public:
     bool Render(const SpectralCamera& camera,
                 unsigned int width, unsigned int height,
                 float* pixels, float* depth = nullptr,
-                int spp = 1, int maxBounces = 4, int colorSpace = 0);
+                int spp = 1, int maxBounces = 4, int colorSpace = 0,
+                const SpectralVolume* volume = nullptr);
 
     /// Denoise the framebuffer in-place on GPU, copy result to host pixels.
     bool Denoise(unsigned int width, unsigned int height, float* pixels);
@@ -110,6 +112,8 @@ private:
     CUdeviceptr            _d_textures     = 0;   // GPUTexture array
     std::vector<CUdeviceptr> _d_texPixels;         // per-texture pixel data
     CUdeviceptr            _d_params       = 0;
+    CUdeviceptr            _d_volumeDensity = 0;
+    CUdeviceptr            _d_volumeTemp    = 0;
 
     // Current allocation sizes
     unsigned int           _allocW = 0;

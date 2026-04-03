@@ -104,6 +104,23 @@ struct LaunchParams {
     unsigned int       textureCount;
 
     int                blueNoise;        // 1 = R2 sampling, 0 = random
+
+    // Volume data (VDB grid uploaded to GPU)
+    float*             volumeDensity;     // 3D density grid (resX*resY*resZ)
+    float*             volumeTemperature; // 3D temperature grid (optional, null if none)
+    int                volResX, volResY, volResZ;
+    float3             volBboxMin, volBboxMax;
+    float              volExtinction;
+    float              volScattering;
+    float              volDensityMult;
+    float              volGForward;
+    float              volEmissionIntensity;
+    float              volTempMin, volTempMax;
+    float              volPowder;
+    float3             volScatterColor;
+    float              volStepSize;       // 0 = auto
+    int                volJitter;
+    int                hasVolume;         // 1 = volume active
 };
 
 // Per-ray payload — carried through the trace

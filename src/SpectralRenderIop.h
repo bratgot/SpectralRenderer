@@ -4,6 +4,7 @@
 
 // PXR types
 #include "SpectralScene.h"
+#include "SpectralVolume.h"
 #include "SpectralIntegrator.h"
 
 #include <pxr/usd/usd/stage.h>
@@ -20,6 +21,9 @@ PXR_NAMESPACE_USING_DIRECTIVE
 #include <DDImage/Knobs.h>
 #include <DDImage/Row.h>
 #include <DDImage/Format.h>
+#include <DDImage/ViewerContext.h>
+#include <DDImage/gl.h>
+#include <DDImage/Hash.h>
 #include <DDImage/MetaData.h>
 #include <DDImage/GeometryProviderI.h>
 #include <DDImage/OpState.h>
@@ -55,7 +59,7 @@ public:
     // Input 0: Scene  (GeometryProviderI) — optional
     // Input 1: Camera (CameraOp)          — optional
     // Input 2: BG     (any Iop)           — optional, sets output resolution
-    int  minimum_inputs()               const override { return 3; }
+    int  minimum_inputs()               const override { return 0; }
     int  maximum_inputs()               const override { return 3; }
     const char* input_label(int idx, char*) const override;
     bool test_input(int idx, Op* op)    const override;
@@ -77,6 +81,11 @@ public:
                 ChannelMask channels, Row& row)    override;
     void knobs(Knob_Callback f)         override;
     int  knob_changed(Knob* k)          override;
+    void append(Hash& hash)             override;
+
+    // 3D viewport — wireframe bbox for VDB volumes
+    void build_handles(ViewerContext* ctx) override;
+    void draw_handle(ViewerContext* ctx)   override;
 
     unsigned node_color() const override { return 0xFF8C1AFF; }
 
@@ -104,12 +113,14 @@ private:
     void _LoadFromPxrStage(const UsdStageRefPtr& stage);
     void _BuildCameraFromInput();
     void _BuildLightRig();
+    void _LoadVDB();
     void _EnsureFrameRendered();
+    std::string _resolveFramePath(int frame) const;
 
     // Knobs
     const char* _usdFilePath = "";
     int   _frame      = 1;
-    int   _samples    = 1;
+    int   _samples    = 4;            // spectral needs 2+ (default 4)
     int   _maxBounces = 4;
     int   _refractionBounces = 8;  // separate limit for glass paths
 
@@ -129,6 +140,52 @@ private:
     double _studioKeyIntensity = 5.0;
     double _studioFillRatio = 0.4;
     double _studioRimIntensity = 2.0;
+    double _shadowSoftness = 0.0;
+
+    // Volume / VDB
+    const char* _vdbFile = "";
+    int    _vdbDensityGrid = 0;
+    int    _vdbTempGrid = 0;
+    int    _vdbFlameGrid = 0;
+    int    _vdbColorGrid = 0;
+    static const char* _vdbGridNames[];  // populated from file
+    double _vdbExtinction = 5.0;
+    double _vdbScattering = 3.0;
+    double _vdbDensityMult = 1.0;
+    double _vdbAnisotropy = 0.0;
+    double _vdbStepSize = 0.0;       // 0 = auto
+    int    _vdbMaxSteps = 256;
+    double _vdbEmissionIntensity = 2.0;
+    double _vdbTempMin = 500.0;
+    double _vdbTempMax = 6500.0;
+    double _vdbFlameIntensity = 5.0;
+    double _vdbGForward = 0.65;
+    double _vdbGBackward = -0.25;
+    double _vdbLobeMix = 0.70;
+    double _vdbPowder = 2.0;
+    bool   _vdbJitter = true;
+    float  _vdbScatterColor[3] = {1.f, 1.f, 1.f};
+
+    // VDB sequence
+    bool   _vdbAutoSequence = false;
+    int    _vdbFrameOffset = 0;
+    const char* _vdbOrigFile = "";
+
+    // VDB viewport preview
+    bool   _vdbShowBbox = true;
+    bool   _vdbShowPoints = true;
+    double _vdbPointDensity = 0.3;
+    double _vdbPointSize = 3.0;
+
+    // Cached point cloud for viewport
+    struct VDBPreviewPoint { float x, y, z, density; };
+    std::vector<VDBPreviewPoint> _vdbPreviewPoints;
+    float _vdbMaxDensity = 1.f;
+    bool  _vdbPreviewDirty = true;
+    std::string _vdbLoadedPath;  // cached to avoid reload
+
+    // VDB viewport preview (kept in first declaration above)
+
     int   _tileSize   = 64;
     int   _deviceMode = 0;         // 0=cpu, 1=gpu, 2=auto
     int   _colorSpace = 0;         // 0=sRGB, 1=ACEScg, 2=ACES 2065-1
@@ -171,6 +228,7 @@ private:
 
     // Scene + camera built together during _LoadStage
     std::unique_ptr<pxr::SpectralScene> _scene;
+    std::shared_ptr<pxr::SpectralVolume> _volume;  // active volume (from VDB)
     SpectralCamera                      _camera;
     bool                                _cameraFromInput = false;
 

@@ -5,6 +5,10 @@
 #include "SpectralSubdiv.h"
 #endif
 
+#ifdef SPECTRAL_HAS_VDB
+#include "SpectralVDBLoader.h"
+#endif
+
 // PXR — USD stage traversal
 #include <pxr/usd/usd/stage.h>
 #include <pxr/usd/usd/prim.h>
@@ -59,6 +63,10 @@ PXR_NAMESPACE_USING_DIRECTIVE
 
 // ---------------------------------------------------------------------------
 const char* const SpectralRenderIop::CLASS = "SpectralRender";
+
+// VDB grid names — populated dynamically when file is loaded
+static const char* const kDefaultGridNames[] = { "(none)", "density", "temperature", "flame", "velocity", "color", nullptr };
+const char* SpectralRenderIop::_vdbGridNames[] = { "(none)", "density", "temperature", "flame", "velocity", "color", nullptr };
 
 static Op* SpectralRenderIopCreate(Node* node)
 {
@@ -271,43 +279,37 @@ void SpectralRenderIop::knobs(Knob_Callback f)
     }
     EndGroup(f);
 
-    BeginClosedGroup(f, "light_grp", "Built-in lighting");
+    Tab_knob(f, "Lighting");
     {
         static const char* const skyP[] = {"Off", "Custom", "Day Sky", "Golden Hour", "Overcast", "Blue Hour", "Night", nullptr};
         Enumeration_knob(f, &_skyPreset, skyP, "sky_preset", "Sky Preset");
         Tooltip(f, "Analytical sun/sky lighting (Preetham model).\n"
+                   "Composes with scene lights from the scn input.\n"
                    "Off = disabled, Day Sky = noon clear,\n"
-                   "Golden Hour = warm sunset,\n"
-                   "Overcast = soft cloudy dome,\n"
-                   "Blue Hour = cool twilight, Night = moonlit.\n"
-                   "Composes with scene lights from the scn input.");
+                   "Golden Hour = warm sunset, Overcast = soft cloudy,\n"
+                   "Blue Hour = cool twilight, Night = moonlit.");
         Double_knob(f, &_skyMix, "sky_mix", "sky mix"); SetRange(f, 0, 2);
-        Tooltip(f, "Master brightness for sun and sky.\n"
-                   "0 = disabled, 1 = natural, 2 = overbright.");
 
         BeginClosedGroup(f, "grp_sun", "Sun and sky settings");
         {
             Double_knob(f, &_sunElevation, "sun_elevation", "sun elevation"); SetRange(f, 0, 90);
-            Tooltip(f, "Sun angle above horizon (degrees).\n"
-                       "90 = noon, 45 = afternoon, 10 = sunset.");
+            Tooltip(f, "Sun angle above horizon. 90=noon, 10=sunset.");
             Double_knob(f, &_sunAzimuth, "sun_azimuth", "sun azimuth"); SetRange(f, 0, 360);
-            Tooltip(f, "Sun compass direction (0=north, 90=east, 180=south).");
             Double_knob(f, &_sunIntensity, "sun_intensity", "sun intensity"); SetRange(f, 0, 20);
             Double_knob(f, &_skyIntensity, "sky_intensity", "sky fill"); SetRange(f, 0, 5);
-            Tooltip(f, "Ambient sky dome brightness (fill light from above).");
             Double_knob(f, &_turbidity, "turbidity", "turbidity"); SetRange(f, 2, 10);
-            Tooltip(f, "Atmospheric haze. 2 = clear, 5 = hazy, 10 = heavy smog.\n"
-                       "Higher = warmer sun, greyer sky.");
+            Tooltip(f, "Atmospheric haze. 2=clear, 5=hazy, 10=heavy smog.");
         }
         EndGroup(f);
 
         Divider(f, "Studio lights");
-        static const char* const stuP[] = {"Off", "Portrait", "Product", "Dramatic", nullptr};
+        static const char* const stuP[] = {"Off", "Portrait", "Product", "Dramatic", "Softbox", nullptr};
         Enumeration_knob(f, &_studioPreset, stuP, "studio_preset", "Studio Preset");
         Tooltip(f, "Three-point studio light rig.\n"
                    "Portrait = soft key/fill, subtle rim.\n"
                    "Product = bright key, strong rim.\n"
-                   "Dramatic = hard single key, dark fill.");
+                   "Dramatic = hard single key, dark fill.\n"
+                   "Softbox = broad soft key, gentle fill.");
         Double_knob(f, &_studioMix, "studio_mix", "studio mix"); SetRange(f, 0, 2);
 
         BeginClosedGroup(f, "grp_studio", "Studio light settings");
@@ -316,13 +318,151 @@ void SpectralRenderIop::knobs(Knob_Callback f)
             Double_knob(f, &_studioKeyElevation, "studio_key_elevation", "key elevation"); SetRange(f, 0, 90);
             Double_knob(f, &_studioKeyIntensity, "studio_key_intensity", "key intensity"); SetRange(f, 0, 20);
             Double_knob(f, &_studioFillRatio, "studio_fill_ratio", "fill ratio"); SetRange(f, 0, 1);
-            Tooltip(f, "Fill light brightness relative to key.\n"
-                       "0 = no fill, 0.4 = natural, 1 = flat.");
+            Tooltip(f, "Fill brightness relative to key. 0=no fill, 1=flat.");
             Double_knob(f, &_studioRimIntensity, "studio_rim_intensity", "rim intensity"); SetRange(f, 0, 20);
         }
         EndGroup(f);
+
+        Divider(f, "Shadow softness");
+        Double_knob(f, &_shadowSoftness, "shadow_softness", "shadow softness"); SetRange(f, 0, 1);
+        Tooltip(f, "Softens shadows from built-in lights.\n"
+                   "0 = hard shadows (point source)\n"
+                   "0.3 = soft (default for studio)\n"
+                   "1.0 = very diffuse (overcast look)\n"
+                   "Simulates area light sources.");
     }
-    EndGroup(f);
+
+    Tab_knob(f, "Volumes");
+    {
+        Text_knob(f,
+            "<font color='#888' size='-1'>"
+            "Load OpenVDB files for volume rendering. "
+            "Volumes composite over scene geometry using spectral ray marching."
+            "</font>"
+        );
+        File_knob(f, &_vdbFile, "vdb_file", "VDB file");
+        Tooltip(f, "OpenVDB volume file (.vdb).\n"
+                   "Supports #### frame padding for sequences.\n"
+                   "Auto-detects density, temperature grids.");
+        Bool_knob(f, &_vdbAutoSequence, "vdb_auto_sequence", "auto sequence");
+        Tooltip(f, "Treat VDB as a frame sequence.\n"
+                   "Replaces frame numbers with #### padding.\n"
+                   "e.g. explosion.0001.vdb → explosion.####.vdb");
+        Int_knob(f, &_vdbFrameOffset, "vdb_frame_offset", "frame offset");
+        SetRange(f, -100, 100);
+        Tooltip(f, "Offset the frame number for VDB sequences.\n"
+                   "Useful for retiming simulations.");
+        Obsolete_knob(f, "vdb_orig_file", nullptr);
+        String_knob(f, &_vdbOrigFile, "vdb_orig_file", "");
+        SetFlags(f, Knob::INVISIBLE);
+
+        Divider(f, "3D Viewport");
+        Bool_knob(f, &_vdbShowBbox, "vdb_show_bbox", "show bbox");
+        Tooltip(f, "Draw a green wireframe bounding box\n"
+                   "around the volume in the 3D viewer.");
+        Bool_knob(f, &_vdbShowPoints, "vdb_show_points", "show points");
+        Tooltip(f, "Draw a point cloud preview of the volume\n"
+                   "density in the 3D viewer. Denser regions\n"
+                   "appear brighter and more opaque.");
+        Double_knob(f, &_vdbPointDensity, "vdb_point_density", "point density"); SetRange(f, 0.1, 1.0);
+        Tooltip(f, "Proportion of voxels to draw as points.\n"
+                   "1.0 = all voxels (slow), 0.3 = every 3rd,\n"
+                   "0.1 = sparse preview (fast).");
+        Double_knob(f, &_vdbPointSize, "vdb_point_size", "point size"); SetRange(f, 1, 8);
+        Tooltip(f, "GL point size in pixels for the preview.");
+        Newline(f);
+        Enumeration_knob(f, &_vdbDensityGrid, _vdbGridNames, "vdb_density_grid", "density grid");
+        Tooltip(f, "Grid to use as density. Auto-populated from VDB file.");
+        Enumeration_knob(f, &_vdbTempGrid, _vdbGridNames, "vdb_temp_grid", "temperature grid");
+        Tooltip(f, "Temperature grid for blackbody emission.\n"
+                   "Common names: temperature, temp, heat.");
+        Enumeration_knob(f, &_vdbFlameGrid, _vdbGridNames, "vdb_flame_grid", "flame grid");
+        Tooltip(f, "Flame grid for fire emission intensity.\n"
+                   "Multiplied with emission intensity slider.");
+        Enumeration_knob(f, &_vdbColorGrid, _vdbGridNames, "vdb_color_grid", "color grid");
+        Tooltip(f, "RGB colour grid (Vec3 type).\n"
+                   "Tints the volume per-voxel. Common name: Cd.");
+
+        Divider(f, "Volume shading");
+        Double_knob(f, &_vdbExtinction, "vdb_extinction", "extinction"); SetRange(f, 0, 20);
+        Tooltip(f, "Extinction coefficient (sigma_t).\n"
+                   "Controls how quickly light is absorbed.\n"
+                   "0 = fully transparent, 5 = default smoke,\n"
+                   "10-20 = very dense/opaque.");
+        Double_knob(f, &_vdbScattering, "vdb_scattering", "scattering"); SetRange(f, 0, 20);
+        Tooltip(f, "In-scatter coefficient (sigma_s).\n"
+                   "How much light scatters into the camera.\n"
+                   "Higher = brighter volume interior.");
+        Double_knob(f, &_vdbDensityMult, "vdb_density_mult", "density multiplier"); SetRange(f, 0, 10);
+        Tooltip(f, "Scales the raw density values from the VDB.\n"
+                   "1 = use as-is, 2 = double density,\n"
+                   "0.5 = half density. Useful for simulations\n"
+                   "with very high or low density ranges.");
+        Double_knob(f, &_vdbAnisotropy, "vdb_anisotropy", "anisotropy"); SetRange(f, -1, 1);
+        Tooltip(f, "Henyey-Greenstein phase function g parameter.\n"
+                   " 0.0 = isotropic (equal in all directions)\n"
+                   " 0.6 = forward scatter (clouds, fog)\n"
+                   " 0.8 = strong forward (mist, haze)\n"
+                   "-0.3 = backward scatter (silver lining effect)");
+        Double_knob(f, &_vdbStepSize, "vdb_step_size", "step size"); SetRange(f, 0, 2);
+        Tooltip(f, "Ray march step size in world units.\n"
+                   "0 = automatic (half voxel size).\n"
+                   "Smaller = more accurate but slower.\n"
+                   "Larger = faster but may miss thin features.");
+        Int_knob(f, &_vdbMaxSteps, "vdb_max_steps", "max steps"); SetRange(f, 64, 1024);
+        Tooltip(f, "Maximum ray march steps per ray.\n"
+                   "256 = default. Increase for very large or\n"
+                   "very dense volumes. Decrease for faster preview.");
+
+        Divider(f, "Emission");
+        Double_knob(f, &_vdbEmissionIntensity, "vdb_emission_intensity", "emission intensity"); SetRange(f, 0, 20);
+        Tooltip(f, "Brightness of blackbody emission.\n"
+                   "0 = no emission, 2 = default fire,\n"
+                   "5-10 = bright explosion.");
+        Double_knob(f, &_vdbTempMin, "vdb_temp_min", "temp min"); SetRange(f, 0, 5000);
+        Tooltip(f, "Temperature at which emission begins (Kelvin).\n"
+                   "500 = dull red, 1000 = orange, 2000 = yellow.");
+        Double_knob(f, &_vdbTempMax, "vdb_temp_max", "temp max"); SetRange(f, 500, 40000);
+        Tooltip(f, "Temperature at full emission brightness.\n"
+                   "6500 = daylight white, 10000+ = blue-white.\n"
+                   "Range maps temperature grid to 0-1 emission.");
+        Double_knob(f, &_vdbFlameIntensity, "vdb_flame_intensity", "flame intensity"); SetRange(f, 0, 20);
+        Tooltip(f, "Brightness multiplier for the flame grid.\n"
+                   "Separate from temperature-based emission.\n"
+                   "5 = default. Set to 0 to disable flame.");
+
+        BeginClosedGroup(f, "vdb_phase", "Phase function (advanced)");
+        {
+            Double_knob(f, &_vdbGForward, "vdb_g_forward", "forward lobe"); SetRange(f, 0, 1);
+            Tooltip(f, "Forward scattering lobe strength.\n"
+                       "0 = isotropic, 0.65 = clouds (default),\n"
+                       "0.9 = strong forward (thin mist).");
+            Double_knob(f, &_vdbGBackward, "vdb_g_backward", "backward lobe"); SetRange(f, -1, 0);
+            Tooltip(f, "Backward scattering lobe strength.\n"
+                       "0 = none, -0.25 = default silver lining,\n"
+                       "-0.5 = strong back-scatter.");
+            Double_knob(f, &_vdbLobeMix, "vdb_lobe_mix", "lobe mix"); SetRange(f, 0, 1);
+            Tooltip(f, "Balance between forward and backward lobes.\n"
+                       "1.0 = pure forward, 0.0 = pure backward,\n"
+                       "0.7 = natural cloud mix (default).");
+            Double_knob(f, &_vdbPowder, "vdb_powder", "powder effect"); SetRange(f, 0, 10);
+            Tooltip(f, "Interior brightening (Schneider & Vos 2015).\n"
+                       "0=off, 2=natural, 6=dense fireball.");
+            Bool_knob(f, &_vdbJitter, "vdb_jitter", "jitter steps");
+            Tooltip(f, "Stochastic step offset to remove banding.");
+        }
+        EndGroup(f);
+
+        BeginClosedGroup(f, "vdb_scatter", "Scatter colour");
+        {
+            Color_knob(f, _vdbScatterColor, "vdb_scatter_color", "scatter color");
+            Tooltip(f, "Tint of scattered light inside the volume.\n"
+                       "White=neutral, warm=fire, blue=atmosphere.");
+        }
+        EndGroup(f);
+    }
+
+    Tab_knob(f, "AOVs");
 
     BeginClosedGroup(f, "aov_grp", "AOV outputs");
     {
@@ -480,6 +620,46 @@ int SpectralRenderIop::knob_changed(Knob* k)
         lk->set_text(buf);
     }
 
+    // VDB auto-sequence
+    if (k->is("vdb_auto_sequence")) {
+        if (_vdbAutoSequence) {
+            std::string p(_vdbFile ? _vdbFile : "");
+            if (Knob* ok = knob("vdb_orig_file")) ok->set_text(p.c_str());
+            if (!p.empty()) {
+                size_t dot = p.rfind(".vdb");
+                if (dot == std::string::npos) dot = p.rfind(".VDB");
+                if (dot != std::string::npos) {
+                    size_t end = dot, start = end;
+                    while (start > 0 && p[start-1] >= '0' && p[start-1] <= '9') --start;
+                    if (start < end) {
+                        int ndig = int(end - start); if (ndig < 4) ndig = 4;
+                        p = p.substr(0, start) + std::string(ndig, '#') + p.substr(end);
+                        if (Knob* fk = knob("vdb_file")) fk->set_text(p.c_str());
+                    }
+                }
+            }
+        } else {
+            const char* orig = _vdbOrigFile ? _vdbOrigFile : "";
+            if (orig[0]) {
+                if (Knob* fk = knob("vdb_file")) fk->set_text(orig);
+                if (Knob* ok = knob("vdb_orig_file")) ok->set_text("");
+            }
+        }
+        return 1;
+    }
+    if (k->is("vdb_frame_offset") || k->is("vdb_file")) {
+        _frameReady.store(false);
+        _vdbPreviewDirty = true;
+        _vdbPreviewPoints.clear();
+        _vdbLoadedPath.clear();  // force reload
+        return 1;
+    }
+    if (k->is("vdb_show_points") || k->is("vdb_point_density") || k->is("vdb_point_size") || k->is("vdb_show_bbox")) {
+        _vdbPreviewDirty = true;
+        _vdbPreviewPoints.clear();
+        return 1;
+    }
+
     // Sky preset
     if (k->is("sky_preset")) {
         switch (_skyPreset) {
@@ -507,6 +687,7 @@ int SpectralRenderIop::knob_changed(Knob* k)
             case 1: _studioKeyAzimuth=45; _studioKeyElevation=30; _studioKeyIntensity=4; _studioFillRatio=0.5; _studioRimIntensity=1.5; _studioMix=1; break; // Portrait
             case 2: _studioKeyAzimuth=60; _studioKeyElevation=40; _studioKeyIntensity=6; _studioFillRatio=0.3; _studioRimIntensity=3; _studioMix=1; break; // Product
             case 3: _studioKeyAzimuth=80; _studioKeyElevation=45; _studioKeyIntensity=8; _studioFillRatio=0.1; _studioRimIntensity=4; _studioMix=1; break; // Dramatic
+            case 4: _studioKeyAzimuth=30; _studioKeyElevation=25; _studioKeyIntensity=3; _studioFillRatio=0.6; _studioRimIntensity=1; _studioMix=1; _shadowSoftness=0.5; break; // Softbox
             default: break;
         }
         if (Knob* mk = knob("studio_mix")) mk->set_value(_studioMix);
@@ -515,6 +696,7 @@ int SpectralRenderIop::knob_changed(Knob* k)
         if (Knob* mk = knob("studio_key_intensity")) mk->set_value(_studioKeyIntensity);
         if (Knob* mk = knob("studio_fill_ratio")) mk->set_value(_studioFillRatio);
         if (Knob* mk = knob("studio_rim_intensity")) mk->set_value(_studioRimIntensity);
+        if (Knob* mk = knob("shadow_softness")) mk->set_value(_shadowSoftness);
         return 1;
     }
 
@@ -652,6 +834,9 @@ void SpectralRenderIop::_validate(bool forReal)
         _frameReady.store(false);
         _progressiveSppDone = 0;
     }
+
+    // Load VDB outside forReal — viewport needs it even without rendering
+    _LoadVDB();
 
     // Deep output info: construct from flat IopInfo, which copies format/bbox/channels.
     // The IopInfo-based DeepInfo constructor handles everything.
@@ -2359,6 +2544,256 @@ void SpectralRenderIop::_BuildCameraFromInput()
 // _EnsureFrameRendered
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
+// _resolveFramePath — substitute frame number into VDB path
+// ---------------------------------------------------------------------------
+std::string SpectralRenderIop::_resolveFramePath(int frame) const
+{
+    std::string p(_vdbFile ? _vdbFile : "");
+    if (p.empty()) return p;
+
+    // #### padding
+    size_t h = p.find('#');
+    if (h != std::string::npos) {
+        size_t he = h;
+        while (he < p.size() && p[he] == '#') ++he;
+        char buf[64];
+        std::snprintf(buf, 64, "%0*d", int(he - h), frame);
+        p.replace(h, he - h, buf);
+        return p;
+    }
+
+    // %04d style
+    size_t pc = p.find('%');
+    if (pc != std::string::npos) {
+        size_t s = pc + 1;
+        if (s < p.size() && p[s] == '0') ++s;
+        while (s < p.size() && p[s] >= '0' && p[s] <= '9') ++s;
+        if (s < p.size() && p[s] == 'd') {
+            char buf[64];
+            std::snprintf(buf, 64, p.substr(pc, s - pc + 1).c_str(), frame);
+            p.replace(pc, s - pc + 1, buf);
+            return p;
+        }
+    }
+
+    // Numeric suffix before .vdb
+    size_t dot = p.rfind('.');
+    if (dot == std::string::npos) dot = p.size();
+    size_t ne = dot, ns = ne;
+    while (ns > 0 && p[ns-1] >= '0' && p[ns-1] <= '9') --ns;
+    if (ns < ne) {
+        char buf[64];
+        std::snprintf(buf, 64, "%0*d", int(ne - ns), frame);
+        p.replace(ns, ne - ns, buf);
+    }
+    return p;
+}
+
+// ---------------------------------------------------------------------------
+// append — include frame and VDB path in hash
+// ---------------------------------------------------------------------------
+void SpectralRenderIop::append(Hash& hash)
+{
+    hash.append(outputContext().frame());
+    hash.append(_vdbFrameOffset);
+    if (_vdbFile) hash.append(_vdbFile);
+}
+
+// ---------------------------------------------------------------------------
+// build_handles / draw_handle — wireframe bbox + point cloud in 3D viewport
+// ---------------------------------------------------------------------------
+void SpectralRenderIop::build_handles(ViewerContext* ctx)
+{
+    if (ctx->transform_mode() == VIEWER_2D) return;
+    add_draw_handle(ctx);
+}
+
+void SpectralRenderIop::draw_handle(ViewerContext* ctx)
+{
+    if (!_volume || !_volume->IsValid()) {
+        // Only warn once per state change
+        static bool warned = false;
+        if (!warned) {
+            fprintf(stderr, "SpectralVDB viewport: no volume loaded\n");
+            warned = true;
+        }
+        return;
+    }
+    // Reset warning flag when volume exists
+
+    glPushAttrib(GL_CURRENT_BIT | GL_LINE_BIT | GL_ENABLE_BIT | GL_POINT_BIT);
+    glDisable(GL_LIGHTING);
+
+    // 8 corners of volume bbox
+    float co[8][3];
+    for (int i = 0; i < 8; ++i) {
+        co[i][0] = (i & 1) ? _volume->bboxMax[0] : _volume->bboxMin[0];
+        co[i][1] = (i & 2) ? _volume->bboxMax[1] : _volume->bboxMin[1];
+        co[i][2] = (i & 4) ? _volume->bboxMax[2] : _volume->bboxMin[2];
+    }
+
+    static const int edges[12][2] = {
+        {0,1},{2,3},{4,5},{6,7},
+        {0,2},{1,3},{4,6},{5,7},
+        {0,4},{1,5},{2,6},{3,7}
+    };
+
+    if (_vdbShowBbox) {
+        // Green wireframe bbox
+        glLineWidth(1.5f);
+        glColor3f(0.0f, 1.0f, 0.0f);
+        glBegin(GL_LINES);
+        for (int e = 0; e < 12; ++e) {
+            glVertex3fv(co[edges[e][0]]);
+            glVertex3fv(co[edges[e][1]]);
+        }
+        glEnd();
+
+        // Yellow center cross
+        float cx = 0, cy = 0, cz = 0;
+        for (int i = 0; i < 8; ++i) { cx += co[i][0]; cy += co[i][1]; cz += co[i][2]; }
+        cx /= 8; cy /= 8; cz /= 8;
+        float sz = (_volume->bboxMax - _volume->bboxMin).GetLength() * 0.03f;
+        glColor3f(1.0f, 1.0f, 0.0f);
+        glBegin(GL_LINES);
+        glVertex3f(cx - sz, cy, cz); glVertex3f(cx + sz, cy, cz);
+        glVertex3f(cx, cy - sz, cz); glVertex3f(cx, cy + sz, cz);
+        glVertex3f(cx, cy, cz - sz); glVertex3f(cx, cy, cz + sz);
+        glEnd();
+    } else {
+        // Invisible bbox for F-key framing
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glLineWidth(0.5f);
+        glColor4f(0.2f, 0.2f, 0.2f, 0.01f);
+        glBegin(GL_LINES);
+        for (int e = 0; e < 12; ++e) {
+            glVertex3fv(co[edges[e][0]]);
+            glVertex3fv(co[edges[e][1]]);
+        }
+        glEnd();
+    }
+
+    // Point cloud preview
+    if (_vdbShowPoints) {
+        if (_vdbPreviewDirty || _vdbPreviewPoints.empty()) {
+            _vdbPreviewPoints.clear();
+            _vdbMaxDensity = 1e-6f;
+
+            pxr::GfVec3f bMin = _volume->bboxMin;
+            pxr::GfVec3f bSize = _volume->bboxMax - _volume->bboxMin;
+
+            float skip = std::max(1.f, 1.f / float(std::max(0.05, _vdbPointDensity)));
+            int step = std::max(1, int(skip));
+
+            for (int iz = 0; iz < _volume->resZ; iz += step) {
+                for (int iy = 0; iy < _volume->resY; iy += step) {
+                    for (int ix = 0; ix < _volume->resX; ix += step) {
+                        float u = float(ix) / float(_volume->resX);
+                        float v = float(iy) / float(_volume->resY);
+                        float w = float(iz) / float(_volume->resZ);
+                        float d = _volume->SampleDensity(u, v, w);
+                        if (d < 0.01f) continue;
+
+                        VDBPreviewPoint pt;
+                        pt.x = bMin[0] + u * bSize[0];
+                        pt.y = bMin[1] + v * bSize[1];
+                        pt.z = bMin[2] + w * bSize[2];
+                        pt.density = d;
+                        if (d > _vdbMaxDensity) _vdbMaxDensity = d;
+                        _vdbPreviewPoints.push_back(pt);
+                    }
+                }
+            }
+            _vdbPreviewDirty = false;
+            fprintf(stderr, "SpectralVDB viewport: built %zu preview points (maxDensity=%.3f)\n",
+                    _vdbPreviewPoints.size(), _vdbMaxDensity);
+        }
+
+        if (!_vdbPreviewPoints.empty()) {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+            glPointSize(float(_vdbPointSize));
+            glEnable(GL_POINT_SMOOTH);
+            float inv = 1.f / _vdbMaxDensity;
+
+            glBegin(GL_POINTS);
+            for (const auto& pt : _vdbPreviewPoints) {
+                float t = std::min(pt.density * inv, 1.f);
+                // Heat ramp: black → red → orange → yellow → white
+                float r = std::min(t * 3.f, 1.f);
+                float g = std::max(0.f, std::min((t - 0.33f) * 3.f, 1.f));
+                float b = std::max(0.f, std::min((t - 0.66f) * 3.f, 1.f));
+                float a = 0.15f + 0.85f * t;
+                glColor4f(r, g, b, a);
+                glVertex3f(pt.x, pt.y, pt.z);
+            }
+            glEnd();
+            glDisable(GL_BLEND);
+        }
+    }
+
+    glPopAttrib();
+}
+
+// ---------------------------------------------------------------------------
+// _LoadVDB — load OpenVDB file and resample to uniform grid
+// ---------------------------------------------------------------------------
+void SpectralRenderIop::_LoadVDB()
+{
+#ifdef SPECTRAL_HAS_VDB
+    if (!_vdbFile || strlen(_vdbFile) == 0) {
+        if (_volume) {
+            fprintf(stderr, "SpectralVDB: file path cleared\n");
+            _volume.reset();
+        }
+        return;
+    }
+
+    // Resolve frame path for sequences, or use as-is for single files
+    int frame = int(outputContext().frame()) + _vdbFrameOffset;
+    std::string resolvedPath = _vdbAutoSequence
+        ? _resolveFramePath(frame)
+        : std::string(_vdbFile);
+    if (resolvedPath.empty()) return;
+
+    // Only reload if path or frame changed
+    if (_volume && _volume->IsValid() && _vdbLoadedPath == resolvedPath) return;
+
+    fprintf(stderr, "SpectralVDB: loading '%s' (frame %d)\n", resolvedPath.c_str(), frame);
+
+    _volume = pxr::SpectralVDBLoader::Load(resolvedPath.c_str());
+
+    if (_volume) {
+        _vdbLoadedPath = resolvedPath;
+        _vdbPreviewDirty = true;
+        _vdbPreviewPoints.clear();
+        fprintf(stderr, "SpectralVDB: loaded OK — %dx%dx%d, bbox (%.2f,%.2f,%.2f)→(%.2f,%.2f,%.2f)\n",
+                _volume->resX, _volume->resY, _volume->resZ,
+                _volume->bboxMin[0], _volume->bboxMin[1], _volume->bboxMin[2],
+                _volume->bboxMax[0], _volume->bboxMax[1], _volume->bboxMax[2]);
+        // Copy shading params from knobs
+        _volume->extinction = float(_vdbExtinction);
+        _volume->scattering = float(_vdbScattering);
+        _volume->densityMult = float(_vdbDensityMult);
+        _volume->anisotropy = float(_vdbAnisotropy);
+        _volume->emissionIntensity = float(_vdbEmissionIntensity);
+        _volume->tempMin = float(_vdbTempMin);
+        _volume->tempMax = float(_vdbTempMax);
+        _volume->stepSize = float(_vdbStepSize);
+        _volume->gForward = float(_vdbGForward);
+        _volume->gBackward = float(_vdbGBackward);
+        _volume->lobeMix = float(_vdbLobeMix);
+        _volume->powderStrength = float(_vdbPowder);
+        _volume->jitter = _vdbJitter;
+        _volume->scatterColor = pxr::GfVec3f(_vdbScatterColor[0], _vdbScatterColor[1], _vdbScatterColor[2]);
+    }
+#else
+    fprintf(stderr, "SpectralVDB: SPECTRAL_HAS_VDB is NOT defined — VDB support not compiled\n");
+#endif
+}
+
+// ---------------------------------------------------------------------------
 // _BuildLightRig — sun/sky + studio lights (Preetham model)
 // ---------------------------------------------------------------------------
 static void sunColorFromElevation(double elev, double turbidity, double& r, double& g, double& b) {
@@ -2396,19 +2831,27 @@ void SpectralRenderIop::_BuildLightRig()
     if (!_scene) return;
 
     // Sun/sky (Preetham analytical model)
-    if (_skyMix > 0.001) {
+    if (_skyPreset > 0 && _skyMix > 0.001) {
         double m = _skyMix;
         double sunR, sunG, sunB, skyR, skyG, skyB;
         sunColorFromElevation(_sunElevation, _turbidity, sunR, sunG, sunB);
         skyColorFromElevation(_sunElevation, _turbidity, skyR, skyG, skyB);
         GfVec3f sunDir = dirFromElevAzim(_sunElevation, _sunAzimuth);
 
-        // Direct sun
+        // Direct sun — use sphere light for soft shadows
         double si = _sunIntensity * std::max(0.1, std::min(_sunElevation / 15.0, 1.0)) * m;
         if (si > 0.001) {
             SpectralLight sun;
-            sun.type = SpectralLight::Type::Distant;
-            sun.direction = sunDir;
+            if (_shadowSoftness > 0.01) {
+                // Sphere light at distance for soft shadows
+                sun.type = SpectralLight::Type::Sphere;
+                float dist = 500.f;
+                sun.position = GfVec3f(sunDir[0]*-dist, sunDir[1]*-dist, sunDir[2]*-dist);
+                sun.radius = float(_shadowSoftness * 50.f);
+            } else {
+                sun.type = SpectralLight::Type::Distant;
+                sun.direction = sunDir;
+            }
             sun.color = GfVec3f(float(sunR * si), float(sunG * si), float(sunB * si));
             sun.intensity = 1.f;
             _scene->AddLight(sun);
@@ -2426,15 +2869,23 @@ void SpectralRenderIop::_BuildLightRig()
     }
 
     // Studio three-point rig
-    if (_studioMix > 0.001) {
+    if (_studioPreset > 0 && _studioMix > 0.001) {
         double m = _studioMix;
         double ki = _studioKeyIntensity * m;
 
-        // Key light (slightly warm)
+        // Key light (slightly warm) — sphere for soft shadows
         if (ki > 0.001) {
             SpectralLight key;
-            key.type = SpectralLight::Type::Distant;
-            key.direction = dirFromElevAzim(_studioKeyElevation, _studioKeyAzimuth);
+            GfVec3f keyDir = dirFromElevAzim(_studioKeyElevation, _studioKeyAzimuth);
+            if (_shadowSoftness > 0.01) {
+                key.type = SpectralLight::Type::Sphere;
+                float dist = 500.f;
+                key.position = GfVec3f(keyDir[0]*-dist, keyDir[1]*-dist, keyDir[2]*-dist);
+                key.radius = float(_shadowSoftness * 50.f);
+            } else {
+                key.type = SpectralLight::Type::Distant;
+                key.direction = keyDir;
+            }
             key.color = GfVec3f(float(ki), float(ki * 0.95), float(ki * 0.9));
             key.intensity = 1.f;
             _scene->AddLight(key);
@@ -2475,11 +2926,15 @@ void SpectralRenderIop::_EnsureFrameRendered()
     std::lock_guard<std::mutex> lock(_renderMutex);
     if (_frameReady.load()) return;
 
-    // Skip if no scene loaded or empty
-    if (!_scene || _scene->TotalTriangles() == 0) {
+    // Skip if no scene content (no geometry AND no volume)
+    bool hasGeometry = _scene && _scene->TotalTriangles() > 0;
+    bool hasVolume = _volume && _volume->IsValid();
+    if (!hasGeometry && !hasVolume) {
         _frameReady.store(true);
         return;
     }
+    // Create scene if needed (volume-only, no geometry loaded)
+    if (!_scene) _scene = std::make_unique<pxr::SpectralScene>();
 
     // Use the format from info_ (set by _validate from BG or format knob)
     const Format* fmtPtr = &(info_.format());
@@ -2572,11 +3027,25 @@ void SpectralRenderIop::_EnsureFrameRendered()
     // Add built-in sun/sky and studio lights
     _BuildLightRig();
 
+    // If volume loaded but no lights at all, add a default dome
+    // so the volume is visible (extinction + scatter need light)
+    if (_volume && _volume->IsValid() && !_scene->HasLights()) {
+        pxr::SpectralLight defaultDome;
+        defaultDome.type = pxr::SpectralLight::Type::Dome;
+        defaultDome.color = pxr::GfVec3f(0.5f);
+        defaultDome.intensity = 1.f;
+        _scene->AddLight(defaultDome);
+        fprintf(stderr, "SpectralRender: added default dome light for volume (enable Lighting tab for better results)\n");
+    }
+
+    // Load VDB volume if specified
+    _LoadVDB();
+
 #ifdef SPECTRAL_HAS_OPTIX
     if (useGPU) {
         SpectralIntegrator::RenderFrameGPU(*_scene, cam, _frameBuffer.data(),
                                             renderSpp, _depthBuffer.data(), _maxBounces,
-                                            _colorSpace);
+                                            _colorSpace, _volume.get());
         // Note: GPU caustics use CPU gathering pass below
     } else
 #endif
@@ -2600,7 +3069,7 @@ void SpectralRenderIop::_EnsureFrameRendered()
                                          renderSpp, _depthBuffer.data(), _maxBounces,
                                          _objectIdBuffer.data(), _materialIdBuffer.data(),
                                          &aovBufs, nullptr, pmap, _causticRadius,
-                                         _colorSpace);
+                                         _colorSpace, _volume.get());
     }
 
     // Denoise — works for both GPU and CPU renders
@@ -2648,7 +3117,8 @@ void SpectralRenderIop::_EnsureFrameRendered()
             SpectralIntegrator::RenderFrame(*_scene, cam, dummyPixels.data(),
                                              aovSpp, nullptr, _maxBounces,
                                              nullptr, nullptr, &aovBufs, nullptr,
-                                             pmap, _causticRadius, _colorSpace);
+                                             pmap, _causticRadius, _colorSpace,
+                                             _volume.get());
 
             fprintf(stderr, "SpectralRender: shading AOVs computed (%d spp CPU pass)\n", aovSpp);
         }

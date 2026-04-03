@@ -8,9 +8,6 @@
       <FullPath>C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\x64\Release\SpectralPTX</FullPath>
     </ProjectOutput>
     <ProjectOutput>
-      <FullPath>C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\HdSpectral\HdSpectral.dll</FullPath>
-    </ProjectOutput>
-    <ProjectOutput>
       <FullPath>C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralRender\SpectralRender.dll</FullPath>
     </ProjectOutput>
     <ProjectOutput>

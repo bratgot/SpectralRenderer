@@ -290,8 +290,19 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
 
     _triCount = static_cast<unsigned int>(vertices.size() / 3);
     if (_triCount == 0) {
-        fprintf(stderr, "SpectralGPU: no triangles to build\n");
-        return true;
+        fprintf(stderr, "SpectralGPU: no triangles — creating dummy GAS for volume\n");
+        // Add a degenerate triangle far away so GAS/traversable is valid
+        vertices.push_back(make_float3(1e10f, 1e10f, 1e10f));
+        vertices.push_back(make_float3(1e10f, 1e10f+0.001f, 1e10f));
+        vertices.push_back(make_float3(1e10f+0.001f, 1e10f, 1e10f));
+        normals.push_back(make_float3(0, 0, 1));
+        normals.push_back(make_float3(0, 0, 1));
+        normals.push_back(make_float3(0, 0, 1));
+        matIds.push_back(0);
+        uvs.push_back(make_float2(0, 0));
+        uvs.push_back(make_float2(1, 0));
+        uvs.push_back(make_float2(0, 1));
+        _triCount = 1;
     }
 
     // Upload vertices
@@ -502,7 +513,7 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
 bool SpectralGPU::Render(const SpectralCamera& camera,
                           unsigned int width, unsigned int height,
                           float* pixels, float* depth, int spp, int maxBounces,
-                          int colorSpace)
+                          int colorSpace, const SpectralVolume* volume)
 {
     if (!_pipeline || !_gasHandle) return false;
     if (width == 0 || height == 0) return false;
@@ -554,6 +565,51 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     launchParams.textures     = reinterpret_cast<spectral_gpu::GPUTexture*>(_d_textures);
     launchParams.textureCount = _textureCount;
     launchParams.blueNoise    = camera.blueNoise ? 1 : 0;
+
+    // Volume data
+    launchParams.hasVolume = 0;
+    launchParams.volumeDensity = nullptr;
+    launchParams.volumeTemperature = nullptr;
+    if (volume && volume->IsValid()) {
+        launchParams.hasVolume = 1;
+        launchParams.volResX = volume->resX;
+        launchParams.volResY = volume->resY;
+        launchParams.volResZ = volume->resZ;
+        launchParams.volBboxMin = make_float3(volume->bboxMin[0], volume->bboxMin[1], volume->bboxMin[2]);
+        launchParams.volBboxMax = make_float3(volume->bboxMax[0], volume->bboxMax[1], volume->bboxMax[2]);
+        launchParams.volExtinction = volume->extinction;
+        launchParams.volScattering = volume->scattering;
+        launchParams.volDensityMult = volume->densityMult;
+        launchParams.volGForward = volume->gForward;
+        launchParams.volEmissionIntensity = volume->emissionIntensity;
+        launchParams.volTempMin = volume->tempMin;
+        launchParams.volTempMax = volume->tempMax;
+        launchParams.volPowder = volume->powderStrength;
+        launchParams.volScatterColor = make_float3(volume->scatterColor[0], volume->scatterColor[1], volume->scatterColor[2]);
+        launchParams.volStepSize = volume->stepSize;
+        launchParams.volJitter = volume->jitter ? 1 : 0;
+
+        size_t densBytes = volume->density.size() * sizeof(float);
+        if (_d_volumeDensity) cudaFree(reinterpret_cast<void*>(_d_volumeDensity));
+        _d_volumeDensity = 0;
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_volumeDensity), densBytes));
+        CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_volumeDensity), volume->density.data(),
+                              densBytes, cudaMemcpyHostToDevice));
+        launchParams.volumeDensity = reinterpret_cast<float*>(_d_volumeDensity);
+
+        if (!volume->temperature.empty()) {
+            size_t tempBytes = volume->temperature.size() * sizeof(float);
+            if (_d_volumeTemp) cudaFree(reinterpret_cast<void*>(_d_volumeTemp));
+            _d_volumeTemp = 0;
+            CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_volumeTemp), tempBytes));
+            CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_volumeTemp), volume->temperature.data(),
+                                  tempBytes, cudaMemcpyHostToDevice));
+            launchParams.volumeTemperature = reinterpret_cast<float*>(_d_volumeTemp);
+        }
+
+        fprintf(stderr, "SpectralGPU: volume uploaded %dx%dx%d (%.1f MB)\n",
+                volume->resX, volume->resY, volume->resZ, densBytes / (1024.f * 1024.f));
+    }
 
     // projInverse: CPU uses M*v (column-vector), copy as-is
     // viewToWorld: CPU uses v*M (row-vector via Transform), so transpose for GPU
