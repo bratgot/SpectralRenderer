@@ -371,21 +371,42 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         String_knob(f, &_vdbOrigFile, "vdb_orig_file", "");
         SetFlags(f, Knob::INVISIBLE);
 
-        Divider(f, "3D Viewport");
+        Divider(f, "Viewport preview");
+        Bool_knob(f, &_vdbShowBbox, "vdb_show_bbox", "bbox");
+        Tooltip(f, "Green wireframe bounding box around the volume.");
+        Bool_knob(f, &_vdbShowPoints, "vdb_show_points", "points");
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Point cloud preview — denser regions appear\n"
+                   "brighter with a heat-map colour ramp.");
+        Double_knob(f, &_vdbPointDensity, "vdb_point_density", "density");
+        ClearFlags(f, Knob::STARTLINE);
+        SetRange(f, 0.1, 1.0);
+        Tooltip(f, "Proportion of voxels to sample as points.\n"
+                   "0.1 = sparse/fast, 1.0 = every voxel.");
+        Double_knob(f, &_vdbPointSize, "vdb_point_size", "size");
+        ClearFlags(f, Knob::STARTLINE);
+        SetRange(f, 1, 8);
+        Tooltip(f, "GL point size in pixels.");
+
+        Newline(f);
         Bool_knob(f, &_vdbFastScrub, "vdb_fast_scrub", "fast scrub");
-        Tooltip(f, "When enabled, timeline scrubbing only reads\n"
-                   "VDB file headers (~1ms) instead of loading\n"
-                   "full voxel data (~200ms). Shows bbox only\n"
-                   "during scrub, full points when stopped.\n"
+        Tooltip(f, "Bbox-only during timeline scrub (~1ms per frame).\n"
+                   "Full point cloud loads when playback stops.\n"
                    "Disable for real-time point cloud updates.");
-        Bool_knob(f, &_vdbShowBbox, "vdb_show_bbox", "show bbox");
+        Bool_knob(f, &_vdbCacheEnabled, "vdb_cache_enabled", "cache");
         ClearFlags(f, Knob::STARTLINE);
-        Bool_knob(f, &_vdbShowPoints, "vdb_show_points", "show points");
+        Tooltip(f, "Cache recently visited VDB frames in memory.\n"
+                   "Scrubbing back to a cached frame is instant.");
+        Int_knob(f, &_vdbCacheMax, "vdb_cache_max", "");
         ClearFlags(f, Knob::STARTLINE);
-        Double_knob(f, &_vdbPointDensity, "vdb_point_density", "point density"); SetRange(f, 0.1, 1.0);
+        SetRange(f, 1, 32);
+        Tooltip(f, "Number of VDB frames to keep in memory.\n"
+                   "Each preview frame ≈ 1 MB, render frame ≈ 8 MB.");
+        Text_knob(f, "frames");
         ClearFlags(f, Knob::STARTLINE);
-        Double_knob(f, &_vdbPointSize, "vdb_point_size", "point size"); SetRange(f, 1, 8);
+        Button(f, "vdb_cache_clear", "Clear Cache");
         ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Free all cached VDB frames from memory.");
 
         Divider(f, "Grids");
         Button(f, "discover_grids", "Discover Grids");
@@ -679,7 +700,15 @@ int SpectralRenderIop::knob_changed(Knob* k)
     }
     if (k->is("vdb_show_points") || k->is("vdb_point_density") || k->is("vdb_point_size") || k->is("vdb_show_bbox") || k->is("vdb_fast_scrub")) {
         _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
-        if (k->is("vdb_fast_scrub")) _vdbLoadedPath.clear(); // force reload with new mode
+        if (k->is("vdb_fast_scrub")) _vdbLoadedPath.clear();
+        return 1;
+    }
+    if (k->is("vdb_cache_clear")) {
+        _vdbCache.clear(); _vdbCacheLRU.clear();
+        return 1;
+    }
+    if (k->is("vdb_cache_enabled") && !_vdbCacheEnabled) {
+        _vdbCache.clear(); _vdbCacheLRU.clear();
         return 1;
     }
     if (k->is("discover_grids")) {
@@ -2802,12 +2831,25 @@ void SpectralRenderIop::_LoadVDB()
             : std::string(_vdbFile);
         if (!resolvedPath.empty()) {
             if (!_volume || !_volume->IsValid() || _vdbLoadedPath != resolvedPath) {
-                if (_vdbFastScrub) {
+                // Check LRU cache first — instant if recently visited
+                VDBCacheEntry* cached = _VDBCacheGet(resolvedPath);
+                if (cached) {
+                    _volume = cached->volume;
+                    _vdbIsPreviewRes = cached->isPreviewRes;
+                    _vdbIsMetadataOnly = cached->isMetadataOnly;
+                    _vdbLoadedPath = resolvedPath;
+                    _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
+                } else if (_vdbFastScrub) {
                     // Metadata only — just bbox, ~1ms
                     _volume = pxr::SpectralVDBLoader::LoadMetadataOnly(resolvedPath.c_str(),
                         _VdbGridName(_vdbDensityGridIdx, _vdbDensityOverride));
                     _vdbIsMetadataOnly = true;
                     _vdbIsPreviewRes = true;
+                    if (_volume) {
+                        _vdbLoadedPath = resolvedPath;
+                        _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
+                        _VDBCachePut(resolvedPath, _volume, true, true);
+                    }
                 } else {
                     // Full load at viewport res (64³)
                     _volume = pxr::SpectralVDBLoader::Load(resolvedPath.c_str(),
@@ -2816,10 +2858,11 @@ void SpectralRenderIop::_LoadVDB()
                         64);
                     _vdbIsMetadataOnly = false;
                     _vdbIsPreviewRes = true;
-                }
-                if (_volume) {
-                    _vdbLoadedPath = resolvedPath;
-                    _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
+                    if (_volume) {
+                        _vdbLoadedPath = resolvedPath;
+                        _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
+                        _VDBCachePut(resolvedPath, _volume, true, false);
+                    }
                 }
             }
             return;
@@ -2855,15 +2898,27 @@ void SpectralRenderIop::_LoadVDBForRender()
             ? _resolveFramePath(frame)
             : std::string(_vdbFile);
         if (!resolvedPath.empty()) {
+            // Check if a full-res version is in cache
+            std::string renderKey = resolvedPath + ":128";
+            VDBCacheEntry* cached = _VDBCacheGet(renderKey);
+            if (cached && !cached->isPreviewRes && !cached->isMetadataOnly) {
+                _volume = cached->volume;
+                _vdbIsPreviewRes = false;
+                _vdbIsMetadataOnly = false;
+                _vdbLoadedPath = resolvedPath;
+                _applyVolumeShading(_volume);
+                return;
+            }
             _volume = pxr::SpectralVDBLoader::Load(resolvedPath.c_str(),
                 _VdbGridName(_vdbDensityGridIdx, _vdbDensityOverride),
                 _VdbGridName(_vdbTempGridIdx, _vdbTempOverride),
-                128);  // full render resolution
+                128);
             _vdbIsPreviewRes = false;
             _vdbIsMetadataOnly = false;
             if (_volume) {
                 _vdbLoadedPath = resolvedPath;
                 _applyVolumeShading(_volume);
+                _VDBCachePut(renderKey, _volume, false, false);
             }
         }
     }
@@ -2889,6 +2944,37 @@ void SpectralRenderIop::_applyVolumeShading(std::shared_ptr<pxr::SpectralVolume>
     vol->powderStrength = float(_vdbPowder);
     vol->jitter = _vdbJitter;
     vol->scatterColor = pxr::GfVec3f(_vdbScatterColor[0], _vdbScatterColor[1], _vdbScatterColor[2]);
+}
+
+// ---------------------------------------------------------------------------
+// VDB frame cache — LRU with 8 entries for instant scrub-back
+// ---------------------------------------------------------------------------
+void SpectralRenderIop::_VDBCachePut(const std::string& path,
+    std::shared_ptr<pxr::SpectralVolume> vol, bool preview, bool meta)
+{
+    if (!_vdbCacheEnabled) return;
+    _vdbCacheLRU.erase(
+        std::remove(_vdbCacheLRU.begin(), _vdbCacheLRU.end(), path),
+        _vdbCacheLRU.end());
+    while ((int)_vdbCacheLRU.size() >= _vdbCacheMax) {
+        _vdbCache.erase(_vdbCacheLRU.front());
+        _vdbCacheLRU.erase(_vdbCacheLRU.begin());
+    }
+    _vdbCache[path] = {vol, preview, meta};
+    _vdbCacheLRU.push_back(path);
+}
+
+SpectralRenderIop::VDBCacheEntry* SpectralRenderIop::_VDBCacheGet(const std::string& path)
+{
+    if (!_vdbCacheEnabled) return nullptr;
+    auto it = _vdbCache.find(path);
+    if (it == _vdbCache.end()) return nullptr;
+    // Move to back of LRU
+    _vdbCacheLRU.erase(
+        std::remove(_vdbCacheLRU.begin(), _vdbCacheLRU.end(), path),
+        _vdbCacheLRU.end());
+    _vdbCacheLRU.push_back(path);
+    return &it->second;
 }
 
 // ---------------------------------------------------------------------------

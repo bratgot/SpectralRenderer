@@ -20,6 +20,7 @@ PXR_NAMESPACE_USING_DIRECTIVE
 #include <DDImage/DeepOp.h>
 #include <DDImage/Knobs.h>
 #include <DDImage/Row.h>
+#include <map>
 #include <DDImage/Format.h>
 #include <DDImage/ViewerContext.h>
 #include <DDImage/gl.h>
@@ -197,7 +198,18 @@ private:
     bool   _vdbIsMetadataOnly = false;  // true when only bbox loaded (fast scrub)
     int    _vdbLastLoadedFrame = -999;  // cached to avoid reload
 
-    // VDB viewport preview (kept in first declaration above)
+    // LRU frame cache — instant scrub-back for recently visited frames
+    bool   _vdbCacheEnabled = true;
+    int    _vdbCacheMax = 8;
+    struct VDBCacheEntry {
+        std::shared_ptr<pxr::SpectralVolume> volume;
+        bool isPreviewRes;
+        bool isMetadataOnly;
+    };
+    std::map<std::string, VDBCacheEntry> _vdbCache;
+    std::vector<std::string> _vdbCacheLRU;  // most recent at back
+    void _VDBCachePut(const std::string& path, std::shared_ptr<pxr::SpectralVolume> vol, bool preview, bool meta);
+    VDBCacheEntry* _VDBCacheGet(const std::string& path);
 
     int   _tileSize   = 64;
     int   _deviceMode = 0;         // 0=cpu, 1=gpu, 2=auto
