@@ -201,12 +201,13 @@ void SpectralIntegrator::RenderFrame(
                                 GfVec3f hitPos = GfVec3f(worldHit);
                                 GfVec3f rayDir = GfVec3f(ray.GetDirection());
                                 unsigned int bounceSeed = seed + 100u;
+                                int shadeBounces = std::max(maxBounces, camera.refractionBounces);
                                 radiance = _ShadeSpectral(
                                     *hit.tri,
                                     static_cast<double>(hit.u),
                                     static_cast<double>(hit.v),
                                     lambda, mat, scene, hitPos, rayDir,
-                                    maxBounces, bounceSeed, bvh, rayTime, &comps,
+                                    shadeBounces, bounceSeed, bvh, rayTime, &comps,
                                     photonMap, gatherRadius);
 
                                 GfVec3d viewHit = worldToView.Transform(worldHit);

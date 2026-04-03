@@ -271,6 +271,59 @@ void SpectralRenderIop::knobs(Knob_Callback f)
     }
     EndGroup(f);
 
+    BeginClosedGroup(f, "light_grp", "Built-in lighting");
+    {
+        static const char* const skyP[] = {"Off", "Custom", "Day Sky", "Golden Hour", "Overcast", "Blue Hour", "Night", nullptr};
+        Enumeration_knob(f, &_skyPreset, skyP, "sky_preset", "Sky Preset");
+        Tooltip(f, "Analytical sun/sky lighting (Preetham model).\n"
+                   "Off = disabled, Day Sky = noon clear,\n"
+                   "Golden Hour = warm sunset,\n"
+                   "Overcast = soft cloudy dome,\n"
+                   "Blue Hour = cool twilight, Night = moonlit.\n"
+                   "Composes with scene lights from the scn input.");
+        Double_knob(f, &_skyMix, "sky_mix", "sky mix"); SetRange(f, 0, 2);
+        Tooltip(f, "Master brightness for sun and sky.\n"
+                   "0 = disabled, 1 = natural, 2 = overbright.");
+
+        BeginClosedGroup(f, "grp_sun", "Sun and sky settings");
+        {
+            Double_knob(f, &_sunElevation, "sun_elevation", "sun elevation"); SetRange(f, 0, 90);
+            Tooltip(f, "Sun angle above horizon (degrees).\n"
+                       "90 = noon, 45 = afternoon, 10 = sunset.");
+            Double_knob(f, &_sunAzimuth, "sun_azimuth", "sun azimuth"); SetRange(f, 0, 360);
+            Tooltip(f, "Sun compass direction (0=north, 90=east, 180=south).");
+            Double_knob(f, &_sunIntensity, "sun_intensity", "sun intensity"); SetRange(f, 0, 20);
+            Double_knob(f, &_skyIntensity, "sky_intensity", "sky fill"); SetRange(f, 0, 5);
+            Tooltip(f, "Ambient sky dome brightness (fill light from above).");
+            Double_knob(f, &_turbidity, "turbidity", "turbidity"); SetRange(f, 2, 10);
+            Tooltip(f, "Atmospheric haze. 2 = clear, 5 = hazy, 10 = heavy smog.\n"
+                       "Higher = warmer sun, greyer sky.");
+        }
+        EndGroup(f);
+
+        Divider(f, "Studio lights");
+        static const char* const stuP[] = {"Off", "Portrait", "Product", "Dramatic", nullptr};
+        Enumeration_knob(f, &_studioPreset, stuP, "studio_preset", "Studio Preset");
+        Tooltip(f, "Three-point studio light rig.\n"
+                   "Portrait = soft key/fill, subtle rim.\n"
+                   "Product = bright key, strong rim.\n"
+                   "Dramatic = hard single key, dark fill.");
+        Double_knob(f, &_studioMix, "studio_mix", "studio mix"); SetRange(f, 0, 2);
+
+        BeginClosedGroup(f, "grp_studio", "Studio light settings");
+        {
+            Double_knob(f, &_studioKeyAzimuth, "studio_key_azimuth", "key azimuth"); SetRange(f, 0, 360);
+            Double_knob(f, &_studioKeyElevation, "studio_key_elevation", "key elevation"); SetRange(f, 0, 90);
+            Double_knob(f, &_studioKeyIntensity, "studio_key_intensity", "key intensity"); SetRange(f, 0, 20);
+            Double_knob(f, &_studioFillRatio, "studio_fill_ratio", "fill ratio"); SetRange(f, 0, 1);
+            Tooltip(f, "Fill light brightness relative to key.\n"
+                       "0 = no fill, 0.4 = natural, 1 = flat.");
+            Double_knob(f, &_studioRimIntensity, "studio_rim_intensity", "rim intensity"); SetRange(f, 0, 20);
+        }
+        EndGroup(f);
+    }
+    EndGroup(f);
+
     BeginClosedGroup(f, "aov_grp", "AOV outputs");
     {
         Divider(f, "Geometry");
@@ -425,6 +478,44 @@ int SpectralRenderIop::knob_changed(Knob* k)
         snprintf(buf, sizeof(buf), "%s\n%d spp\n%d bounces\n%s\n%s",
                  device, _samples, _maxBounces, proxyStr, csStr);
         lk->set_text(buf);
+    }
+
+    // Sky preset
+    if (k->is("sky_preset")) {
+        switch (_skyPreset) {
+            case 0: _skyMix = 0; break;  // Off
+            case 2: _sunElevation=60; _sunAzimuth=180; _sunIntensity=5; _skyIntensity=1; _turbidity=2.5; _skyMix=1; break; // Day
+            case 3: _sunElevation=8; _sunAzimuth=240; _sunIntensity=4; _skyIntensity=0.6; _turbidity=4; _skyMix=1; break; // Golden
+            case 4: _sunElevation=50; _sunAzimuth=180; _sunIntensity=0.5; _skyIntensity=1.5; _turbidity=8; _skyMix=1; break; // Overcast
+            case 5: _sunElevation=2; _sunAzimuth=270; _sunIntensity=0.3; _skyIntensity=0.4; _turbidity=3; _skyMix=1; break; // Blue Hour
+            case 6: _sunElevation=30; _sunAzimuth=180; _sunIntensity=0.2; _skyIntensity=0.05; _turbidity=2; _skyMix=0.3; break; // Night
+            default: break;
+        }
+        if (Knob* mk = knob("sky_mix")) mk->set_value(_skyMix);
+        if (Knob* mk = knob("sun_elevation")) mk->set_value(_sunElevation);
+        if (Knob* mk = knob("sun_azimuth")) mk->set_value(_sunAzimuth);
+        if (Knob* mk = knob("sun_intensity")) mk->set_value(_sunIntensity);
+        if (Knob* mk = knob("sky_intensity")) mk->set_value(_skyIntensity);
+        if (Knob* mk = knob("turbidity")) mk->set_value(_turbidity);
+        return 1;
+    }
+
+    // Studio preset
+    if (k->is("studio_preset")) {
+        switch (_studioPreset) {
+            case 0: _studioMix = 0; break; // Off
+            case 1: _studioKeyAzimuth=45; _studioKeyElevation=30; _studioKeyIntensity=4; _studioFillRatio=0.5; _studioRimIntensity=1.5; _studioMix=1; break; // Portrait
+            case 2: _studioKeyAzimuth=60; _studioKeyElevation=40; _studioKeyIntensity=6; _studioFillRatio=0.3; _studioRimIntensity=3; _studioMix=1; break; // Product
+            case 3: _studioKeyAzimuth=80; _studioKeyElevation=45; _studioKeyIntensity=8; _studioFillRatio=0.1; _studioRimIntensity=4; _studioMix=1; break; // Dramatic
+            default: break;
+        }
+        if (Knob* mk = knob("studio_mix")) mk->set_value(_studioMix);
+        if (Knob* mk = knob("studio_key_azimuth")) mk->set_value(_studioKeyAzimuth);
+        if (Knob* mk = knob("studio_key_elevation")) mk->set_value(_studioKeyElevation);
+        if (Knob* mk = knob("studio_key_intensity")) mk->set_value(_studioKeyIntensity);
+        if (Knob* mk = knob("studio_fill_ratio")) mk->set_value(_studioFillRatio);
+        if (Knob* mk = knob("studio_rim_intensity")) mk->set_value(_studioRimIntensity);
+        return 1;
     }
 
     return Iop::knob_changed(k);
@@ -2267,6 +2358,112 @@ void SpectralRenderIop::_BuildCameraFromInput()
 // ---------------------------------------------------------------------------
 // _EnsureFrameRendered
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// _BuildLightRig — sun/sky + studio lights (Preetham model)
+// ---------------------------------------------------------------------------
+static void sunColorFromElevation(double elev, double turbidity, double& r, double& g, double& b) {
+    double t = std::max(0.0, std::min(elev / 90.0, 1.0));
+    double turbShift = (turbidity - 2.0) / 8.0 * 0.15;
+    r = 1.0;
+    g = std::max(0.15, std::min(0.4 + 0.55 * t - turbShift, 1.0));
+    b = std::max(0.02, std::min(0.1 + 0.8 * t * t - turbShift * 2, 0.95));
+}
+
+static void skyColorFromElevation(double elev, double turbidity, double& r, double& g, double& b) {
+    double t = std::max(0.0, std::min(elev / 90.0, 1.0));
+    double haze = std::max(0.0, std::min((turbidity - 2.0) / 8.0, 1.0));
+    r = 0.15 + 0.1 * (1 - t) + 0.3 * haze;
+    g = 0.3 + 0.15 * (1 - t) + 0.15 * haze;
+    b = 0.7 - 0.3 * (1 - t) - 0.2 * haze;
+    double grey = (r + g + b) / 3.0;
+    r += (grey - r) * haze * 0.5;
+    g += (grey - g) * haze * 0.5;
+    b += (grey - b) * haze * 0.5;
+}
+
+static GfVec3f dirFromElevAzim(double elevDeg, double azimDeg) {
+    double er = elevDeg * M_PI / 180.0, ar = azimDeg * M_PI / 180.0;
+    float dx = float(std::cos(er) * std::sin(ar));
+    float dy = float(-std::sin(er));
+    float dz = float(-std::cos(er) * std::cos(ar));
+    GfVec3f d(dx, dy, dz);
+    float len = d.GetLength();
+    return (len > 1e-8f) ? d / len : GfVec3f(0, -1, 0);
+}
+
+void SpectralRenderIop::_BuildLightRig()
+{
+    if (!_scene) return;
+
+    // Sun/sky (Preetham analytical model)
+    if (_skyMix > 0.001) {
+        double m = _skyMix;
+        double sunR, sunG, sunB, skyR, skyG, skyB;
+        sunColorFromElevation(_sunElevation, _turbidity, sunR, sunG, sunB);
+        skyColorFromElevation(_sunElevation, _turbidity, skyR, skyG, skyB);
+        GfVec3f sunDir = dirFromElevAzim(_sunElevation, _sunAzimuth);
+
+        // Direct sun
+        double si = _sunIntensity * std::max(0.1, std::min(_sunElevation / 15.0, 1.0)) * m;
+        if (si > 0.001) {
+            SpectralLight sun;
+            sun.type = SpectralLight::Type::Distant;
+            sun.direction = sunDir;
+            sun.color = GfVec3f(float(sunR * si), float(sunG * si), float(sunB * si));
+            sun.intensity = 1.f;
+            _scene->AddLight(sun);
+        }
+
+        // Sky dome fill
+        double ski = _skyIntensity * m;
+        if (ski > 0.001) {
+            SpectralLight sky;
+            sky.type = SpectralLight::Type::Dome;
+            sky.color = GfVec3f(float(skyR * ski), float(skyG * ski), float(skyB * ski));
+            sky.intensity = 1.f;
+            _scene->AddLight(sky);
+        }
+    }
+
+    // Studio three-point rig
+    if (_studioMix > 0.001) {
+        double m = _studioMix;
+        double ki = _studioKeyIntensity * m;
+
+        // Key light (slightly warm)
+        if (ki > 0.001) {
+            SpectralLight key;
+            key.type = SpectralLight::Type::Distant;
+            key.direction = dirFromElevAzim(_studioKeyElevation, _studioKeyAzimuth);
+            key.color = GfVec3f(float(ki), float(ki * 0.95), float(ki * 0.9));
+            key.intensity = 1.f;
+            _scene->AddLight(key);
+        }
+
+        // Fill light (opposite side, cool)
+        double fi = ki * _studioFillRatio;
+        if (fi > 0.001) {
+            SpectralLight fill;
+            fill.type = SpectralLight::Type::Distant;
+            fill.direction = dirFromElevAzim(_studioKeyElevation * 0.5, _studioKeyAzimuth + 180);
+            fill.color = GfVec3f(float(fi * 0.9), float(fi * 0.92), float(fi));
+            fill.intensity = 1.f;
+            _scene->AddLight(fill);
+        }
+
+        // Rim light (behind, high)
+        double ri = _studioRimIntensity * m;
+        if (ri > 0.001) {
+            SpectralLight rim;
+            rim.type = SpectralLight::Type::Distant;
+            rim.direction = dirFromElevAzim(_studioKeyElevation + 15, _studioKeyAzimuth + 160);
+            rim.color = GfVec3f(float(ri));
+            rim.intensity = 1.f;
+            _scene->AddLight(rim);
+        }
+    }
+}
+
 void SpectralRenderIop::_EnsureFrameRendered()
 {
     // Allow re-entry for progressive refinement
@@ -2371,6 +2568,9 @@ void SpectralRenderIop::_EnsureFrameRendered()
     // Caustics disabled — photon mapping removed for stability.
     // Will be re-implemented with progressive photon mapping in Phase 8d.
     const pxr::SpectralPhotonMap* pmap = nullptr;
+
+    // Add built-in sun/sky and studio lights
+    _BuildLightRig();
 
 #ifdef SPECTRAL_HAS_OPTIX
     if (useGPU) {

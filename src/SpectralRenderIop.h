@@ -55,7 +55,7 @@ public:
     // Input 0: Scene  (GeometryProviderI) — optional
     // Input 1: Camera (CameraOp)          — optional
     // Input 2: BG     (any Iop)           — optional, sets output resolution
-    int  minimum_inputs()               const override { return 0; }
+    int  minimum_inputs()               const override { return 3; }
     int  maximum_inputs()               const override { return 3; }
     const char* input_label(int idx, char*) const override;
     bool test_input(int idx, Op* op)    const override;
@@ -103,6 +103,7 @@ private:
     void _LoadStage();
     void _LoadFromPxrStage(const UsdStageRefPtr& stage);
     void _BuildCameraFromInput();
+    void _BuildLightRig();
     void _EnsureFrameRendered();
 
     // Knobs
@@ -111,6 +112,23 @@ private:
     int   _samples    = 1;
     int   _maxBounces = 4;
     int   _refractionBounces = 8;  // separate limit for glass paths
+
+    // Built-in lighting rig
+    int    _skyPreset = 0;         // 0=off, 1=custom, 2=day, 3=golden, 4=overcast, 5=blue hour, 6=night
+    double _skyMix = 1.0;
+    double _sunElevation = 45.0;
+    double _sunAzimuth = 180.0;
+    double _sunIntensity = 5.0;
+    double _skyIntensity = 1.0;
+    double _turbidity = 3.0;
+
+    int    _studioPreset = 0;      // 0=off, 1=portrait, 2=product, 3=dramatic
+    double _studioMix = 1.0;
+    double _studioKeyAzimuth = 45.0;
+    double _studioKeyElevation = 35.0;
+    double _studioKeyIntensity = 5.0;
+    double _studioFillRatio = 0.4;
+    double _studioRimIntensity = 2.0;
     int   _tileSize   = 64;
     int   _deviceMode = 0;         // 0=cpu, 1=gpu, 2=auto
     int   _colorSpace = 0;         // 0=sRGB, 1=ACEScg, 2=ACES 2065-1
@@ -122,7 +140,7 @@ private:
     bool  _aovSpecularIndirect = false;
     bool  _aovTransmission   = false;
     float _adaptiveThreshold = 0.05f; // adaptive sampling threshold
-    bool  _progressive = true;          // progressive refinement mode
+    bool  _progressive = false;          // progressive refinement mode
     bool  _blueNoise = true;            // R2 quasi-random sampling
     float _fStop = 0.f;            // 0 = pinhole (no DOF)
     float _focusDistance = 100.f;    // world units
