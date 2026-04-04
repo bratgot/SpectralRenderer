@@ -83,7 +83,7 @@ SpectralRenderIop::SpectralRenderIop(Node* node)
     : Iop(node)
     , _scene(std::make_unique<pxr::SpectralScene>())
 {
-    inputs(4);  // scene, cam, bg, vol
+    // 5 inputs: scene, cam, bg, vol, vol_mat (set by min/max_inputs)
     fprintf(stderr, "SpectralRender: DLL build %s %s\n", __DATE__, __TIME__);
 }
 
@@ -128,11 +128,12 @@ const char* SpectralRenderIop::node_help() const
 const char* SpectralRenderIop::input_label(int idx, char*) const
 {
     switch (idx) {
-        case 0: return "Scene";
-        case 1: return "Cam";
-        case 2: return "BG";
-        case 3: return "Vol";
-        default: return "";
+        case 0: return "scn";
+        case 1: return "cam";
+        case 2: return "bg";
+        case 3: return "vol";
+        case 4: return "mat";
+        default: return nullptr;
     }
 }
 
@@ -153,6 +154,10 @@ bool SpectralRenderIop::test_input(int idx, Op* op) const
         }
         case 3: {
             // Vol: accept any Op (SpectralVDBRead is a SourceGeomOp)
+            return true;
+        }
+        case 4: {
+            // VolMat: accept SpectralVolumeMaterial (ShaderOp)
             return true;
         }
         default:
@@ -506,6 +511,47 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                        "White=neutral, warm=fire, blue=atmosphere.");
         }
         EndGroup(f);
+
+        Divider(f, "Quality");
+        Text_knob(f,
+            "<font color='#666' size='-1'>"
+            "Shadow rays and step quality control render fidelity.<br>"
+            "Start with lower quality for layout, increase for finals."
+            "</font>"
+        );
+        Newline(f);
+        Double_knob(f, &_vdbQuality, "vdb_quality", "quality");
+        SetRange(f, 1, 10);
+        Tooltip(f, "Ray march step resolution (logarithmic).\n"
+                   "Step size = 1/(quality^2).\n"
+                   "1 = fast preview, 5 = good, 7 = high, 10 = final.");
+        Bool_knob(f, &_vdbAdaptiveStep, "vdb_adaptive_step", "adaptive");
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Larger steps in thin regions, smaller in dense.\n"
+                   "2-4x speedup with minimal quality loss.");
+        Int_knob(f, &_vdbShadowSteps, "vdb_shadow_steps", "shadow steps");
+        SetRange(f, 0, 64);
+        Tooltip(f, "Shadow ray samples per light per march step.\n"
+                   "0 = no self-shadowing (flat look).\n"
+                   "4-8 = preview, 16-32 = final render.");
+        Double_knob(f, &_vdbShadowDensity, "vdb_shadow_density", "shadow density");
+        ClearFlags(f, Knob::STARTLINE);
+        SetRange(f, 0, 5);
+        Tooltip(f, "Extinction multiplier for shadow rays.\n"
+                   "1 = physical, <1 = lighter shadows, >1 = darker.\n"
+                   "0 = no self-shadowing.");
+
+        BeginClosedGroup(f, "vdb_ms", "Multiple scatter");
+        {
+            Bool_knob(f, &_vdbMsApprox, "vdb_ms_approx", "analytical MS");
+            Tooltip(f, "Wrenninge 2015 analytical multiple scattering.\n"
+                       "Approximates infinite-bounce light at near-zero cost.\n"
+                       "Brightens dense volume interiors realistically.");
+            Color_knob(f, _vdbMsTint, "vdb_ms_tint", "tint");
+            Tooltip(f, "Colour tint on the multi-scatter contribution.\n"
+                       "Default (1.0, 0.97, 0.95) = slight warm bias.");
+        }
+        EndGroup(f);
     }
 
     Tab_knob(f, "AOVs");
@@ -648,23 +694,6 @@ int SpectralRenderIop::knob_changed(Knob* k)
 {
     _frameReady.store(false);
     _progressiveSppDone = 0;
-
-    // Update node label in DAG
-    const char* device = "CPU";
-#ifdef SPECTRAL_HAS_OPTIX
-    if (_deviceMode == 1) device = "GPU";
-    else if (_deviceMode == 2) device = "auto";
-#endif
-    if (Knob* lk = knob("label")) {
-        char buf[128];
-        static const char* const proxyLabels[] = { "1/4", "1/2", "3/4", "full" };
-        const char* proxyStr = (_proxyMode >= 0 && _proxyMode <= 3) ? proxyLabels[_proxyMode] : "full";
-        static const char* const csLabels[] = { "sRGB", "ACEScg", "ACES" };
-        const char* csStr = (_colorSpace >= 0 && _colorSpace <= 2) ? csLabels[_colorSpace] : "sRGB";
-        snprintf(buf, sizeof(buf), "%s\n%d spp\n%d bounces\n%s\n%s",
-                 device, _samples, _maxBounces, proxyStr, csStr);
-        lk->set_text(buf);
-    }
 
     // VDB auto-sequence
     if (k->is("vdb_auto_sequence")) {
@@ -2871,25 +2900,10 @@ void SpectralRenderIop::_LoadVDB()
     }
 #endif
 
-    // Path 2: Vol input (input 3) — SpectralVDBRead or SpectralVolumeMaterial chain
+    // Path 2: Vol input (input 3) — SpectralVDBRead
     if (inputs() > 3 && input(3)) {
-        // Validate the Vol input so it loads its VDB
         input(3)->validate(true);
-
-        // Direct SpectralVDBRead
         SpectralVDBRead* vdbRead = dynamic_cast<SpectralVDBRead*>(input(3));
-        // Or SpectralVolumeMaterial → check its input for VDBRead
-        if (!vdbRead) {
-            SpectralVolumeMaterial* volMat = dynamic_cast<SpectralVolumeMaterial*>(input(3));
-            if (volMat) {
-                for (int i = 0; i < volMat->inputs() && !vdbRead; ++i) {
-                    if (volMat->input(i)) {
-                        volMat->input(i)->validate(true);
-                        vdbRead = dynamic_cast<SpectralVDBRead*>(volMat->input(i));
-                    }
-                }
-            }
-        }
         if (vdbRead) {
             int renderFrame = int(outputContext().frame());
             auto vol = vdbRead->GetVolumeAtFrame(renderFrame);
@@ -2947,20 +2961,10 @@ void SpectralRenderIop::_LoadVDBForRender()
 // ---------------------------------------------------------------------------
 void SpectralRenderIop::_applyVolumeShading(std::shared_ptr<pxr::SpectralVolume>& vol)
 {
-    // Walk Vol input (input 3) chain for SpectralVolumeMaterial
-    // Connects: SpectralVDBRead → SpectralVolumeMaterial → SpectralRender
-    //       or: SpectralVolumeMaterial → SpectralRender
+    // Check VolMat input (input 4) for SpectralVolumeMaterial
     SpectralVolumeMaterial* mat = nullptr;
-    if (inputs() > 3 && input(3)) {
-        mat = dynamic_cast<SpectralVolumeMaterial*>(input(3));
-        if (!mat) {
-            // Check if Vol input's own input is a VolumeMaterial
-            Op* volOp = input(3);
-            for (int i = 0; i < volOp->inputs() && !mat; ++i) {
-                if (volOp->input(i))
-                    mat = dynamic_cast<SpectralVolumeMaterial*>(volOp->input(i));
-            }
-        }
+    if (inputs() > 4 && input(4)) {
+        mat = dynamic_cast<SpectralVolumeMaterial*>(input(4));
     }
 
     if (mat) {
@@ -3002,6 +3006,13 @@ void SpectralRenderIop::_applyVolumeShading(std::shared_ptr<pxr::SpectralVolume>
         vol->useBlackbody = false;
         vol->chromaticExtinction = false;
     }
+    // Always apply from SpectralRender (these aren't on VolumeMaterial yet)
+    vol->shadowSteps = _vdbShadowSteps;
+    vol->shadowDensity = float(_vdbShadowDensity);
+    vol->quality = float(_vdbQuality);
+    vol->adaptiveStep = _vdbAdaptiveStep;
+    vol->msApprox = _vdbMsApprox;
+    vol->msTint = pxr::GfVec3f(_vdbMsTint[0], _vdbMsTint[1], _vdbMsTint[2]);
 }
 
 // ---------------------------------------------------------------------------

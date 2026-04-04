@@ -60,8 +60,8 @@ public:
     // Input 0: Scene  (GeometryProviderI) — optional
     // Input 1: Camera (CameraOp)          — optional
     // Input 2: BG     (any Iop)           — optional, sets output resolution
-    int  minimum_inputs()               const override { return 0; }
-    int  maximum_inputs()               const override { return 4; }
+    int  minimum_inputs()               const override { return 5; }
+    int  maximum_inputs()               const override { return 5; }
     const char* input_label(int idx, char*) const override;
     bool test_input(int idx, Op* op)    const override;
     Op*  default_input(int idx)         const override;
@@ -175,6 +175,14 @@ private:
     double _vdbPowder = 2.0;
     bool   _vdbJitter = true;
     float  _vdbScatterColor[3] = {1.f, 1.f, 1.f};
+
+    // Shadow + quality
+    int    _vdbShadowSteps = 8;
+    double _vdbShadowDensity = 1.0;
+    double _vdbQuality = 5.0;
+    bool   _vdbAdaptiveStep = true;
+    bool   _vdbMsApprox = true;
+    float  _vdbMsTint[3] = {1.f, 0.97f, 0.95f};
 
     // VDB sequence
     bool   _vdbAutoSequence = false;

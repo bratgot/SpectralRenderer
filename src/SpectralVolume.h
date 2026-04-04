@@ -52,6 +52,19 @@ struct SpectralVolume {
     float sigmaG = 1.0f;    // relative extinction at green
     float sigmaB = 1.2f;    // relative extinction at blue (higher = more blue scatter)
 
+    // Shadow rays
+    int   shadowSteps    = 8;       // shadow ray samples per light
+    float shadowDensity  = 1.0f;    // multiplier on extinction for shadows
+
+    // Quality
+    float quality        = 5.0f;    // log step quality (1=fast, 10=final)
+    bool  adaptiveStep   = true;    // larger steps in thin regions
+    int   renderSamples  = 1;       // stochastic passes per pixel
+
+    // Multiple scattering (Wrenninge 2015)
+    bool  msApprox       = true;
+    GfVec3f msTint       = GfVec3f(1.f, 0.97f, 0.95f);
+
     bool IsValid() const { return !density.empty() && resX > 0; }
     bool HasBbox() const { return resX > 0 && resY > 0 && resZ > 0; }
 

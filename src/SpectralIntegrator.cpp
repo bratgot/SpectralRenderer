@@ -318,13 +318,15 @@ void SpectralIntegrator::RenderFrame(
                                 tFar = std::min(tFar, surfaceT);
 
                                 if (tNear < tFar) {
-                                    // Step size: auto = 1/2 voxel in world space
+                                    // Step size from quality parameter
                                     GfVec3f bboxSize = volume->bboxMax - volume->bboxMin;
                                     float voxelSize = std::max({bboxSize[0]/volume->resX,
                                                                 bboxSize[1]/volume->resY,
                                                                 bboxSize[2]/volume->resZ});
-                                    float dt = (volume->stepSize > 0.01f) ? volume->stepSize : voxelSize * 0.5f;
-                                    int maxSteps = 512;
+                                    float q = std::max(1.f, volume->quality);
+                                    float dt = (volume->stepSize > 0.01f) ? volume->stepSize
+                                               : voxelSize / (q * q * 0.25f);
+                                    int maxSteps = std::min(1024, int((tFar - tNear) / dt) + 1);
 
                                     // Jitter first step
                                     float jitterOff = volume->jitter ? _Hash(seed + 77) * dt : 0.f;
@@ -333,68 +335,97 @@ void SpectralIntegrator::RenderFrame(
                                     float volTransmittance = 1.f;
                                     float volRadiance = 0.f;
 
-                                    // Get primary light direction for in-scatter
-                                    GfVec3f lightDir(0, -1, 0);
-                                    GfVec3f lightColor(1.f);
+                                    // Collect all non-dome lights
+                                    struct VolLight { GfVec3f dir; GfVec3f color; };
+                                    std::vector<VolLight> volLights;
                                     if (scene.HasLights()) {
-                                        const auto& lights = scene.GetLights();
-                                        // Use brightest light
-                                        float maxI = 0;
-                                        for (const auto& L : lights) {
+                                        for (const auto& L : scene.GetLights()) {
+                                            if (L.type == SpectralLight::Type::Dome) continue;
                                             float li = L.color.GetLength() * L.intensity;
-                                            if (li > maxI && L.type != SpectralLight::Type::Dome) {
-                                                maxI = li;
-                                                lightDir = L.direction;
-                                                lightColor = L.color * L.intensity;
-                                            }
+                                            if (li < 0.001f) continue;
+                                            volLights.push_back({L.direction, L.color * L.intensity});
                                         }
                                     }
+                                    if (volLights.empty())
+                                        volLights.push_back({GfVec3f(0, -1, 0), GfVec3f(1.f)});
 
                                     for (int step = 0; step < maxSteps && t < tFar; ++step, t += dt) {
                                         GfVec3f p = ro + rd * t;
                                         GfVec3f uv = volume->WorldToNorm(p);
                                         float density = volume->SampleDensity(uv[0], uv[1], uv[2]);
 
-                                        if (density < 1e-5f) continue;
+                                        // Adaptive stepping: skip faster in thin regions
+                                        if (density < 1e-5f) {
+                                            if (volume->adaptiveStep) t += dt * 3.f; // 4x step in empty
+                                            continue;
+                                        }
 
                                         // Beer-Lambert extinction
                                         float sigma_t = density * volume->extinction;
 
-                                        // Chromatic extinction: per-channel absorption
+                                        // Chromatic extinction
                                         if (volume->chromaticExtinction) {
-                                            // Map wavelength to RGB weight
-                                            // Short λ (400-500nm) → blue channel → higher sigma
-                                            // Long λ  (600-700nm) → red channel  → lower sigma
                                             float wt;
-                                            if (lambda < 500.f)
-                                                wt = volume->sigmaB;  // blue
-                                            else if (lambda < 580.f)
-                                                wt = volume->sigmaG;  // green
-                                            else
-                                                wt = volume->sigmaR;  // red
+                                            if (lambda < 500.f) wt = volume->sigmaB;
+                                            else if (lambda < 580.f) wt = volume->sigmaG;
+                                            else wt = volume->sigmaR;
                                             sigma_t *= wt;
                                         }
 
                                         float stepTrans = std::exp(-sigma_t * dt);
                                         float absorption = 1.f - stepTrans;
 
-                                        // Henyey-Greenstein phase function
-                                        float cosTheta = -(rd[0]*lightDir[0] + rd[1]*lightDir[1] + rd[2]*lightDir[2]);
-                                        float g = volume->gForward;
-                                        float denom = 1.f + g*g - 2.f*g*cosTheta;
-                                        float phase = (1.f - g*g) / (4.f * 3.14159f * std::pow(std::max(denom,1e-4f), 1.5f));
-
-                                        // In-scatter: light * phase * scattering * scatter_color
-                                        float scatter = volume->scattering * density;
-
                                         // Powder effect (Schneider & Vos 2015)
                                         float powder = 1.f;
-                                        if (volume->powderStrength > 0.01f) {
+                                        if (volume->powderStrength > 0.01f)
                                             powder = 1.f - std::exp(-density * volume->powderStrength * 2.f);
+
+                                        // Accumulate in-scatter from ALL lights
+                                        float totalScatter = 0.f;
+                                        for (const auto& vl : volLights) {
+                                            // Dual-lobe Henyey-Greenstein phase function
+                                            float cosTheta = -(rd[0]*vl.dir[0] + rd[1]*vl.dir[1] + rd[2]*vl.dir[2]);
+                                            float gF = volume->gForward;
+                                            float gB = volume->gBackward;
+                                            float denomF = 1.f + gF*gF - 2.f*gF*cosTheta;
+                                            float denomB = 1.f + gB*gB - 2.f*gB*cosTheta;
+                                            float phaseF = (1.f - gF*gF) / (4.f * 3.14159f * std::pow(std::max(denomF,1e-4f), 1.5f));
+                                            float phaseB = (1.f - gB*gB) / (4.f * 3.14159f * std::pow(std::max(denomB,1e-4f), 1.5f));
+                                            float phase = volume->lobeMix * phaseF + (1.f - volume->lobeMix) * phaseB;
+
+                                            // Shadow ray — march toward light to compute transmittance
+                                            float shadowTrans = 1.f;
+                                            if (volume->shadowSteps > 0 && volume->shadowDensity > 0.01f) {
+                                                GfVec3f shadowDir = -vl.dir; // toward light
+                                                // March through volume toward light
+                                                float shadowDt = bboxSize.GetLength() / float(volume->shadowSteps);
+                                                for (int ss = 1; ss <= volume->shadowSteps; ++ss) {
+                                                    GfVec3f sp = p + shadowDir * (shadowDt * ss);
+                                                    GfVec3f suv = volume->WorldToNorm(sp);
+                                                    if (suv[0] < 0 || suv[0] > 1 || suv[1] < 0 || suv[1] > 1 || suv[2] < 0 || suv[2] > 1) break;
+                                                    float sd = volume->SampleDensity(suv[0], suv[1], suv[2]);
+                                                    shadowTrans *= std::exp(-sd * volume->extinction * volume->shadowDensity * shadowDt);
+                                                    if (shadowTrans < 0.001f) break;
+                                                }
+                                            }
+
+                                            // Spectral light colour response
+                                            float lightResponse = vl.color[0] * volume->scatterColor[0]; // spectral channel
+                                            totalScatter += volume->scattering * density * phase * lightResponse * shadowTrans * powder;
                                         }
 
-                                        // Spectral response of scatter
-                                        float scatterR = scatter * phase * lightColor[0] * volume->scatterColor[0] * powder;
+                                        // Analytical multiple scattering (Wrenninge 2015)
+                                        if (volume->msApprox && volume->scattering > 0.01f) {
+                                            // Isotropic approximation: diffuse light fills dense interiors
+                                            float msPhase = 1.f / (4.f * 3.14159f); // isotropic
+                                            float msFactor = density * volume->scattering * msPhase;
+                                            // Approximate infinite bounces: L_ms ≈ L_ss * albedo / (1 - albedo * g)
+                                            float albedo = volume->scattering / std::max(volume->extinction, 0.01f);
+                                            float gEff = volume->gForward * volume->lobeMix;
+                                            float msBoost = albedo / std::max(1.f - albedo * gEff, 0.01f);
+                                            float msTintV = volume->msTint[0]; // spectral channel
+                                            totalScatter += msFactor * msBoost * msTintV * 0.3f; // scaled down
+                                        }
 
                                         // Emission from temperature
                                         float emission = 0.f;
@@ -403,28 +434,22 @@ void SpectralIntegrator::RenderFrame(
                                             if (temp > volume->tempMin) {
                                                 float tNorm = std::min((temp - volume->tempMin) / (volume->tempMax - volume->tempMin + 1e-6f), 1.f);
                                                 if (volume->useBlackbody) {
-                                                    // Planck's law: spectral radiance at wavelength lambda
-                                                    // B(λ,T) = (2hc²/λ⁵) / (exp(hc/λkT) - 1)
                                                     float T = volume->tempMin + tNorm * (volume->tempMax - volume->tempMin);
-                                                    float lam_m = lambda * 1e-9f; // nm → metres
-                                                    const float h = 6.626e-34f;
-                                                    const float c = 3e8f;
-                                                    const float k = 1.381e-23f;
-                                                    float x = (h * c) / (lam_m * k * std::max(T, 1.f));
+                                                    float lam_m = lambda * 1e-9f;
+                                                    const float h = 6.626e-34f, c = 3e8f, kB = 1.381e-23f;
+                                                    float x = (h * c) / (lam_m * kB * std::max(T, 1.f));
                                                     float planck = 0.f;
-                                                    if (x < 80.f) // avoid overflow
+                                                    if (x < 80.f)
                                                         planck = (2.f * h * c * c) / (std::pow(lam_m, 5.f) * (std::exp(x) - 1.f));
-                                                    // Normalise to perceptual range (peak at ~5500K ≈ 2.6e13)
                                                     emission = planck * 3.85e-14f * volume->emissionIntensity * density;
                                                 } else {
-                                                    // Simple quadratic ramp (legacy)
                                                     emission = tNorm * tNorm * volume->emissionIntensity * density;
                                                 }
                                             }
                                         }
 
                                         // Accumulate
-                                        volRadiance += volTransmittance * absorption * (scatterR + emission);
+                                        volRadiance += volTransmittance * absorption * (totalScatter + emission);
                                         volTransmittance *= stepTrans;
 
                                         if (volTransmittance < 0.001f) break;
