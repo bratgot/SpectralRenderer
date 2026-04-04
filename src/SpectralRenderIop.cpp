@@ -487,6 +487,14 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         Double_knob(f, &_vdbStepSize, "vdb_step_size", "step size"); SetRange(f, 0, 2);
         Tooltip(f, "Ray march step size (world units). 0 = auto from quality.\n"
                    "Override for precise control. Smaller = finer detail, slower.");
+        static const char* const volResOpts[] = { "128", "256", "512", "Native", nullptr };
+        Enumeration_knob(f, &_vdbVolRes, volResOpts, "vdb_vol_res", "volume res");
+        Tooltip(f, "Resampling resolution for the VDB grid.\n"
+                   "Higher = sharper detail but more memory and load time.\n"
+                   "128 = fast preview (~8 MB per grid)\n"
+                   "256 = production (~67 MB per grid)\n"
+                   "512 = high detail (~536 MB per grid)\n"
+                   "Native = use actual VDB voxel resolution (capped at 1024)");
         Double_knob(f, &_vdbAnisotropy, "vdb_anisotropy", "anisotropy"); SetRange(f, -1, 1);
         SetFlags(f, Knob::INVISIBLE);
 
@@ -1018,6 +1026,11 @@ int SpectralRenderIop::knob_changed(Knob* k)
     }
 
     if (k->is("vdb_render_mode") || k->is("vdb_intensity") || k->is("vdb_spectral_volumes")) return 1;
+    if (k->is("vdb_vol_res")) {
+        _vdbLoadedPath.clear(); _volume.reset(); _vdbIsPreviewRes = true;
+        _frameReady.store(false);
+        return 1;
+    }
     if (k->is("vdb_shadow_cache") || k->is("vdb_shadow_cache_res")) return 1;
     if (k->is("vdb_phase_mode") || k->is("vdb_mie_droplet_d") || k->is("vdb_gradient_mix")) return 1;
     if (k->is("vdb_env_intensity") || k->is("vdb_env_rotate") ||
@@ -3158,11 +3171,11 @@ void SpectralRenderIop::_LoadVDB()
                         _VDBCachePut(resolvedPath, _volume, true, true);
                     }
                 } else {
-                    // Full load at viewport res (64³)
+                    // Full load at viewport res (128³)
                     _volume = pxr::SpectralVDBLoader::Load(resolvedPath.c_str(),
                         _VdbGridName(_vdbDensityGridIdx, _vdbDensityOverride),
                         _VdbGridName(_vdbTempGridIdx, _vdbTempOverride),
-                        64);
+                        128);
                     _vdbIsMetadataOnly = false;
                     _vdbIsPreviewRes = true;
                     if (_volume) {
@@ -3197,19 +3210,21 @@ void SpectralRenderIop::_LoadVDB()
 }
 
 // ---------------------------------------------------------------------------
-// _LoadVDBForRender — reload at full 128³ if currently at preview res
+// _LoadVDBForRender — reload at full resolution if currently at preview res
 // ---------------------------------------------------------------------------
 void SpectralRenderIop::_LoadVDBForRender()
 {
 #ifdef SPECTRAL_HAS_VDB
     if ((_vdbIsPreviewRes || _vdbIsMetadataOnly) && _vdbFile && strlen(_vdbFile) > 0) {
+        static const int resLookup[] = { 128, 256, 512, -1 };
+        int renderRes = (_vdbVolRes >= 0 && _vdbVolRes <= 3) ? resLookup[_vdbVolRes] : -1;
         int frame = int(outputContext().frame()) + _vdbFrameOffset;
         std::string resolvedPath = _vdbAutoSequence
             ? _resolveFramePath(frame)
             : std::string(_vdbFile);
         if (!resolvedPath.empty()) {
             // Check if a full-res version is in cache
-            std::string renderKey = resolvedPath + ":128";
+            std::string renderKey = resolvedPath + ":" + std::to_string(renderRes);
             VDBCacheEntry* cached = _VDBCacheGet(renderKey);
             if (cached && !cached->isPreviewRes && !cached->isMetadataOnly) {
                 _volume = cached->volume;
@@ -3222,13 +3237,15 @@ void SpectralRenderIop::_LoadVDBForRender()
             _volume = pxr::SpectralVDBLoader::Load(resolvedPath.c_str(),
                 _VdbGridName(_vdbDensityGridIdx, _vdbDensityOverride),
                 _VdbGridName(_vdbTempGridIdx, _vdbTempOverride),
-                128);
+                renderRes);
             _vdbIsPreviewRes = false;
             _vdbIsMetadataOnly = false;
             if (_volume) {
                 _vdbLoadedPath = resolvedPath;
                 _applyVolumeShading(_volume);
                 _VDBCachePut(renderKey, _volume, false, false);
+                fprintf(stderr, "SpectralRender: loaded VDB at %d^3 (%.1f MB)\n",
+                        renderRes, _volume->density.size() * sizeof(float) / (1024.f * 1024.f));
             }
         }
     }
@@ -3378,6 +3395,16 @@ static GfVec3f dirFromElevAzim(double elevDeg, double azimDeg) {
 void SpectralRenderIop::_BuildLightRig()
 {
     if (!_scene) return;
+
+    // Remove previous rig lights but preserve scene input lights.
+    // Scene input lights have names from USD. Rig lights have empty names.
+    auto& lights = _scene->GetLights();
+    std::vector<pxr::SpectralLight> sceneLights;
+    for (const auto& L : lights) {
+        if (!L.name.empty()) sceneLights.push_back(L);
+    }
+    _scene->ClearLights();
+    for (const auto& L : sceneLights) _scene->AddLight(L);
 
     // Sun/sky (Preetham analytical model)
     if (_skyPreset > 0 && _skyMix > 0.001) {

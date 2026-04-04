@@ -123,13 +123,24 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::Load(const char* filepath,
         vol->bboxMin = GfVec3f(float(wMin.x()), float(wMin.y()), float(wMin.z()));
         vol->bboxMax = GfVec3f(float(wMax.x()), float(wMax.y()), float(wMax.z()));
 
-        // Resample to uniform grid (maxRes from parameter)
+        // Resample to uniform grid
         auto dim = bbox.dim();
         float maxDim = float(std::max({dim.x(), dim.y(), dim.z()}));
         if (maxDim < 1) maxDim = 1;
-        vol->resX = std::max(1, std::min(maxRes, int(dim.x() * maxRes / maxDim)));
-        vol->resY = std::max(1, std::min(maxRes, int(dim.y() * maxRes / maxDim)));
-        vol->resZ = std::max(1, std::min(maxRes, int(dim.z() * maxRes / maxDim)));
+
+        // maxRes <= 0 means "native" — use actual VDB dimensions (capped at 1024)
+        int effectiveMax;
+        if (maxRes <= 0) {
+            effectiveMax = std::min(1024, int(maxDim));
+        } else {
+            effectiveMax = maxRes;
+        }
+        vol->resX = std::max(1, std::min(effectiveMax, int(dim.x() * effectiveMax / maxDim)));
+        vol->resY = std::max(1, std::min(effectiveMax, int(dim.y() * effectiveMax / maxDim)));
+        vol->resZ = std::max(1, std::min(effectiveMax, int(dim.z() * effectiveMax / maxDim)));
+
+        fprintf(stderr, "SpectralVDB: native VDB dims = %dx%dx%d, resampling to %dx%dx%d (maxRes=%d)\n",
+                dim.x(), dim.y(), dim.z(), vol->resX, vol->resY, vol->resZ, effectiveMax);
 
         size_t totalVoxels = size_t(vol->resX) * vol->resY * vol->resZ;
         vol->density.resize(totalVoxels, 0.f);

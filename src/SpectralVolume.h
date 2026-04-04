@@ -91,40 +91,65 @@ struct SpectralVolume {
     bool IsValid() const { return !density.empty() && resX > 0; }
     bool HasBbox() const { return resX > 0 && resY > 0 && resZ > 0; }
 
-    // Sample density at normalised coordinates [0,1]^3
+    // Trilinear interpolation helper
+    float _SampleTrilinear(const std::vector<float>& grid, float u, float v, float w) const {
+        if (grid.empty()) return 0.f;
+        float fx = u * (resX - 1), fy = v * (resY - 1), fz = w * (resZ - 1);
+        int x0 = std::max(0, std::min(int(fx), resX - 2));
+        int y0 = std::max(0, std::min(int(fy), resY - 2));
+        int z0 = std::max(0, std::min(int(fz), resZ - 2));
+        float dx = fx - x0, dy = fy - y0, dz = fz - z0;
+        int x1 = x0 + 1, y1 = y0 + 1, z1 = z0 + 1;
+        int sX = 1, sY = resX, sZ = resY * resX;
+        float c000 = grid[z0*sZ + y0*sY + x0*sX];
+        float c100 = grid[z0*sZ + y0*sY + x1*sX];
+        float c010 = grid[z0*sZ + y1*sY + x0*sX];
+        float c110 = grid[z0*sZ + y1*sY + x1*sX];
+        float c001 = grid[z1*sZ + y0*sY + x0*sX];
+        float c101 = grid[z1*sZ + y0*sY + x1*sX];
+        float c011 = grid[z1*sZ + y1*sY + x0*sX];
+        float c111 = grid[z1*sZ + y1*sY + x1*sX];
+        float c00 = c000*(1-dx) + c100*dx;
+        float c10 = c010*(1-dx) + c110*dx;
+        float c01 = c001*(1-dx) + c101*dx;
+        float c11 = c011*(1-dx) + c111*dx;
+        float c0 = c00*(1-dy) + c10*dy;
+        float c1 = c01*(1-dy) + c11*dy;
+        return c0*(1-dz) + c1*dz;
+    }
+
+    // Sample density at normalised coordinates [0,1]^3 — trilinear
     float SampleDensity(float u, float v, float w) const {
-        if (density.empty()) return 0.f;
-        int ix = std::max(0, std::min(int(u * resX), resX - 1));
-        int iy = std::max(0, std::min(int(v * resY), resY - 1));
-        int iz = std::max(0, std::min(int(w * resZ), resZ - 1));
-        return density[iz * resY * resX + iy * resX + ix] * densityMult;
+        return _SampleTrilinear(density, u, v, w) * densityMult;
     }
 
-    // Sample temperature at normalised coordinates
+    // Sample temperature at normalised coordinates — trilinear
     float SampleTemperature(float u, float v, float w) const {
-        if (temperature.empty()) return 0.f;
-        int ix = std::max(0, std::min(int(u * resX), resX - 1));
-        int iy = std::max(0, std::min(int(v * resY), resY - 1));
-        int iz = std::max(0, std::min(int(w * resZ), resZ - 1));
-        return temperature[iz * resY * resX + iy * resX + ix];
+        return _SampleTrilinear(temperature, u, v, w);
     }
 
-    // Sample flame at normalised coordinates
+    // Sample flame at normalised coordinates — trilinear
     float SampleFlame(float u, float v, float w) const {
-        if (flame.empty()) return 0.f;
-        int ix = std::max(0, std::min(int(u * resX), resX - 1));
-        int iy = std::max(0, std::min(int(v * resY), resY - 1));
-        int iz = std::max(0, std::min(int(w * resZ), resZ - 1));
-        return flame[iz * resY * resX + iy * resX + ix];
+        return _SampleTrilinear(flame, u, v, w);
     }
 
-    // Sample colour at normalised coordinates
+    // Sample colour at normalised coordinates — trilinear
     GfVec3f SampleColor(float u, float v, float w) const {
         if (color.empty()) return GfVec3f(1.f);
-        int ix = std::max(0, std::min(int(u * resX), resX - 1));
-        int iy = std::max(0, std::min(int(v * resY), resY - 1));
-        int iz = std::max(0, std::min(int(w * resZ), resZ - 1));
-        return color[iz * resY * resX + iy * resX + ix];
+        float fx = u * (resX - 1), fy = v * (resY - 1), fz = w * (resZ - 1);
+        int x0 = std::max(0, std::min(int(fx), resX - 2));
+        int y0 = std::max(0, std::min(int(fy), resY - 2));
+        int z0 = std::max(0, std::min(int(fz), resZ - 2));
+        float dx = fx - x0, dy = fy - y0, dz = fz - z0;
+        int x1 = x0+1, y1 = y0+1, z1 = z0+1;
+        int sY = resX, sZ = resY * resX;
+        GfVec3f c000=color[z0*sZ+y0*sY+x0], c100=color[z0*sZ+y0*sY+x1];
+        GfVec3f c010=color[z0*sZ+y1*sY+x0], c110=color[z0*sZ+y1*sY+x1];
+        GfVec3f c001=color[z1*sZ+y0*sY+x0], c101=color[z1*sZ+y0*sY+x1];
+        GfVec3f c011=color[z1*sZ+y1*sY+x0], c111=color[z1*sZ+y1*sY+x1];
+        GfVec3f c00=c000*(1-dx)+c100*dx, c10=c010*(1-dx)+c110*dx;
+        GfVec3f c01=c001*(1-dx)+c101*dx, c11=c011*(1-dx)+c111*dx;
+        return (c00*(1-dy)+c10*dy)*(1-dz) + (c01*(1-dy)+c11*dy)*dz;
     }
 
     // World position to normalised [0,1] coordinates

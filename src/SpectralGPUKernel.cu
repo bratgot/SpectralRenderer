@@ -587,29 +587,56 @@ static __forceinline__ __device__ float shadeHit(
 // ---------------------------------------------------------------------------
 static __forceinline__ __device__ float sampleVolumeDensity(float u, float v, float w)
 {
-    int ix = max(0, min(int(u * params.volResX), params.volResX - 1));
-    int iy = max(0, min(int(v * params.volResY), params.volResY - 1));
-    int iz = max(0, min(int(w * params.volResZ), params.volResZ - 1));
-    return params.volumeDensity[iz * params.volResY * params.volResX + iy * params.volResX + ix]
-           * params.volDensityMult;
+    float fx = u * (params.volResX - 1), fy = v * (params.volResY - 1), fz = w * (params.volResZ - 1);
+    int x0 = max(0, min(int(fx), params.volResX - 2));
+    int y0 = max(0, min(int(fy), params.volResY - 2));
+    int z0 = max(0, min(int(fz), params.volResZ - 2));
+    float dx = fx - x0, dy = fy - y0, dz = fz - z0;
+    int x1 = x0+1, y1 = y0+1, z1 = z0+1;
+    int sY = params.volResX, sZ = params.volResY * params.volResX;
+    float c000=params.volumeDensity[z0*sZ+y0*sY+x0], c100=params.volumeDensity[z0*sZ+y0*sY+x1];
+    float c010=params.volumeDensity[z0*sZ+y1*sY+x0], c110=params.volumeDensity[z0*sZ+y1*sY+x1];
+    float c001=params.volumeDensity[z1*sZ+y0*sY+x0], c101=params.volumeDensity[z1*sZ+y0*sY+x1];
+    float c011=params.volumeDensity[z1*sZ+y1*sY+x0], c111=params.volumeDensity[z1*sZ+y1*sY+x1];
+    float c00=c000*(1-dx)+c100*dx, c10=c010*(1-dx)+c110*dx;
+    float c01=c001*(1-dx)+c101*dx, c11=c011*(1-dx)+c111*dx;
+    return ((c00*(1-dy)+c10*dy)*(1-dz) + (c01*(1-dy)+c11*dy)*dz) * params.volDensityMult;
 }
 
 static __forceinline__ __device__ float sampleVolumeTemp(float u, float v, float w)
 {
     if (!params.volumeTemperature) return 0.f;
-    int ix = max(0, min(int(u * params.volResX), params.volResX - 1));
-    int iy = max(0, min(int(v * params.volResY), params.volResY - 1));
-    int iz = max(0, min(int(w * params.volResZ), params.volResZ - 1));
-    return params.volumeTemperature[iz * params.volResY * params.volResX + iy * params.volResX + ix];
+    float fx = u * (params.volResX - 1), fy = v * (params.volResY - 1), fz = w * (params.volResZ - 1);
+    int x0 = max(0, min(int(fx), params.volResX - 2));
+    int y0 = max(0, min(int(fy), params.volResY - 2));
+    int z0 = max(0, min(int(fz), params.volResZ - 2));
+    float dx = fx - x0, dy = fy - y0, dz = fz - z0;
+    int x1=x0+1, y1=y0+1, z1=z0+1, sY=params.volResX, sZ=params.volResY*params.volResX;
+    float c000=params.volumeTemperature[z0*sZ+y0*sY+x0], c100=params.volumeTemperature[z0*sZ+y0*sY+x1];
+    float c010=params.volumeTemperature[z0*sZ+y1*sY+x0], c110=params.volumeTemperature[z0*sZ+y1*sY+x1];
+    float c001=params.volumeTemperature[z1*sZ+y0*sY+x0], c101=params.volumeTemperature[z1*sZ+y0*sY+x1];
+    float c011=params.volumeTemperature[z1*sZ+y1*sY+x0], c111=params.volumeTemperature[z1*sZ+y1*sY+x1];
+    float c00=c000*(1-dx)+c100*dx, c10=c010*(1-dx)+c110*dx;
+    float c01=c001*(1-dx)+c101*dx, c11=c011*(1-dx)+c111*dx;
+    return (c00*(1-dy)+c10*dy)*(1-dz) + (c01*(1-dy)+c11*dy)*dz;
 }
 
 static __forceinline__ __device__ float sampleVolumeFlame(float u, float v, float w)
 {
     if (!params.volumeFlame) return 0.f;
-    int ix = max(0, min(int(u * params.volResX), params.volResX - 1));
-    int iy = max(0, min(int(v * params.volResY), params.volResY - 1));
-    int iz = max(0, min(int(w * params.volResZ), params.volResZ - 1));
-    return params.volumeFlame[iz * params.volResY * params.volResX + iy * params.volResX + ix];
+    float fx = u * (params.volResX - 1), fy = v * (params.volResY - 1), fz = w * (params.volResZ - 1);
+    int x0 = max(0, min(int(fx), params.volResX - 2));
+    int y0 = max(0, min(int(fy), params.volResY - 2));
+    int z0 = max(0, min(int(fz), params.volResZ - 2));
+    float dx = fx - x0, dy = fy - y0, dz = fz - z0;
+    int x1=x0+1, y1=y0+1, z1=z0+1, sY=params.volResX, sZ=params.volResY*params.volResX;
+    float c000=params.volumeFlame[z0*sZ+y0*sY+x0], c100=params.volumeFlame[z0*sZ+y0*sY+x1];
+    float c010=params.volumeFlame[z0*sZ+y1*sY+x0], c110=params.volumeFlame[z0*sZ+y1*sY+x1];
+    float c001=params.volumeFlame[z1*sZ+y0*sY+x0], c101=params.volumeFlame[z1*sZ+y0*sY+x1];
+    float c011=params.volumeFlame[z1*sZ+y1*sY+x0], c111=params.volumeFlame[z1*sZ+y1*sY+x1];
+    float c00=c000*(1-dx)+c100*dx, c10=c010*(1-dx)+c110*dx;
+    float c01=c001*(1-dx)+c101*dx, c11=c011*(1-dx)+c111*dx;
+    return (c00*(1-dy)+c10*dy)*(1-dz) + (c01*(1-dy)+c11*dy)*dz;
 }
 
 // GPU fBm noise — deterministic hash-based
@@ -640,9 +667,9 @@ static __forceinline__ __device__ float gpuNoiseFBm(float x, float y, float z, i
 
 static __forceinline__ __device__ void marchVolume(
     float3 ro, float3 rdRaw, float surfaceT, float lambda, unsigned int seed,
-    float& outRadiance, float& outTransmittance)
+    float3& outRGB, float& outTransmittance)
 {
-    outRadiance = 0.f;
+    outRGB = make_float3(0.f, 0.f, 0.f);
     outTransmittance = 1.f;
 
     float rdLen = sqrtf(rdRaw.x*rdRaw.x + rdRaw.y*rdRaw.y + rdRaw.z*rdRaw.z);
@@ -689,7 +716,6 @@ static __forceinline__ __device__ void marchVolume(
             }
         }
     }
-    float lightLum = 0.2126f*lightCol.x + 0.7152f*lightCol.y + 0.0722f*lightCol.z;
     int rmode = params.volRenderMode;
 
     for (int step=0; step<maxSteps && t<tFar; ++step, t+=dt) {
@@ -712,17 +738,22 @@ static __forceinline__ __device__ void marchVolume(
         float sigma_t = density * params.volExtinction;
         float stepTrans = expf(-sigma_t*dt);
         float absorption = 1.f - stepTrans;
-        float stepRad = 0.f;
+        float3 stepRGB = make_float3(0.f, 0.f, 0.f);
 
         if (rmode==1) { // Greyscale
-            stepRad = density * params.volIntensity;
+            { float v=density*params.volIntensity; stepRGB=make_float3(v,v,v); }
         } else if (rmode==2 || rmode==3) { // Heat / Cool
-            stepRad = fminf(density*params.volExtinction*0.5f, 1.f) * params.volIntensity;
+            { float t=fminf(density*params.volExtinction*0.5f,1.f)*params.volIntensity; stepRGB=make_float3(fminf(t*3.f,1.f),fmaxf(0.f,(t-.33f)*3.f),fmaxf(0.f,(t-.66f)*3.f)); }
         } else if (rmode==4) { // Blackbody only
             float temp = sampleVolumeTemp(u,v,w);
             if (temp > params.volTempMin) {
                 float tN = fminf((temp-params.volTempMin)/(params.volTempMax-params.volTempMin+1e-6f), 1.f);
-                stepRad = tN*tN * params.volEmissionIntensity * density * params.volIntensity;
+                float T = params.volTempMin+tN*(params.volTempMax-params.volTempMin);
+                float t100b=T/100.f; float cr=1,cg=1,cb=1;
+                if(T<=6600.f){cr=1;cg=fmaxf(0.f,fminf(0.39f*logf(t100b)-0.63f,1.f));cb=fmaxf(0.f,fminf(0.54f*logf(t100b-10.f)-1.19f,1.f));}
+                else{cr=fmaxf(0.f,fminf(1.29f*powf(t100b-60.f,-0.13f),1.f));cg=fmaxf(0.f,fminf(1.13f*powf(t100b-60.f,-0.07f),1.f));cb=1;}
+                float em=params.volEmissionIntensity*density*params.volIntensity;
+                stepRGB=make_float3(cr*em,cg*em,cb*em);
             }
         } else { // Lit (0) / Explosion (5)
             float powder = 1.f;
@@ -753,36 +784,48 @@ static __forceinline__ __device__ void marchVolume(
                 }
             }
 
-            float scatter = params.volScattering*density*phase*lightLum*shadowTrans*powder
-                           * (params.volScatterColor.x+params.volScatterColor.y+params.volScatterColor.z)*0.333f;
+            float scatW = params.volScattering*density*phase*shadowTrans*powder;
+            stepRGB = make_float3(
+                lightCol.x*params.volScatterColor.x*scatW,
+                lightCol.y*params.volScatterColor.y*scatW,
+                lightCol.z*params.volScatterColor.z*scatW);
 
-            // Dome ambient contribution (isotropic)
-            // Use first dome light if any
+            // Dome ambient RGB
             for (unsigned li=0; li<params.lightCount; ++li) {
                 if (params.lights[li].type==3) {
-                    float domeLum = (params.lights[li].color.x+params.lights[li].color.y+params.lights[li].color.z)*0.333f*params.lights[li].intensity;
-                    scatter += params.volScattering * density * domeLum * (1.f/(4.f*3.14159f)) * 0.5f;
-                    break;
-                }
-            }
+                    float dW = params.volScattering*density*(1.f/(4.f*3.14159f))*0.5f;
+                    stepRGB.x+=params.lights[li].color.x*params.lights[li].intensity*dW;
+                    stepRGB.y+=params.lights[li].color.y*params.lights[li].intensity*dW;
+                    stepRGB.z+=params.lights[li].color.z*params.lights[li].intensity*dW;
+                    break; } }
 
-            stepRad = scatter * params.volIntensity;
+            stepRGB.x*=params.volIntensity; stepRGB.y*=params.volIntensity; stepRGB.z*=params.volIntensity;
         }
 
-        // Scatter accumulates through absorption
-        outRadiance += outTransmittance * absorption * stepRad;
+        // Scatter through absorption (RGB)
+        outRGB.x += outTransmittance * absorption * stepRGB.x;
+        outRGB.y += outTransmittance * absorption * stepRGB.y;
+        outRGB.z += outTransmittance * absorption * stepRGB.z;
 
-        // Emission bypasses absorption — visible even at zero extinction
-        if (rmode==4 || rmode==5 || params.volEmissionIntensity>0.01f) {
-            float emDirect = 0.f;
+        // Emission RGB — bypasses absorption
+        if (rmode==4||rmode==5||params.volEmissionIntensity>0.01f) {
+            float3 emRGB = make_float3(0.f,0.f,0.f);
             float temp2 = sampleVolumeTemp(u,v,w);
             if (temp2 > params.volTempMin) {
                 float tN2 = fminf((temp2-params.volTempMin)/(params.volTempMax-params.volTempMin+1e-6f), 1.f);
-                emDirect = tN2*tN2 * params.volEmissionIntensity;
+                float T2=params.volTempMin+tN2*(params.volTempMax-params.volTempMin);
+                float t100=T2/100.f; float cr=1,cg=1,cb=1;
+                if(T2<=6600.f){cr=1;cg=fmaxf(0.f,fminf(0.39f*logf(t100)-0.63f,1.f));cb=fmaxf(0.f,fminf(0.54f*logf(t100-10.f)-1.19f,1.f));}
+                else{cr=fmaxf(0.f,fminf(1.29f*powf(t100-60.f,-0.13f),1.f));cg=fmaxf(0.f,fminf(1.13f*powf(t100-60.f,-0.07f),1.f));cb=1;}
+                emRGB=make_float3(cr*params.volEmissionIntensity*tN2, cg*params.volEmissionIntensity*tN2, cb*params.volEmissionIntensity*tN2);
             }
             float fl2 = sampleVolumeFlame(u,v,w);
-            if (fl2 > 0.01f) emDirect += fl2 * params.volFlameIntensity;
-            outRadiance += outTransmittance * emDirect * density * dt * params.volIntensity;
+            if(fl2>0.01f){
+                float T3=1500.f+fl2*2000.f,t100=T3/100.f;
+                float cr=1,cg=fmaxf(0.f,fminf(0.39f*logf(t100)-0.63f,1.f)),cb=fmaxf(0.f,fminf(0.54f*logf(t100-10.f)-1.19f,1.f));
+                emRGB.x+=cr*params.volFlameIntensity*fl2; emRGB.y+=cg*params.volFlameIntensity*fl2; emRGB.z+=cb*params.volFlameIntensity*fl2;}
+            float emW=outTransmittance*density*dt*params.volIntensity;
+            outRGB.x+=emRGB.x*emW; outRGB.y+=emRGB.y*emW; outRGB.z+=emRGB.z*emW;
         }
 
         outTransmittance *= stepTrans;
@@ -835,12 +878,11 @@ extern "C" __global__ void __raygen__spectral()
         float spp1Alpha = spp1Hit ? 1.f : 0.f;
         if (params.hasVolume && params.volumeDensity) {
             float surfT = spp1Hit ? __uint_as_float(p3) : 1e30f;
-            float volRad = 0.f, volTrans = 1.f;
-            marchVolume(origin, dir, surfT, 550.f, dofSeed + 200u, volRad, volTrans);
-            float grey = volRad * 2.f; // boost for visibility
-            r = grey + volTrans * r;
-            g = grey + volTrans * g;
-            b = grey + volTrans * b;
+            float3 volRGB = make_float3(0.f,0.f,0.f); float volTrans = 1.f;
+            marchVolume(origin, dir, surfT, 550.f, dofSeed + 200u, volRGB, volTrans);
+            r = volRGB.x + volTrans * r;
+            g = volRGB.y + volTrans * g;
+            b = volRGB.z + volTrans * b;
             spp1Alpha = 1.f - volTrans * (1.f - spp1Alpha);
         }
 
@@ -1038,20 +1080,24 @@ extern "C" __global__ void __raygen__spectral()
 
             // GPU volume ray marching — single pass for radiance + transmittance
             float sampleAlpha = isHit ? 1.f : 0.f;
+            float vx=0.f, vy=0.f, vz=0.f;
             if (params.hasVolume && params.volumeDensity) {
                 float surfT = isHit ? depth : 1e30f;
-                float volRad = 0.f, volTrans = 1.f;
-                marchVolume(origin, dir, surfT, lambda, seed + 200u, volRad, volTrans);
-                // Composite: volume over surface/background
-                radiance = volRad + volTrans * radiance;
-                // Alpha: volume opacity + surface behind
+                float3 volRGB = make_float3(0.f,0.f,0.f); float volTrans = 1.f;
+                marchVolume(origin, dir, surfT, lambda, seed + 200u, volRGB, volTrans);
+                // Volume RGB → XYZ directly (sRGB D65 matrix)
+                vx = 0.4124f*volRGB.x + 0.3576f*volRGB.y + 0.1805f*volRGB.z;
+                vy = 0.2126f*volRGB.x + 0.7152f*volRGB.y + 0.0722f*volRGB.z;
+                vz = 0.0193f*volRGB.x + 0.1192f*volRGB.y + 0.9505f*volRGB.z;
+                radiance *= volTrans;
                 sampleAlpha = 1.f - volTrans * (1.f - sampleAlpha);
             }
             alphaAccum += sampleAlpha;
 
             float cx,cy,cz; cieXYZ(lambda,cx,cy,cz);
             float scale = 400.f/106.856895f;
-            X+=radiance*cx*scale; Y+=radiance*cy*scale; Z+=radiance*cz*scale;
+            // Surface spectral + volume RGB→XYZ
+            X+=radiance*cx*scale + vx; Y+=radiance*cy*scale + vy; Z+=radiance*cz*scale + vz;
         }
 
         float inv=1.f/float(spp); X*=inv; Y*=inv; Z*=inv;

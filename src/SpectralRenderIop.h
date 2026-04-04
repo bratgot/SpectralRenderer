@@ -165,6 +165,7 @@ private:
     double _vdbAnisotropy = 0.0;
     double _vdbStepSize = 0.0;       // 0 = auto
     int    _vdbMaxSteps = 256;
+    int    _vdbVolRes = 3;           // 0=128, 1=256, 2=512, 3=Native
     double _vdbEmissionIntensity = 2.0;
     double _vdbTempMin = 500.0;
     double _vdbTempMax = 6500.0;
