@@ -359,6 +359,22 @@ void SpectralIntegrator::RenderFrame(
 
                                         // Beer-Lambert extinction
                                         float sigma_t = density * volume->extinction;
+
+                                        // Chromatic extinction: per-channel absorption
+                                        if (volume->chromaticExtinction) {
+                                            // Map wavelength to RGB weight
+                                            // Short λ (400-500nm) → blue channel → higher sigma
+                                            // Long λ  (600-700nm) → red channel  → lower sigma
+                                            float wt;
+                                            if (lambda < 500.f)
+                                                wt = volume->sigmaB;  // blue
+                                            else if (lambda < 580.f)
+                                                wt = volume->sigmaG;  // green
+                                            else
+                                                wt = volume->sigmaR;  // red
+                                            sigma_t *= wt;
+                                        }
+
                                         float stepTrans = std::exp(-sigma_t * dt);
                                         float absorption = 1.f - stepTrans;
 
@@ -380,13 +396,30 @@ void SpectralIntegrator::RenderFrame(
                                         // Spectral response of scatter
                                         float scatterR = scatter * phase * lightColor[0] * volume->scatterColor[0] * powder;
 
-                                        // Emission from temperature (blackbody approximation)
+                                        // Emission from temperature
                                         float emission = 0.f;
                                         if (volume->emissionIntensity > 0.01f) {
                                             float temp = volume->SampleTemperature(uv[0], uv[1], uv[2]);
                                             if (temp > volume->tempMin) {
                                                 float tNorm = std::min((temp - volume->tempMin) / (volume->tempMax - volume->tempMin + 1e-6f), 1.f);
-                                                emission = tNorm * tNorm * volume->emissionIntensity * density;
+                                                if (volume->useBlackbody) {
+                                                    // Planck's law: spectral radiance at wavelength lambda
+                                                    // B(λ,T) = (2hc²/λ⁵) / (exp(hc/λkT) - 1)
+                                                    float T = volume->tempMin + tNorm * (volume->tempMax - volume->tempMin);
+                                                    float lam_m = lambda * 1e-9f; // nm → metres
+                                                    const float h = 6.626e-34f;
+                                                    const float c = 3e8f;
+                                                    const float k = 1.381e-23f;
+                                                    float x = (h * c) / (lam_m * k * std::max(T, 1.f));
+                                                    float planck = 0.f;
+                                                    if (x < 80.f) // avoid overflow
+                                                        planck = (2.f * h * c * c) / (std::pow(lam_m, 5.f) * (std::exp(x) - 1.f));
+                                                    // Normalise to perceptual range (peak at ~5500K ≈ 2.6e13)
+                                                    emission = planck * 3.85e-14f * volume->emissionIntensity * density;
+                                                } else {
+                                                    // Simple quadratic ramp (legacy)
+                                                    emission = tNorm * tNorm * volume->emissionIntensity * density;
+                                                }
                                             }
                                         }
 

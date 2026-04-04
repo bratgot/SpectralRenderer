@@ -10,6 +10,9 @@
     <ClCompile Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralVDBRead.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralVolumeMaterial.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <CustomBuild Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\CMakeLists.txt" />

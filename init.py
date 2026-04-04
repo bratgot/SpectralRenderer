@@ -15,3 +15,9 @@ if plugin_dir:
 lib_dir = os.path.join(plugin_dir, "lib")
 if os.path.isdir(lib_dir):
     os.environ["PATH"] = lib_dir + os.pathsep + os.environ.get("PATH", "")
+
+# Force-load SpectralRender.dll so ALL node classes register at startup
+# (SpectralRender, SpectralSurface, SpectralVDBRead, SpectralVolumeMaterial)
+# Without this, only SpectralRender registers on first use — the others
+# show "Unknown command" until a SpectralRender node is created.
+nuke.load("SpectralRender")

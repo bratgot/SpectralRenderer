@@ -8,6 +8,7 @@
 #ifdef SPECTRAL_HAS_VDB
 #include "SpectralVDBLoader.h"
 #include "SpectralVDBRead.h"
+#include "SpectralVolumeMaterial.h"
 #endif
 
 // PXR — USD stage traversal
@@ -82,7 +83,7 @@ SpectralRenderIop::SpectralRenderIop(Node* node)
     : Iop(node)
     , _scene(std::make_unique<pxr::SpectralScene>())
 {
-    inputs(4);  // force 4 visible input pipes
+    inputs(5);  // scene, cam, bg, vol, vol_mat
     fprintf(stderr, "SpectralRender: DLL build %s %s\n", __DATE__, __TIME__);
 }
 
@@ -131,6 +132,7 @@ const char* SpectralRenderIop::input_label(int idx, char*) const
         case 1: return "Cam";
         case 2: return "BG";
         case 3: return "Vol";
+        case 4: return "VolMat";
         default: return "";
     }
 }
@@ -2930,20 +2932,51 @@ void SpectralRenderIop::_LoadVDBForRender()
 // ---------------------------------------------------------------------------
 void SpectralRenderIop::_applyVolumeShading(std::shared_ptr<pxr::SpectralVolume>& vol)
 {
-    vol->extinction = float(_vdbExtinction);
-    vol->scattering = float(_vdbScattering);
-    vol->densityMult = float(_vdbDensityMult);
-    vol->anisotropy = float(_vdbAnisotropy);
-    vol->emissionIntensity = float(_vdbEmissionIntensity);
-    vol->tempMin = float(_vdbTempMin);
-    vol->tempMax = float(_vdbTempMax);
-    vol->stepSize = float(_vdbStepSize);
-    vol->gForward = float(_vdbGForward);
-    vol->gBackward = float(_vdbGBackward);
-    vol->lobeMix = float(_vdbLobeMix);
-    vol->powderStrength = float(_vdbPowder);
-    vol->jitter = _vdbJitter;
-    vol->scatterColor = pxr::GfVec3f(_vdbScatterColor[0], _vdbScatterColor[1], _vdbScatterColor[2]);
+    // Check VolMat input (input 4) for SpectralVolumeMaterial
+    SpectralVolumeMaterial* mat = nullptr;
+    if (inputs() > 4 && input(4)) {
+        mat = dynamic_cast<SpectralVolumeMaterial*>(input(4));
+    }
+
+    if (mat) {
+        // Use connected SpectralVolumeMaterial parameters
+        vol->extinction = float(mat->extinction);
+        vol->scattering = float(mat->scattering);
+        vol->densityMult = float(mat->densityMult);
+        vol->emissionIntensity = float(mat->emissionIntensity);
+        vol->tempMin = float(mat->tempMin);
+        vol->tempMax = float(mat->tempMax);
+        vol->stepSize = float(mat->stepSize);
+        vol->gForward = float(mat->gForward);
+        vol->gBackward = float(mat->gBackward);
+        vol->lobeMix = float(mat->lobeMix);
+        vol->powderStrength = float(mat->powder);
+        vol->jitter = mat->jitter;
+        vol->scatterColor = pxr::GfVec3f(mat->scatterColor[0], mat->scatterColor[1], mat->scatterColor[2]);
+        vol->useBlackbody = mat->useBlackbody;
+        vol->chromaticExtinction = mat->chromaticExtinction;
+        vol->sigmaR = float(mat->sigmaR);
+        vol->sigmaG = float(mat->sigmaG);
+        vol->sigmaB = float(mat->sigmaB);
+    } else {
+        // Fall back to SpectralRender's own Volumes tab knobs
+        vol->extinction = float(_vdbExtinction);
+        vol->scattering = float(_vdbScattering);
+        vol->densityMult = float(_vdbDensityMult);
+        vol->anisotropy = float(_vdbAnisotropy);
+        vol->emissionIntensity = float(_vdbEmissionIntensity);
+        vol->tempMin = float(_vdbTempMin);
+        vol->tempMax = float(_vdbTempMax);
+        vol->stepSize = float(_vdbStepSize);
+        vol->gForward = float(_vdbGForward);
+        vol->gBackward = float(_vdbGBackward);
+        vol->lobeMix = float(_vdbLobeMix);
+        vol->powderStrength = float(_vdbPowder);
+        vol->jitter = _vdbJitter;
+        vol->scatterColor = pxr::GfVec3f(_vdbScatterColor[0], _vdbScatterColor[1], _vdbScatterColor[2]);
+        vol->useBlackbody = false;
+        vol->chromaticExtinction = false;
+    }
 }
 
 // ---------------------------------------------------------------------------

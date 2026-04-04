@@ -43,6 +43,15 @@ struct SpectralVolume {
     // Scatter colour
     GfVec3f scatterColor = GfVec3f(1.f);
 
+    // CIE blackbody emission (Phase 12)
+    bool  useBlackbody   = true;
+
+    // Chromatic extinction (Phase 12)
+    bool  chromaticExtinction = false;
+    float sigmaR = 1.0f;    // relative extinction at red
+    float sigmaG = 1.0f;    // relative extinction at green
+    float sigmaB = 1.2f;    // relative extinction at blue (higher = more blue scatter)
+
     bool IsValid() const { return !density.empty() && resX > 0; }
     bool HasBbox() const { return resX > 0 && resY > 0 && resZ > 0; }
 

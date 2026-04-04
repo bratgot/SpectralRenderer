@@ -258,7 +258,7 @@ endif()
 # SpectralRender.dll — NDK RenderIop (Nuke plugin)
 # ---------------------------------------------------------------------------
 add_library(SpectralRender SHARED
-    src/SpectralRenderIop.cpp src/SpectralSurfaceOp.cpp src/SpectralVDBRead.cpp
+    src/SpectralRenderIop.cpp src/SpectralSurfaceOp.cpp src/SpectralVDBRead.cpp src/SpectralVolumeMaterial.cpp
 )
 target_include_directories(SpectralRender PRIVATE ${SPECTRAL_INCLUDES})
 target_compile_definitions(SpectralRender PRIVATE ${SPECTRAL_DEFINES})
