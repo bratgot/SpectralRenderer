@@ -225,6 +225,12 @@ private:
     int    _vdbFrameOffset = 0;
     const char* _vdbOrigFile = "";
 
+    // Volume transform (axis controls)
+    double _vdbTranslate[3] = {0, 0, 0};
+    double _vdbRotate[3]    = {0, 0, 0};
+    double _vdbScale[3]     = {1, 1, 1};
+    double _vdbUniformScale = 1.0;
+
     // VDB viewport preview
     bool   _vdbShowBbox = true;
     bool   _vdbShowPoints = true;

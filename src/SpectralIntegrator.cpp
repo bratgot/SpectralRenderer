@@ -82,8 +82,8 @@ void SpectralIntegrator::RenderFrame(
     if (volume && volume->IsValid())
         fprintf(stderr, "SpectralRender: volume active — %dx%dx%d, ext=%.1f, bbox (%.2f,%.2f,%.2f)→(%.2f,%.2f,%.2f)\n",
                 volume->resX, volume->resY, volume->resZ, volume->extinction,
-                volume->bboxMin[0], volume->bboxMin[1], volume->bboxMin[2],
-                volume->bboxMax[0], volume->bboxMax[1], volume->bboxMax[2]);
+                volume->GetBboxMin()[0], volume->GetBboxMin()[1], volume->GetBboxMin()[2],
+                volume->GetBboxMax()[0], volume->GetBboxMax()[1], volume->GetBboxMax()[2]);
     else
         fprintf(stderr, "SpectralRender: no volume\n");
 
@@ -337,13 +337,13 @@ void SpectralIntegrator::RenderFrame(
                                                1.f/(std::abs(rd[1])>1e-8f?rd[1]:1e-8f),
                                                1.f/(std::abs(rd[2])>1e-8f?rd[2]:1e-8f));
                                 GfVec3f t0v = GfVec3f(
-                                    (volume->bboxMin[0]-ro[0])*invDir[0],
-                                    (volume->bboxMin[1]-ro[1])*invDir[1],
-                                    (volume->bboxMin[2]-ro[2])*invDir[2]);
+                                    (volume->GetBboxMin()[0]-ro[0])*invDir[0],
+                                    (volume->GetBboxMin()[1]-ro[1])*invDir[1],
+                                    (volume->GetBboxMin()[2]-ro[2])*invDir[2]);
                                 GfVec3f t1v = GfVec3f(
-                                    (volume->bboxMax[0]-ro[0])*invDir[0],
-                                    (volume->bboxMax[1]-ro[1])*invDir[1],
-                                    (volume->bboxMax[2]-ro[2])*invDir[2]);
+                                    (volume->GetBboxMax()[0]-ro[0])*invDir[0],
+                                    (volume->GetBboxMax()[1]-ro[1])*invDir[1],
+                                    (volume->GetBboxMax()[2]-ro[2])*invDir[2]);
                                 float tNear = std::max({std::min(t0v[0],t1v[0]),
                                                         std::min(t0v[1],t1v[1]),
                                                         std::min(t0v[2],t1v[2])});
@@ -358,7 +358,7 @@ void SpectralIntegrator::RenderFrame(
 
                                 if (tNear < tFar) {
                                     // Step size from quality parameter
-                                    GfVec3f bboxSize = volume->bboxMax - volume->bboxMin;
+                                    GfVec3f bboxSize = volume->GetBboxMax() - volume->GetBboxMin();
                                     float voxelSize = std::max({bboxSize[0]/volume->resX,
                                                                 bboxSize[1]/volume->resY,
                                                                 bboxSize[2]/volume->resZ});
@@ -392,7 +392,7 @@ void SpectralIntegrator::RenderFrame(
 
                                         // Procedural fBm noise — perturbs density at render time
                                         if (volume->noiseEnable && density > 1e-6f) {
-                                            float bboxDiag = (volume->bboxMax - volume->bboxMin).GetLength();
+                                            float bboxDiag = (volume->GetBboxMax() - volume->GetBboxMin()).GetLength();
                                             float ns = volume->noiseNormalize
                                                 ? volume->noiseScale / std::max(bboxDiag, 1e-4f)
                                                 : volume->noiseScale;

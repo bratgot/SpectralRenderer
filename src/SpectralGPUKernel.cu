@@ -665,6 +665,42 @@ static __forceinline__ __device__ float gpuNoiseFBm(float x, float y, float z, i
     return total>0 ? val/total : 0;
 }
 
+// Inverse-transform world point to [0,1] volume UV (rotation-aware)
+static __forceinline__ __device__ void worldToVolumeUV(float px, float py, float pz, float& u, float& v, float& w)
+{
+    if (params.volHasTransform) {
+        // Translate to transform center
+        float lx = px - params.volXfCenter.x;
+        float ly = py - params.volXfCenter.y;
+        float lz = pz - params.volXfCenter.z;
+        // Inverse rotation (transpose)
+        float rx = params.volInvRotM[0]*lx + params.volInvRotM[3]*ly + params.volInvRotM[6]*lz;
+        float ry = params.volInvRotM[1]*lx + params.volInvRotM[4]*ly + params.volInvRotM[7]*lz;
+        float rz = params.volInvRotM[2]*lx + params.volInvRotM[5]*ly + params.volInvRotM[8]*lz;
+        // Inverse scale
+        rx *= params.volInvScale.x; ry *= params.volInvScale.y; rz *= params.volInvScale.z;
+        // Back to original bbox coords
+        float3 oc = make_float3(
+            (params.volOrigBboxMin.x+params.volOrigBboxMax.x)*0.5f,
+            (params.volOrigBboxMin.y+params.volOrigBboxMax.y)*0.5f,
+            (params.volOrigBboxMin.z+params.volOrigBboxMax.z)*0.5f);
+        float3 oh = make_float3(
+            (params.volOrigBboxMax.x-params.volOrigBboxMin.x)*0.5f,
+            (params.volOrigBboxMax.y-params.volOrigBboxMin.y)*0.5f,
+            (params.volOrigBboxMax.z-params.volOrigBboxMin.z)*0.5f);
+        u = (oh.x>1e-6f) ? (rx+oc.x-params.volOrigBboxMin.x)/(oh.x*2.f) : 0.5f;
+        v = (oh.y>1e-6f) ? (ry+oc.y-params.volOrigBboxMin.y)/(oh.y*2.f) : 0.5f;
+        w = (oh.z>1e-6f) ? (rz+oc.z-params.volOrigBboxMin.z)/(oh.z*2.f) : 0.5f;
+    } else {
+        float3 bSize = make_float3(params.volBboxMax.x-params.volBboxMin.x,
+                                    params.volBboxMax.y-params.volBboxMin.y,
+                                    params.volBboxMax.z-params.volBboxMin.z);
+        u = (bSize.x>1e-6f) ? (px-params.volBboxMin.x)/bSize.x : 0.5f;
+        v = (bSize.y>1e-6f) ? (py-params.volBboxMin.y)/bSize.y : 0.5f;
+        w = (bSize.z>1e-6f) ? (pz-params.volBboxMin.z)/bSize.z : 0.5f;
+    }
+}
+
 static __forceinline__ __device__ void marchVolume(
     float3 ro, float3 rdRaw, float surfaceT, float lambda, unsigned int seed,
     float3& outRGB, float& outTransmittance)
@@ -704,9 +740,8 @@ static __forceinline__ __device__ void marchVolume(
 
     for (int step=0; step<maxSteps && t<tFar; ++step, t+=dt) {
         float px=ro.x+rd.x*t, py=ro.y+rd.y*t, pz=ro.z+rd.z*t;
-        float u = (bSize.x>1e-6f) ? (px-params.volBboxMin.x)/bSize.x : 0.5f;
-        float v = (bSize.y>1e-6f) ? (py-params.volBboxMin.y)/bSize.y : 0.5f;
-        float w = (bSize.z>1e-6f) ? (pz-params.volBboxMin.z)/bSize.z : 0.5f;
+        float u, v, w;
+        worldToVolumeUV(px, py, pz, u, v, w);
 
         float density = sampleVolumeDensity(u,v,w);
 
@@ -785,9 +820,8 @@ static __forceinline__ __device__ void marchVolume(
                     float sDt=bboxDiag/(float)params.volShadowSteps;
                     for (int ss=1;ss<=params.volShadowSteps;++ss) {
                         float spx=px+sDir.x*sDt*ss,spy=py+sDir.y*sDt*ss,spz=pz+sDir.z*sDt*ss;
-                        float su=(bSize.x>1e-6f)?(spx-params.volBboxMin.x)/bSize.x:0.5f;
-                        float sv=(bSize.y>1e-6f)?(spy-params.volBboxMin.y)/bSize.y:0.5f;
-                        float sw=(bSize.z>1e-6f)?(spz-params.volBboxMin.z)/bSize.z:0.5f;
+                        float su, sv, sw;
+                        worldToVolumeUV(spx, spy, spz, su, sv, sw);
                         if(su<0||su>1||sv<0||sv>1||sw<0||sw>1) break;
                         shadowTrans*=expf(-sampleVolumeDensity(su,sv,sw)*params.volExtinction*params.volShadowDensity*sDt);
                         if(shadowTrans<0.001f) break;

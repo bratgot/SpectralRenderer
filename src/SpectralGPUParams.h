@@ -140,6 +140,13 @@ struct LaunchParams {
     float              volNoiseStrength;
     int                volNoiseOctaves;
     float              volNoiseRoughness;
+    // Volume transform (inverse)
+    int                volHasTransform;
+    float3             volXfCenter;        // transformed center
+    float3             volInvScale;        // 1/scale
+    float              volInvRotM[9];      // inverse rotation (transpose of rotation matrix)
+    float3             volOrigBboxMin;     // original bbox (before transform)
+    float3             volOrigBboxMax;
 };
 
 // Per-ray payload — carried through the trace

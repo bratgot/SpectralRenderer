@@ -59,6 +59,7 @@
 #include <DDImage/DeepPlane.h>
 #include <DDImage/DeepInfo.h>
 
+#define _USE_MATH_DEFINES
 #include <cmath>
 #include <cstdio>
 #include <algorithm>
@@ -461,7 +462,64 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         String_knob(f, &_vdbOrigFile, "vdb_orig_file", "");
         SetFlags(f, Knob::INVISIBLE);
 
-        // ─── Render Mode ────────────────────────────────────────────────
+        // --- Axis Controls -----------------------------------------------
+        Divider(f, "Axis Controls");
+        Text_knob(f,
+            "<font color='#777' size='-1'>"
+            "Transform the volume in world space. Rotation is around the volume centre."
+            "</font>"
+        );
+        Newline(f);
+        Double_knob(f, &_vdbTranslate[0], "vdb_translate_x", "translate"); SetRange(f, -1000, 1000);
+        Double_knob(f, &_vdbTranslate[1], "vdb_translate_y", ""); SetRange(f, -1000, 1000);
+        ClearFlags(f, Knob::STARTLINE);
+        Double_knob(f, &_vdbTranslate[2], "vdb_translate_z", ""); SetRange(f, -1000, 1000);
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "World-space offset from the VDB's native position.\nX Y Z in world units.");
+
+        Double_knob(f, &_vdbRotate[0], "vdb_rotate_x", "rotate"); SetRange(f, -360, 360);
+        Double_knob(f, &_vdbRotate[1], "vdb_rotate_y", ""); SetRange(f, -360, 360);
+        ClearFlags(f, Knob::STARTLINE);
+        Double_knob(f, &_vdbRotate[2], "vdb_rotate_z", ""); SetRange(f, -360, 360);
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Rotation in degrees around volume centre.\nXYZ Euler order.");
+
+        Double_knob(f, &_vdbScale[0], "vdb_scale_x", "scale"); SetRange(f, -10, 10);
+        Double_knob(f, &_vdbScale[1], "vdb_scale_y", ""); SetRange(f, -10, 10);
+        ClearFlags(f, Knob::STARTLINE);
+        Double_knob(f, &_vdbScale[2], "vdb_scale_z", ""); SetRange(f, -10, 10);
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Scale relative to volume centre.\n1 = original. Negative = mirror.");
+        Double_knob(f, &_vdbUniformScale, "vdb_uniform_scale", "uniform scale");
+        SetRange(f, 0.01, 10);
+        Tooltip(f, "Multiplier applied to all three scale axes.\n"
+                   "0.5 = half size. 2 = double size.");
+
+        Text_knob(f, "<font size='-1' color='#666'>Rotate</font>");
+        Button(f, "vdb_rot_x90", " X +90\xc2\xb0 ");
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Rotate 90 degrees around X axis (pitch).");
+        Button(f, "vdb_rot_y90", " Y +90\xc2\xb0 ");
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Rotate 90 degrees around Y axis (yaw).");
+        Button(f, "vdb_rot_z90", " Z +90\xc2\xb0 ");
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Rotate 90 degrees around Z axis (roll).");
+        Text_knob(f, "<font size='-1' color='#666'>Flip</font>");
+        Button(f, "vdb_mirror_x", " X ");
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Mirror volume along X axis (negate X scale).");
+        Button(f, "vdb_mirror_y", " Y ");
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Mirror volume along Y axis (negate Y scale).");
+        Button(f, "vdb_mirror_z", " Z ");
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Mirror volume along Z axis (negate Z scale).");
+        Button(f, "vdb_reset_xform", " Reset ");
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Reset translate, rotate, and scale to default.");
+
+        // --- Render Mode -------------------------------------------------
         Divider(f, "Render Mode");
         static const char* const renderModes[] = {
             "Lit", "Greyscale", "Heat", "Cool", "Blackbody", "Explosion", nullptr
@@ -1311,6 +1369,38 @@ int SpectralRenderIop::knob_changed(Knob* k)
     if (k->is("vdb_quality") || k->is("vdb_shadow_steps") || k->is("vdb_shadow_density") ||
         k->is("vdb_env_diffuse")) {
         if (knob("vdb_quality_preset")) { knob("vdb_quality_preset")->set_value(0); _vdbQualityPreset = 0; }
+        return 1;
+    }
+
+    // Axis control buttons
+    if (k->is("vdb_rot_x90")) { _vdbRotate[0] = std::fmod(_vdbRotate[0]+90.0, 360.0); if(knob("vdb_rotate_x")) knob("vdb_rotate_x")->set_value(_vdbRotate[0]); _vdbPreviewDirty=true; return 1; }
+    if (k->is("vdb_rot_y90")) { _vdbRotate[1] = std::fmod(_vdbRotate[1]+90.0, 360.0); if(knob("vdb_rotate_y")) knob("vdb_rotate_y")->set_value(_vdbRotate[1]); _vdbPreviewDirty=true; return 1; }
+    if (k->is("vdb_rot_z90")) { _vdbRotate[2] = std::fmod(_vdbRotate[2]+90.0, 360.0); if(knob("vdb_rotate_z")) knob("vdb_rotate_z")->set_value(_vdbRotate[2]); _vdbPreviewDirty=true; return 1; }
+    if (k->is("vdb_mirror_x")) { _vdbScale[0] = -_vdbScale[0]; if(knob("vdb_scale_x")) knob("vdb_scale_x")->set_value(_vdbScale[0]); _vdbPreviewDirty=true; return 1; }
+    if (k->is("vdb_mirror_y")) { _vdbScale[1] = -_vdbScale[1]; if(knob("vdb_scale_y")) knob("vdb_scale_y")->set_value(_vdbScale[1]); _vdbPreviewDirty=true; return 1; }
+    if (k->is("vdb_mirror_z")) { _vdbScale[2] = -_vdbScale[2]; if(knob("vdb_scale_z")) knob("vdb_scale_z")->set_value(_vdbScale[2]); _vdbPreviewDirty=true; return 1; }
+    if (k->is("vdb_reset_xform")) {
+        _vdbTranslate[0]=_vdbTranslate[1]=_vdbTranslate[2]=0;
+        _vdbRotate[0]=_vdbRotate[1]=_vdbRotate[2]=0;
+        _vdbScale[0]=_vdbScale[1]=_vdbScale[2]=1; _vdbUniformScale=1;
+        if(knob("vdb_translate_x")) knob("vdb_translate_x")->set_value(0);
+        if(knob("vdb_translate_y")) knob("vdb_translate_y")->set_value(0);
+        if(knob("vdb_translate_z")) knob("vdb_translate_z")->set_value(0);
+        if(knob("vdb_rotate_x")) knob("vdb_rotate_x")->set_value(0);
+        if(knob("vdb_rotate_y")) knob("vdb_rotate_y")->set_value(0);
+        if(knob("vdb_rotate_z")) knob("vdb_rotate_z")->set_value(0);
+        if(knob("vdb_scale_x")) knob("vdb_scale_x")->set_value(1);
+        if(knob("vdb_scale_y")) knob("vdb_scale_y")->set_value(1);
+        if(knob("vdb_scale_z")) knob("vdb_scale_z")->set_value(1);
+        if(knob("vdb_uniform_scale")) knob("vdb_uniform_scale")->set_value(1);
+        _vdbPreviewDirty=true; return 1;
+    }
+    // Any transform knob change
+    if (k->is("vdb_translate_x") || k->is("vdb_translate_y") || k->is("vdb_translate_z") ||
+        k->is("vdb_rotate_x") || k->is("vdb_rotate_y") || k->is("vdb_rotate_z") ||
+        k->is("vdb_scale_x") || k->is("vdb_scale_y") || k->is("vdb_scale_z") ||
+        k->is("vdb_uniform_scale")) {
+        _vdbPreviewDirty = true;
         return 1;
     }
 
@@ -3424,6 +3514,18 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
     glPushAttrib(GL_CURRENT_BIT | GL_LINE_BIT | GL_ENABLE_BIT | GL_POINT_BIT);
     glDisable(GL_LIGHTING);
 
+    // Apply volume transform via GL matrix stack
+    pxr::GfVec3f center = (_volume->bboxMin + _volume->bboxMax) * 0.5f;
+    float us = float(_vdbUniformScale);
+    glPushMatrix();
+    glTranslatef(float(_vdbTranslate[0]), float(_vdbTranslate[1]), float(_vdbTranslate[2]));
+    glTranslatef(center[0], center[1], center[2]);
+    glRotatef(float(_vdbRotate[0]), 1, 0, 0);
+    glRotatef(float(_vdbRotate[1]), 0, 1, 0);
+    glRotatef(float(_vdbRotate[2]), 0, 0, 1);
+    glScalef(float(_vdbScale[0])*us, float(_vdbScale[1])*us, float(_vdbScale[2])*us);
+    glTranslatef(-center[0], -center[1], -center[2]);
+
     float co[8][3];
     for (int i = 0; i < 8; ++i) {
         co[i][0] = (i & 1) ? _volume->bboxMax[0] : _volume->bboxMin[0];
@@ -3497,6 +3599,7 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
             glEnd(); glDisable(GL_BLEND);
         }
     }
+    glPopMatrix();
     glPopAttrib();
 }
 
@@ -3726,6 +3829,13 @@ void SpectralRenderIop::_applyVolumeShading(std::shared_ptr<pxr::SpectralVolume>
     vol->phaseMode = _vdbPhaseMode;
     vol->mieDropletD = float(_vdbMieDropletD);
     vol->spectralVolumes = _vdbSpectralVolumes;
+
+    // Volume transform
+    float us = float(_vdbUniformScale);
+    vol->translate = pxr::GfVec3f(float(_vdbTranslate[0]), float(_vdbTranslate[1]), float(_vdbTranslate[2]));
+    vol->rotate = pxr::GfVec3f(float(_vdbRotate[0]), float(_vdbRotate[1]), float(_vdbRotate[2]));
+    vol->scale = pxr::GfVec3f(float(_vdbScale[0])*us, float(_vdbScale[1])*us, float(_vdbScale[2])*us);
+    vol->BuildTransform();
 }
 
 // ---------------------------------------------------------------------------

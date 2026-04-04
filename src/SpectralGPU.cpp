@@ -590,8 +590,8 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
         launchParams.volResX = volume->resX;
         launchParams.volResY = volume->resY;
         launchParams.volResZ = volume->resZ;
-        launchParams.volBboxMin = make_float3(volume->bboxMin[0], volume->bboxMin[1], volume->bboxMin[2]);
-        launchParams.volBboxMax = make_float3(volume->bboxMax[0], volume->bboxMax[1], volume->bboxMax[2]);
+        launchParams.volBboxMin = make_float3(volume->GetBboxMin()[0], volume->GetBboxMin()[1], volume->GetBboxMin()[2]);
+        launchParams.volBboxMax = make_float3(volume->GetBboxMax()[0], volume->GetBboxMax()[1], volume->GetBboxMax()[2]);
         launchParams.volExtinction = volume->extinction;
         launchParams.volScattering = volume->scattering;
         launchParams.volDensityMult = volume->densityMult;
@@ -656,6 +656,14 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
         launchParams.volNoiseStrength = volume->noiseStrength;
         launchParams.volNoiseOctaves = volume->noiseOctaves;
         launchParams.volNoiseRoughness = volume->noiseRoughness;
+
+        // Volume transform
+        launchParams.volHasTransform = volume->hasTransform ? 1 : 0;
+        launchParams.volXfCenter = make_float3(volume->_center[0], volume->_center[1], volume->_center[2]);
+        launchParams.volInvScale = make_float3(volume->_invScale[0], volume->_invScale[1], volume->_invScale[2]);
+        for (int i = 0; i < 9; ++i) launchParams.volInvRotM[i] = volume->_rotM[i];
+        launchParams.volOrigBboxMin = make_float3(volume->bboxMin[0], volume->bboxMin[1], volume->bboxMin[2]);
+        launchParams.volOrigBboxMax = make_float3(volume->bboxMax[0], volume->bboxMax[1], volume->bboxMax[2]);
 
         fprintf(stderr, "SpectralGPU: volume uploaded %dx%dx%d (%.1f MB)\n",
                 volume->resX, volume->resY, volume->resZ, densBytes / (1024.f * 1024.f));

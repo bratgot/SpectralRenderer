@@ -18,9 +18,92 @@ struct SpectralVolume {
     std::vector<GfVec3f> color;        // 3D color grid (optional)
     int resX = 0, resY = 0, resZ = 0;
 
-    // World-space bounds
+    // World-space bounds (original, before transform)
     GfVec3f bboxMin = GfVec3f(0.f);
     GfVec3f bboxMax = GfVec3f(1.f);
+
+    // Volume transform (applied on top of VDB world-space bounds)
+    GfVec3f translate = GfVec3f(0.f);
+    GfVec3f rotate    = GfVec3f(0.f);  // degrees XYZ
+    GfVec3f scale     = GfVec3f(1.f);
+    bool    hasTransform = false;
+
+    // Cached transformed bbox (computed by BuildTransform)
+    GfVec3f xfBboxMin, xfBboxMax;
+
+    // Build transform from translate/rotate/scale. Call after setting those.
+    void BuildTransform() {
+        // Center of the original bbox
+        GfVec3f center = (bboxMin + bboxMax) * 0.5f;
+        GfVec3f halfSize = (bboxMax - bboxMin) * 0.5f;
+
+        hasTransform = (translate.GetLength() > 1e-6f ||
+                        rotate.GetLength() > 1e-6f ||
+                        std::abs(scale[0]-1.f) > 1e-6f ||
+                        std::abs(scale[1]-1.f) > 1e-6f ||
+                        std::abs(scale[2]-1.f) > 1e-6f);
+
+        // Compute axis-aligned bbox after scale+rotate+translate
+        // For ray intersection we need the world-space AABB
+        GfVec3f scaledHalf(halfSize[0]*scale[0], halfSize[1]*scale[1], halfSize[2]*scale[2]);
+
+        // Rotation matrix (XYZ Euler)
+        float cx=std::cos(rotate[0]*3.14159265f/180.f), sx=std::sin(rotate[0]*3.14159265f/180.f);
+        float cy=std::cos(rotate[1]*3.14159265f/180.f), sy=std::sin(rotate[1]*3.14159265f/180.f);
+        float cz=std::cos(rotate[2]*3.14159265f/180.f), sz=std::sin(rotate[2]*3.14159265f/180.f);
+        // Row-major rotation matrix
+        float m00=cy*cz, m01=sx*sy*cz-cx*sz, m02=cx*sy*cz+sx*sz;
+        float m10=cy*sz, m11=sx*sy*sz+cx*cz, m12=cx*sy*sz-sx*cz;
+        float m20=-sy,   m21=sx*cy,           m22=cx*cy;
+
+        // Store rotation matrix for inverse transform
+        _rotM[0]=m00; _rotM[1]=m01; _rotM[2]=m02;
+        _rotM[3]=m10; _rotM[4]=m11; _rotM[5]=m12;
+        _rotM[6]=m20; _rotM[7]=m21; _rotM[8]=m22;
+        _center = center + translate;
+        _invScale = GfVec3f(1.f/std::max(scale[0],1e-6f),
+                            1.f/std::max(scale[1],1e-6f),
+                            1.f/std::max(scale[2],1e-6f));
+
+        // Expand AABB to enclose rotated+scaled box
+        // Each corner contributes to min/max
+        GfVec3f absR[3] = {
+            GfVec3f(std::abs(m00),std::abs(m01),std::abs(m02)),
+            GfVec3f(std::abs(m10),std::abs(m11),std::abs(m12)),
+            GfVec3f(std::abs(m20),std::abs(m21),std::abs(m22))
+        };
+        GfVec3f newHalf(
+            absR[0][0]*scaledHalf[0]+absR[0][1]*scaledHalf[1]+absR[0][2]*scaledHalf[2],
+            absR[1][0]*scaledHalf[0]+absR[1][1]*scaledHalf[1]+absR[1][2]*scaledHalf[2],
+            absR[2][0]*scaledHalf[0]+absR[2][1]*scaledHalf[1]+absR[2][2]*scaledHalf[2]);
+        xfBboxMin = _center - newHalf;
+        xfBboxMax = _center + newHalf;
+    }
+
+    // Inverse-transform world point to normalised [0,1]^3 volume coords
+    GfVec3f InverseTransformPoint(const GfVec3f& p) const {
+        GfVec3f local = p - _center;
+        // Inverse rotation (transpose)
+        GfVec3f unrot(
+            _rotM[0]*local[0]+_rotM[3]*local[1]+_rotM[6]*local[2],
+            _rotM[1]*local[0]+_rotM[4]*local[1]+_rotM[7]*local[2],
+            _rotM[2]*local[0]+_rotM[5]*local[1]+_rotM[8]*local[2]);
+        // Inverse scale
+        GfVec3f unscaled(unrot[0]*_invScale[0], unrot[1]*_invScale[1], unrot[2]*_invScale[2]);
+        // Back to original bbox center-relative, then to [0,1]
+        GfVec3f origCenter = (bboxMin + bboxMax) * 0.5f;
+        GfVec3f origHalf = (bboxMax - bboxMin) * 0.5f;
+        GfVec3f orig = unscaled + origCenter;
+        return GfVec3f(
+            (origHalf[0]>1e-6f) ? (orig[0]-bboxMin[0])/(origHalf[0]*2.f) : 0.5f,
+            (origHalf[1]>1e-6f) ? (orig[1]-bboxMin[1])/(origHalf[1]*2.f) : 0.5f,
+            (origHalf[2]>1e-6f) ? (orig[2]-bboxMin[2])/(origHalf[2]*2.f) : 0.5f);
+    }
+
+    // Transform internals (public for GPU upload)
+    float _rotM[9] = {1,0,0, 0,1,0, 0,0,1};
+    GfVec3f _center = GfVec3f(0.f);
+    GfVec3f _invScale = GfVec3f(1.f);
 
     // Shading parameters
     float extinction      = 5.f;
@@ -153,8 +236,9 @@ struct SpectralVolume {
         return (c00*(1-dy)+c10*dy)*(1-dz) + (c01*(1-dy)+c11*dy)*dz;
     }
 
-    // World position to normalised [0,1] coordinates
+    // World position to normalised [0,1] coordinates (transform-aware)
     GfVec3f WorldToNorm(const GfVec3f& p) const {
+        if (hasTransform) return InverseTransformPoint(p);
         GfVec3f size = bboxMax - bboxMin;
         return GfVec3f(
             (size[0] > 1e-6f) ? (p[0] - bboxMin[0]) / size[0] : 0.5f,
@@ -163,12 +247,18 @@ struct SpectralVolume {
         );
     }
 
-    // Check if world position is inside volume
+    // Check if world position is inside volume (uses transformed AABB)
     bool Contains(const GfVec3f& p) const {
-        return p[0] >= bboxMin[0] && p[0] <= bboxMax[0] &&
-               p[1] >= bboxMin[1] && p[1] <= bboxMax[1] &&
-               p[2] >= bboxMin[2] && p[2] <= bboxMax[2];
+        GfVec3f mn = hasTransform ? xfBboxMin : bboxMin;
+        GfVec3f mx = hasTransform ? xfBboxMax : bboxMax;
+        return p[0] >= mn[0] && p[0] <= mx[0] &&
+               p[1] >= mn[1] && p[1] <= mx[1] &&
+               p[2] >= mn[2] && p[2] <= mx[2];
     }
+
+    // Get effective bbox for ray-AABB intersection
+    GfVec3f GetBboxMin() const { return hasTransform ? xfBboxMin : bboxMin; }
+    GfVec3f GetBboxMax() const { return hasTransform ? xfBboxMax : bboxMax; }
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE
