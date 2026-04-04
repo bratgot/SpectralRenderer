@@ -48,7 +48,12 @@ std::vector<SpectralVDBLoader::GridInfo> SpectralVDBLoader::DiscoverGrids(const 
             else if (_matchName(name, kColorNames) && (type == "vec3s" || type == "vec3f")) category = "color";
             else if (type == "float" && category == "other") category = "float";
 
-            result.push_back({name, type, category});
+            GridInfo gi;
+            gi.name = name;
+            gi.type = type;
+            gi.category = category;
+            gi.voxelCount = meta->activeVoxelCount();
+            result.push_back(gi);
         }
 
         file.close();

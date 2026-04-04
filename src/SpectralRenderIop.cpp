@@ -466,11 +466,18 @@ void SpectralRenderIop::knobs(Knob_Callback f)
             "</font>"
         );
         static const char* const volPresets[] = {
-            "Custom", "Smoke", "Fire / Explosion", "Clouds", "Fog / Mist", "Nebula", nullptr
+            "Custom", "Smoke", "Fire / Explosion",
+            "Cumulus", "Cirrus", "Stratus", "Storm Cloud",
+            "Fog / Mist", "Nebula", nullptr
         };
         Enumeration_knob(f, &_vdbShadingPreset, volPresets, "vdb_shading_preset", "Shading Preset");
         Tooltip(f, "One-click setup for common volume types.\n"
-                   "Sets extinction, scattering, phase function, emission, and scatter colour.\n"
+                   "Sets extinction, scattering, phase function, and emission.\n\n"
+                   "Cloud types based on real atmospheric data:\n"
+                   "  Cumulus \xe2\x80\x94 puffy white clouds, bright, albedo \xe2\x89\x88 0.99\n"
+                   "  Cirrus \xe2\x80\x94 wispy ice crystals, thin and translucent\n"
+                   "  Stratus \xe2\x80\x94 flat overcast layer, even illumination\n"
+                   "  Storm Cloud \xe2\x80\x94 dense cumulonimbus, dark base\n\n"
                    "Choose Custom to adjust settings manually.");
         Double_knob(f, &_vdbExtinction, "vdb_extinction", "extinction"); SetRange(f, 0, 50);
         Tooltip(f, "How quickly light is absorbed per unit density.\n"
@@ -487,14 +494,33 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         Double_knob(f, &_vdbStepSize, "vdb_step_size", "step size"); SetRange(f, 0, 2);
         Tooltip(f, "Ray march step size (world units). 0 = auto from quality.\n"
                    "Override for precise control. Smaller = finer detail, slower.");
-        static const char* const volResOpts[] = { "128", "256", "512", "Native", nullptr };
-        Enumeration_knob(f, &_vdbVolRes, volResOpts, "vdb_vol_res", "volume res");
-        Tooltip(f, "Resampling resolution for the VDB grid.\n"
-                   "Higher = sharper detail but more memory and load time.\n"
-                   "128 = fast preview (~8 MB per grid)\n"
-                   "256 = production (~67 MB per grid)\n"
-                   "512 = high detail (~536 MB per grid)\n"
-                   "Native = use actual VDB voxel resolution (capped at 1024)");
+        // ─── Voxel Resolution ────────────────────────────────────────
+        Divider(f, "Voxel Resolution");
+        Text_knob(f,
+            "<font color='#777' size='-1'>"
+            "Controls how many voxels the VDB is resampled to for rendering.<br>"
+            "Lower = faster load + less memory. Higher = sharper detail.<br>"
+            "Native uses the original VDB resolution (capped at 1024\xc2\xb3)."
+            "</font>"
+        );
+        Newline(f);
+        static const char* const volResOpts[] = {
+            "1/8 (fastest)", "1/4 (preview)", "1/2 (production)", "Full (high)", "Native", nullptr
+        };
+        Enumeration_knob(f, &_vdbVolRes, volResOpts, "vdb_vol_res", "resolution");
+        Tooltip(f, "Fraction of native VDB resolution to render at.\n"
+                   "1/8 = ~0.2%% of native voxels (very fast, rough look)\n"
+                   "1/4 = ~1.6%% of native voxels (good for layout)\n"
+                   "1/2 = ~12.5%% of native voxels (production)\n"
+                   "Full = ~100%% at 512\xc2\xb3 cap (high quality)\n"
+                   "Native = actual VDB dims, capped at 1024\xc2\xb3");
+        Button(f, "vdb_estimate_mem", "Estimate Memory");
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Calculate the memory required for the current\n"
+                   "resolution setting with the loaded VDB file.");
+        Newline(f);
+        String_knob(f, &_vdbMemInfo, "vdb_mem_info", " ");
+        SetFlags(f, Knob::DISABLED | Knob::NO_UNDO);
         Double_knob(f, &_vdbAnisotropy, "vdb_anisotropy", "anisotropy"); SetRange(f, -1, 1);
         SetFlags(f, Knob::INVISIBLE);
 
@@ -868,6 +894,18 @@ int SpectralRenderIop::knob_changed(Knob* k)
     _frameReady.store(false);
     _progressiveSppDone = 0;
 
+    // Update DAG node label with CPU/GPU indicator
+    if (k->is("device_mode") || k->is("showPanel")) {
+        const char* labels[] = {
+            "<font size='+1'><b>CPU</b></font> / <font color='#888'>GPU</font>",
+            "<font color='#888'>CPU</font> / <font size='+1'><b>GPU</b></font>",
+            "<font color='#888'>CPU</font> / <font size='+1'><b>AUTO</b></font>"
+        };
+        int idx = std::max(0, std::min(_deviceMode, 2));
+        if (Knob* lk = knob("label")) lk->set_text(labels[idx]);
+        if (k->is("device_mode")) return 1;
+    }
+
     // VDB auto-sequence
     if (k->is("vdb_auto_sequence")) {
         if (_vdbAutoSequence) {
@@ -1031,6 +1069,63 @@ int SpectralRenderIop::knob_changed(Knob* k)
         _frameReady.store(false);
         return 1;
     }
+    if (k->is("vdb_estimate_mem")) {
+        // Calculate memory estimate for current resolution setting
+        if (_vdbFile && strlen(_vdbFile) > 0) {
+#ifdef SPECTRAL_HAS_VDB
+            auto grids = pxr::SpectralVDBLoader::DiscoverGrids(_vdbFile);
+            int nativeMax = 0;
+            int nativeX = 0, nativeY = 0, nativeZ = 0;
+            int gridCount = 0;
+            for (const auto& g : grids) {
+                if (g.voxelCount > 0) {
+                    int d = int(std::cbrt(double(g.voxelCount)));
+                    if (d > nativeMax) nativeMax = d;
+                    gridCount++;
+                }
+            }
+            // Get actual bbox dims from a metadata-only load
+            auto meta = pxr::SpectralVDBLoader::LoadMetadataOnly(_vdbFile,
+                _VdbGridName(_vdbDensityGridIdx, _vdbDensityOverride));
+            if (meta) {
+                GfVec3f bs = meta->bboxMax - meta->bboxMin;
+                float maxS = std::max({bs[0], bs[1], bs[2]});
+                if (maxS > 0) {
+                    nativeX = int(nativeMax * bs[0] / maxS);
+                    nativeY = int(nativeMax * bs[1] / maxS);
+                    nativeZ = int(nativeMax * bs[2] / maxS);
+                }
+            }
+            if (nativeMax == 0) nativeMax = nativeX = nativeY = nativeZ = 128;
+
+            // Compute render dims
+            int renderMax;
+            if (_vdbVolRes == 4) renderMax = std::min(1024, nativeMax);
+            else if (_vdbVolRes == 3) renderMax = std::min(512, nativeMax);
+            else {
+                static const float fracs[] = { 0.125f, 0.25f, 0.5f };
+                renderMax = std::max(32, int(nativeMax * fracs[_vdbVolRes]));
+            }
+            float ratio = float(renderMax) / std::max(1, nativeMax);
+            int rX = std::max(1, int(nativeX * ratio));
+            int rY = std::max(1, int(nativeY * ratio));
+            int rZ = std::max(1, int(nativeZ * ratio));
+            size_t voxels = size_t(rX) * rY * rZ;
+            int numGrids = std::max(1, std::min(gridCount, 4));  // density + temp + flame + color
+            float memMB = voxels * sizeof(float) * numGrids / (1024.f * 1024.f);
+
+            char buf[256];
+            std::snprintf(buf, sizeof(buf),
+                "Native: %dx%dx%d | Render: %dx%dx%d | ~%.0f MB (%d grid%s)",
+                nativeX, nativeY, nativeZ, rX, rY, rZ, memMB,
+                numGrids, numGrids > 1 ? "s" : "");
+            if (Knob* mk = knob("vdb_mem_info")) mk->set_text(buf);
+#endif
+        } else {
+            if (Knob* mk = knob("vdb_mem_info")) mk->set_text("No VDB file loaded");
+        }
+        return 1;
+    }
     if (k->is("vdb_shadow_cache") || k->is("vdb_shadow_cache_res")) return 1;
     if (k->is("vdb_phase_mode") || k->is("vdb_mie_droplet_d") || k->is("vdb_gradient_mix")) return 1;
     if (k->is("vdb_env_intensity") || k->is("vdb_env_rotate") ||
@@ -1040,20 +1135,25 @@ int SpectralRenderIop::knob_changed(Knob* k)
 
     // Shading preset handler
     if (k->is("vdb_shading_preset") && _vdbShadingPreset > 0) {
-        // Values tuned to match VDBmarcher presets
+        // Physically-based presets. Cloud albedo ≈ 0.99 (near-pure scattering).
+        // ext/scat tuned for typical VDB scale (1-10 world units).
         struct SPreset { double ext; double scat; double dens; double gF; double gB; double lM;
                          double pow; double emI; double tMin; double tMax; double flI; bool bb;
                          bool chrom; double sR; double sG; double sB;
-                         float scR; float scG; float scB; };
+                         float scR; float scG; float scB; int rmode; };
+        //                              ext  scat dens  gF    gB    lM    pow emI  tMin  tMax   flI  bb    chr   sR  sG   sB     scR  scG  scB   rmode
         static const SPreset sp[] = {
-            {}, // 0: Custom
-            {5,  2,  1,   0.3, -0.1,  0.8,  0, 0,    0,    0,    0, false, false, 1,1,1,       0.7f,0.7f,0.7f},     // Smoke
-            {3,  2,  1,   0.5, -0.2,  0.7,  2, 8,  300, 3000,  10, true,  false, 1,1,1,       1.f,0.85f,0.6f},      // Fire — low ext so fire visible through smoke
-            {15, 12, 1,   0.8, -0.3,  0.85, 5, 0,    0,    0,    0, false, false, 1,1,1,       1.f,1.f,1.f},         // Clouds
-            {2,  1.5,0.5, 0.6, -0.15, 0.85, 0, 0,    0,    0,    0, false, true,  1,1,1.3,     0.9f,0.92f,0.95f},    // Fog
-            {1,  0.5,0.8, 0.2,  0,    1,    0, 5, 2000,15000,   0, true,  true,  0.8,1,1.4,   0.6f,0.4f,1.f},       // Nebula — low ext, ethereal
+            {},                                                                                                                                      // 0: Custom
+            {5,  2,  1,   0.3, -0.1,  0.8,  0,  0,    0,    0,    0,    false,false, 1,1,1,       0.7f,0.7f,0.7f,   0}, // 1: Smoke — absorptive, low albedo
+            {3,  2,  1,   0.5, -0.2,  0.7,  2,  8,  300, 3000,  10,    true, false, 1,1,1,       1.f,0.85f,0.6f,   5}, // 2: Fire — low ext, emission visible
+            {2.5,2.4,1,   0.85,-0.1,  0.85, 3,  0,    0,    0,    0,    false,false, 1,1,1,       1.f,1.f,1.f,      0}, // 3: Cumulus — bright puffy, albedo 0.96
+            {0.4,0.38,0.6,0.75,-0.05, 0.9,  1,  0,    0,    0,    0,    false,false, 1,1,1,       1.f,1.f,1.f,      0}, // 4: Cirrus — thin wispy ice, translucent
+            {3.5,3.4,1,   0.85,-0.1,  0.85, 2,  0,    0,    0,    0,    false,false, 1,1,1,       0.98f,0.98f,1.f,  0}, // 5: Stratus — flat overcast, slight blue
+            {6,  5.7,1.5, 0.87,-0.25, 0.8,  4,  0,    0,    0,    0,    false,false, 1,1,1,       0.9f,0.9f,0.92f,  0}, // 6: Storm — dense, dark base, albedo 0.95
+            {1.5,1.4,0.5, 0.6, -0.15, 0.85, 0,  0,    0,    0,    0,    false,true,  1,1,1.1,     0.92f,0.94f,0.97f,0}, // 7: Fog — ground fog, slight blue
+            {0.8,0.4,0.8, 0.2,  0,    1,    0,  5, 2000,15000,   0,    true, true,  0.8,1,1.4,   0.6f,0.4f,1.f,    0}, // 8: Nebula — ethereal, emission
         };
-        if (_vdbShadingPreset < 6) {
+        if (_vdbShadingPreset < 9) {
             const auto& s = sp[_vdbShadingPreset];
             _vdbExtinction=s.ext; _vdbScattering=s.scat; _vdbDensityMult=s.dens;
             _vdbGForward=s.gF; _vdbGBackward=s.gB; _vdbLobeMix=s.lM;
@@ -1067,7 +1167,7 @@ int SpectralRenderIop::knob_changed(Knob* k)
             if (knob("vdb_g_backward"))   knob("vdb_g_backward")->set_value(s.gB);
             if (knob("vdb_lobe_mix"))     knob("vdb_lobe_mix")->set_value(s.lM);
             if (knob("vdb_powder"))       knob("vdb_powder")->set_value(s.pow);
-            if (knob("vdb_emission"))     knob("vdb_emission")->set_value(s.emI);
+            if (knob("vdb_emission_intensity")) knob("vdb_emission_intensity")->set_value(s.emI);
             if (knob("vdb_temp_min"))     knob("vdb_temp_min")->set_value(s.tMin);
             if (knob("vdb_temp_max"))     knob("vdb_temp_max")->set_value(s.tMax);
             if (knob("vdb_flame_intensity")) knob("vdb_flame_intensity")->set_value(s.flI);
@@ -1076,9 +1176,9 @@ int SpectralRenderIop::knob_changed(Knob* k)
                 knob("vdb_scatter_color")->set_value(s.scG, 1);
                 knob("vdb_scatter_color")->set_value(s.scB, 2);
             }
-            // Set render mode: Fire → Explosion, others → Lit
-            if (_vdbShadingPreset == 2 && knob("vdb_render_mode")) {
-                knob("vdb_render_mode")->set_value(5); _vdbRenderMode = 5; // Explosion
+            // Set render mode
+            if (knob("vdb_render_mode")) {
+                knob("vdb_render_mode")->set_value(s.rmode); _vdbRenderMode = s.rmode;
             }
         }
         return 1;
@@ -3114,10 +3214,15 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
                         g = std::max(0.f, std::min((t-.3f)*2.f, 1.f));
                         b = std::max(0.f, std::min((t-.7f)*3.f, 1.f));
                         break;
-                    default: // Lit (0), Heat (2), Explosion (5) — heat ramp
+                    case 2: // Heat ramp
                         r = std::min(t*3.f, 1.f);
                         g = std::max(0.f, std::min((t-.33f)*3.f, 1.f));
                         b = std::max(0.f, std::min((t-.66f)*3.f, 1.f));
+                        break;
+                    default: // Lit (0), Explosion (5) — tinted by scatter color
+                        r = t * _vdbScatterColor[0];
+                        g = t * _vdbScatterColor[1];
+                        b = t * _vdbScatterColor[2];
                         break;
                 }
                 glColor4f(r, g, b, .15f+.85f*t);
@@ -3210,20 +3315,46 @@ void SpectralRenderIop::_LoadVDB()
 }
 
 // ---------------------------------------------------------------------------
-// _LoadVDBForRender — reload at full resolution if currently at preview res
+// _LoadVDBForRender — reload at render resolution
 // ---------------------------------------------------------------------------
 void SpectralRenderIop::_LoadVDBForRender()
 {
 #ifdef SPECTRAL_HAS_VDB
     if ((_vdbIsPreviewRes || _vdbIsMetadataOnly) && _vdbFile && strlen(_vdbFile) > 0) {
-        static const int resLookup[] = { 128, 256, 512, -1 };
-        int renderRes = (_vdbVolRes >= 0 && _vdbVolRes <= 3) ? resLookup[_vdbVolRes] : -1;
+        // Resolution modes: 0=1/8, 1=1/4, 2=1/2, 3=Full(512 cap), 4=Native
+        // For fractional modes, we first need native dims from the VDB
+        int renderRes;
+        if (_vdbVolRes == 4) {
+            renderRes = -1;  // native, capped at 1024 in loader
+        } else if (_vdbVolRes == 3) {
+            renderRes = 512;
+        } else {
+            // Get native dims to compute fraction
+            int nativeDim = 256;  // fallback
+            if (_volume && _volume->IsValid()) {
+                // Estimate from current loaded volume
+                GfVec3f bboxSize = _volume->bboxMax - _volume->bboxMin;
+                float maxSize = std::max({bboxSize[0], bboxSize[1], bboxSize[2]});
+                // Use DiscoverGrids to get actual voxel count
+            }
+            // Try to get native dims from metadata
+            auto grids = pxr::SpectralVDBLoader::DiscoverGrids(_vdbFile);
+            for (const auto& g : grids) {
+                if (g.voxelCount > 0) {
+                    // Estimate dimension from voxel count (cube root)
+                    nativeDim = std::max(nativeDim, int(std::cbrt(double(g.voxelCount))));
+                }
+            }
+            static const float fractions[] = { 0.125f, 0.25f, 0.5f };
+            float frac = (_vdbVolRes >= 0 && _vdbVolRes <= 2) ? fractions[_vdbVolRes] : 0.5f;
+            renderRes = std::max(32, int(nativeDim * frac));
+        }
+
         int frame = int(outputContext().frame()) + _vdbFrameOffset;
         std::string resolvedPath = _vdbAutoSequence
             ? _resolveFramePath(frame)
             : std::string(_vdbFile);
         if (!resolvedPath.empty()) {
-            // Check if a full-res version is in cache
             std::string renderKey = resolvedPath + ":" + std::to_string(renderRes);
             VDBCacheEntry* cached = _VDBCacheGet(renderKey);
             if (cached && !cached->isPreviewRes && !cached->isMetadataOnly) {
@@ -3244,8 +3375,10 @@ void SpectralRenderIop::_LoadVDBForRender()
                 _vdbLoadedPath = resolvedPath;
                 _applyVolumeShading(_volume);
                 _VDBCachePut(renderKey, _volume, false, false);
-                fprintf(stderr, "SpectralRender: loaded VDB at %d^3 (%.1f MB)\n",
-                        renderRes, _volume->density.size() * sizeof(float) / (1024.f * 1024.f));
+                float memMB = (_volume->density.size() + _volume->temperature.size() + _volume->flame.size())
+                              * sizeof(float) / (1024.f * 1024.f);
+                fprintf(stderr, "SpectralRender: loaded VDB at %dx%dx%d (%.1f MB)\n",
+                        _volume->resX, _volume->resY, _volume->resZ, memMB);
             }
         }
     }
@@ -3415,7 +3548,10 @@ void SpectralRenderIop::_BuildLightRig()
         GfVec3f sunDir = dirFromElevAzim(_sunElevation, _sunAzimuth);
 
         // Direct sun — use sphere light for soft shadows
-        double si = _sunIntensity * std::max(0.1, std::min(_sunElevation / 15.0, 1.0)) * m;
+        // Scale factor for physically plausible volume illumination
+        // (real sun illuminance ≈ 120,000 lux, typical surface rendering uses 1-10)
+        double sunScale = 3.0;  // boost sun for volume visibility
+        double si = _sunIntensity * std::max(0.1, std::min(_sunElevation / 15.0, 1.0)) * m * sunScale;
         if (si > 0.001) {
             SpectralLight sun;
             if (_shadowSoftness > 0.01) {
@@ -3433,8 +3569,9 @@ void SpectralRenderIop::_BuildLightRig()
             _scene->AddLight(sun);
         }
 
-        // Sky dome fill
-        double ski = _skyIntensity * m;
+        // Sky dome fill — boosted for volume illumination
+        double skyScale = 2.5;
+        double ski = _skyIntensity * m * skyScale;
         if (ski > 0.001) {
             SpectralLight sky;
             sky.type = SpectralLight::Type::Dome;

@@ -165,7 +165,8 @@ private:
     double _vdbAnisotropy = 0.0;
     double _vdbStepSize = 0.0;       // 0 = auto
     int    _vdbMaxSteps = 256;
-    int    _vdbVolRes = 3;           // 0=128, 1=256, 2=512, 3=Native
+    int    _vdbVolRes = 3;           // 0=1/8, 1=1/4, 2=1/2, 3=Full, 4=Native
+    const char* _vdbMemInfo = "";
     double _vdbEmissionIntensity = 2.0;
     double _vdbTempMin = 500.0;
     double _vdbTempMax = 6500.0;

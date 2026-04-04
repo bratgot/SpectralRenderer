@@ -700,22 +700,6 @@ static __forceinline__ __device__ void marchVolume(
     float jitterOff = params.volJitter ? hashRNG(seed)*dt : 0.f;
     float t = tNear + jitterOff;
 
-    // Collect brightest non-dome light
-    float3 lightDir = make_float3(0,-1,0);
-    float3 lightCol = make_float3(0.5f,0.5f,0.5f);
-    if (params.lightCount > 0) {
-        float maxI = 0;
-        for (unsigned li=0; li<params.lightCount; ++li) {
-            const GPULight& L = params.lights[li];
-            if (L.type==3) continue;
-            float inten = (L.color.x+L.color.y+L.color.z)*0.333f*L.intensity;
-            if (inten>maxI) { maxI=inten;
-                float dl=sqrtf(L.direction.x*L.direction.x+L.direction.y*L.direction.y+L.direction.z*L.direction.z);
-                if(dl>1e-6f) lightDir=make_float3(L.direction.x/dl,L.direction.y/dl,L.direction.z/dl);
-                lightCol=make_float3(L.color.x*L.intensity,L.color.y*L.intensity,L.color.z*L.intensity);
-            }
-        }
-    }
     int rmode = params.volRenderMode;
 
     for (int step=0; step<maxSteps && t<tFar; ++step, t+=dt) {
@@ -759,36 +743,50 @@ static __forceinline__ __device__ void marchVolume(
             float powder = 1.f;
             if (params.volPowder>0.01f) powder = 1.f-expf(-density*params.volPowder*2.f);
 
-            // Dual-lobe HG
-            float cosTheta = -(rd.x*lightDir.x + rd.y*lightDir.y + rd.z*lightDir.z);
-            float gF=params.volGForward, gB=params.volGBackward;
-            float denomF=1.f+gF*gF-2.f*gF*cosTheta, denomB=1.f+gB*gB-2.f*gB*cosTheta;
-            float phaseF=(1.f-gF*gF)/(4.f*3.14159f*powf(fmaxf(denomF,1e-4f),1.5f));
-            float phaseB=(1.f-gB*gB)/(4.f*3.14159f*powf(fmaxf(denomB,1e-4f),1.5f));
-            float phase = params.volLobeMix*phaseF + (1.f-params.volLobeMix)*phaseB;
+            // Iterate ALL non-dome lights (matches CPU)
+            for (unsigned li=0; li<params.lightCount; ++li) {
+                const GPULight& L = params.lights[li];
+                if (L.type==3) continue;
+                float lI = (L.color.x+L.color.y+L.color.z)*0.333f*L.intensity;
+                if (lI<0.001f) continue;
 
-            // Shadow ray
-            float shadowTrans = 1.f;
-            if (params.volShadowSteps>0 && params.volShadowDensity>0.01f) {
-                float3 sDir = make_float3(-lightDir.x,-lightDir.y,-lightDir.z);
-                float sDt = bboxDiag / (float)params.volShadowSteps;
-                for (int ss=1; ss<=params.volShadowSteps; ++ss) {
-                    float spx=px+sDir.x*sDt*ss, spy=py+sDir.y*sDt*ss, spz=pz+sDir.z*sDt*ss;
-                    float su=(bSize.x>1e-6f)?(spx-params.volBboxMin.x)/bSize.x:0.5f;
-                    float sv=(bSize.y>1e-6f)?(spy-params.volBboxMin.y)/bSize.y:0.5f;
-                    float sw=(bSize.z>1e-6f)?(spz-params.volBboxMin.z)/bSize.z:0.5f;
-                    if(su<0||su>1||sv<0||sv>1||sw<0||sw>1) break;
-                    float sd = sampleVolumeDensity(su,sv,sw);
-                    shadowTrans *= expf(-sd*params.volExtinction*params.volShadowDensity*sDt);
-                    if (shadowTrans<0.001f) break;
+                float3 lDir;
+                if (L.type==1||L.type==4) {
+                    lDir=make_float3(px-L.position.x, py-L.position.y, pz-L.position.z);
+                    float dl=sqrtf(lDir.x*lDir.x+lDir.y*lDir.y+lDir.z*lDir.z);
+                    if(dl>1e-6f){lDir.x/=dl;lDir.y/=dl;lDir.z/=dl;}
+                } else {
+                    float dl=sqrtf(L.direction.x*L.direction.x+L.direction.y*L.direction.y+L.direction.z*L.direction.z);
+                    lDir=(dl>1e-6f)?make_float3(L.direction.x/dl,L.direction.y/dl,L.direction.z/dl):make_float3(0,-1,0);
                 }
-            }
+                float3 lCol=make_float3(L.color.x*L.intensity, L.color.y*L.intensity, L.color.z*L.intensity);
 
-            float scatW = params.volScattering*density*phase*shadowTrans*powder;
-            stepRGB = make_float3(
-                lightCol.x*params.volScatterColor.x*scatW,
-                lightCol.y*params.volScatterColor.y*scatW,
-                lightCol.z*params.volScatterColor.z*scatW);
+                float cosTheta = -(rd.x*lDir.x+rd.y*lDir.y+rd.z*lDir.z);
+                float gF=params.volGForward, gB=params.volGBackward;
+                float denomF=1.f+gF*gF-2.f*gF*cosTheta, denomB=1.f+gB*gB-2.f*gB*cosTheta;
+                float phaseF=(1.f-gF*gF)/(4.f*3.14159f*powf(fmaxf(denomF,1e-4f),1.5f));
+                float phaseB=(1.f-gB*gB)/(4.f*3.14159f*powf(fmaxf(denomB,1e-4f),1.5f));
+                float phase=params.volLobeMix*phaseF+(1.f-params.volLobeMix)*phaseB;
+
+                float shadowTrans=1.f;
+                if (params.volShadowSteps>0 && params.volShadowDensity>0.01f) {
+                    float3 sDir=make_float3(-lDir.x,-lDir.y,-lDir.z);
+                    float sDt=bboxDiag/(float)params.volShadowSteps;
+                    for (int ss=1;ss<=params.volShadowSteps;++ss) {
+                        float spx=px+sDir.x*sDt*ss,spy=py+sDir.y*sDt*ss,spz=pz+sDir.z*sDt*ss;
+                        float su=(bSize.x>1e-6f)?(spx-params.volBboxMin.x)/bSize.x:0.5f;
+                        float sv=(bSize.y>1e-6f)?(spy-params.volBboxMin.y)/bSize.y:0.5f;
+                        float sw=(bSize.z>1e-6f)?(spz-params.volBboxMin.z)/bSize.z:0.5f;
+                        if(su<0||su>1||sv<0||sv>1||sw<0||sw>1) break;
+                        shadowTrans*=expf(-sampleVolumeDensity(su,sv,sw)*params.volExtinction*params.volShadowDensity*sDt);
+                        if(shadowTrans<0.001f) break;
+                    }
+                }
+                float scatW=params.volScattering*density*phase*shadowTrans*powder;
+                stepRGB.x+=lCol.x*params.volScatterColor.x*scatW;
+                stepRGB.y+=lCol.y*params.volScatterColor.y*scatW;
+                stepRGB.z+=lCol.z*params.volScatterColor.z*scatW;
+            }
 
             // Dome ambient RGB
             for (unsigned li=0; li<params.lightCount; ++li) {

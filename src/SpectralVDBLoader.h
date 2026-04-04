@@ -17,6 +17,7 @@ public:
         std::string name;
         std::string type;     // "float", "vec3s", "PointDataGrid", etc.
         std::string category; // "density", "temperature", "flame", "velocity", "color", "other"
+        size_t voxelCount = 0;
     };
 
     /// Scan a VDB file and return info about all grids.
