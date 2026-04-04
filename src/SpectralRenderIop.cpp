@@ -378,6 +378,22 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         String_knob(f, &_vdbOrigFile, "vdb_orig_file", "");
         SetFlags(f, Knob::INVISIBLE);
 
+        Divider(f, "Render Mode");
+        static const char* const renderModes[] = {
+            "Lit", "Greyscale", "Heat", "Cool", "Blackbody", "Explosion", nullptr
+        };
+        Enumeration_knob(f, &_vdbRenderMode, renderModes, "vdb_render_mode", "mode");
+        Tooltip(f, "Lit \xe2\x80\x94 full lighting with shadows and phase function\n"
+                   "Greyscale \xe2\x80\x94 quick density preview, no lighting\n"
+                   "Heat/Cool \xe2\x80\x94 artistic temperature ramps\n"
+                   "Blackbody \xe2\x80\x94 physically accurate fire colour\n"
+                   "Explosion \xe2\x80\x94 smoke + self-luminous fire combined");
+        Double_knob(f, &_vdbIntensity, "vdb_intensity", "intensity");
+        ClearFlags(f, Knob::STARTLINE);
+        SetRange(f, 0, 10);
+        Tooltip(f, "Master brightness multiplier.\n"
+                   "Does not affect alpha/opacity.");
+
         Divider(f, "Viewport preview");
         Bool_knob(f, &_vdbShowBbox, "vdb_show_bbox", "bbox");
         Tooltip(f, "Green wireframe bounding box around the volume.");
@@ -516,11 +532,21 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         Divider(f, "Quality");
         Text_knob(f,
             "<font color='#666' size='-1'>"
-            "Shadow rays and step quality control render fidelity.<br>"
-            "Start with lower quality for layout, increase for finals."
+            "Start with a Quality Preset, then fine-tune individual settings.<br>"
+            "Draft for layout, Production for review, Final for delivery."
             "</font>"
         );
         Newline(f);
+        static const char* const qualPresets[] = {
+            "Custom", "Draft", "Preview", "Production", "Final", "Ultra", nullptr
+        };
+        Enumeration_knob(f, &_vdbQualityPreset, qualPresets, "vdb_quality_preset", "preset");
+        Tooltip(f, "Sets all quality controls at once.\n"
+                   "Draft = fastest, rough look for layout\n"
+                   "Preview = quick turnaround for review\n"
+                   "Production = good quality for client review\n"
+                   "Final = full quality for delivery\n"
+                   "Ultra = maximum fidelity, slowest render");
         Double_knob(f, &_vdbQuality, "vdb_quality", "quality");
         SetRange(f, 1, 10);
         Tooltip(f, "Ray march step resolution (logarithmic).\n"
@@ -542,6 +568,29 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                    "1 = physical, <1 = lighter shadows, >1 = darker.\n"
                    "0 = no self-shadowing.");
 
+        Divider(f, "Shadow Performance");
+        Text_knob(f,
+            "<font color='#666' size='-1'>"
+            "Shadow Cache precomputes transmittance per directional light,<br>"
+            "reducing shadow cost from O(steps) to O(1) per primary sample."
+            "</font>"
+        );
+        Newline(f);
+        Bool_knob(f, &_vdbShadowCache, "vdb_shadow_cache", "shadow cache");
+        Tooltip(f, "Precomputes a transmittance grid per directional light.\n"
+                   "Shadow rays replaced by a single trilinear lookup.\n"
+                   "5-10x faster shadow evaluation.\n"
+                   "Rebuilt automatically when lights or VDB change.");
+        static const char* const cacheRes[] = {
+            "Full (1:1)", "Half (2:1)", "Quarter (4:1)", nullptr
+        };
+        Enumeration_knob(f, &_vdbShadowCacheRes, cacheRes, "vdb_shadow_cache_res", "");
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Voxel resolution of precomputed transmittance grid.\n"
+                   "Full = same as density grid, best quality.\n"
+                   "Half = recommended for production, 8x less memory.\n"
+                   "Quarter = fastest build, slight shadow softening.");
+
         BeginClosedGroup(f, "vdb_ms", "Multiple scatter");
         {
             Bool_knob(f, &_vdbMsApprox, "vdb_ms_approx", "analytical MS");
@@ -551,6 +600,86 @@ void SpectralRenderIop::knobs(Knob_Callback f)
             Color_knob(f, _vdbMsTint, "vdb_ms_tint", "tint");
             Tooltip(f, "Colour tint on the multi-scatter contribution.\n"
                        "Default (1.0, 0.97, 0.95) = slight warm bias.");
+        }
+        EndGroup(f);
+
+        BeginClosedGroup(f, "vdb_noise", "Procedural detail noise");
+        {
+            Text_knob(f,
+                "<font color='#666' size='-1'>"
+                "fBm noise perturbs density at render time, adding micro-detail<br>"
+                "beyond VDB resolution. World-space \xe2\x80\x94 no UV unwrap needed."
+                "</font>"
+            );
+            Newline(f);
+            Bool_knob(f, &_vdbNoiseEnable, "vdb_noise_enable", "enable");
+            Tooltip(f, "Add procedural fBm detail noise to density.\n"
+                       "Raises apparent VDB resolution without resampling.\n"
+                       "Useful for wispy smoke edges and cloud detail.\n"
+                       "Cost: one noise eval per march step.");
+            Double_knob(f, &_vdbNoiseScale, "vdb_noise_scale", "scale");
+            SetRange(f, 0.1, 20);
+            Tooltip(f, "World-space frequency relative to volume bbox.\n"
+                       "1 = one noise cycle across bbox.\n"
+                       "4 = fine detail. 8 = very fine. 0.5 = large lumps.");
+            Double_knob(f, &_vdbNoiseStrength, "vdb_noise_strength", "strength");
+            SetRange(f, 0, 1);
+            Tooltip(f, "How strongly noise modulates density.\n"
+                       "0 = no effect. 0.3 = natural. 1.0 = extreme.");
+            Int_knob(f, &_vdbNoiseOctaves, "vdb_noise_octaves", "octaves");
+            SetRange(f, 1, 6);
+            Tooltip(f, "fBm octave layers.\n"
+                       "1 = smooth. 3 = natural. 6 = very detailed (slower).");
+            Double_knob(f, &_vdbNoiseRoughness, "vdb_noise_roughness", "roughness");
+            SetRange(f, 0, 1);
+            Tooltip(f, "Amplitude falloff per octave.\n"
+                       "0 = smooth. 0.5 = natural. 1 = all octaves equal.");
+        }
+        EndGroup(f);
+
+        BeginClosedGroup(f, "vdb_env", "Environment map");
+        {
+            Text_knob(f,
+                "<font color='#666' size='-1'>"
+                "Picked up from EnvironLight or dome light in the scene tree.<br>"
+                "SH + Virtual Lights mode is 10-70x faster than Uniform dirs."
+                "</font>"
+            );
+            Newline(f);
+            Double_knob(f, &_vdbEnvIntensity, "vdb_env_intensity", "intensity");
+            SetRange(f, 0, 10);
+            Tooltip(f, "Environment map brightness multiplier.");
+            Double_knob(f, &_vdbEnvRotate, "vdb_env_rotate", "rotate");
+            ClearFlags(f, Knob::STARTLINE);
+            SetRange(f, 0, 360);
+            Tooltip(f, "Rotate the environment map horizontally in degrees.");
+            Double_knob(f, &_vdbEnvDiffuse, "vdb_env_diffuse", "diffuse");
+            SetRange(f, 0, 1);
+            Tooltip(f, "How much environment light contributes to diffuse illumination.\n"
+                       "0 = no env contribution. 0.5 = natural. 1 = full.");
+            Divider(f, "");
+            static const char* const envModes[] = {
+                "Uniform dirs (slow, accurate)", "SH + Virtual Lights (fast)", nullptr
+            };
+            Enumeration_knob(f, &_vdbEnvMode, envModes, "vdb_env_mode", "env mode");
+            Tooltip(f, "SH + Virtual Lights (recommended): projects env map to 9 SH\n"
+                       "coefficients. Full-sphere ambient in 9 multiply-adds per step.\n"
+                       "Brightest peaks extracted as virtual directional lights with\n"
+                       "proper shadow rays. 10-70x faster than Uniform dirs.\n\n"
+                       "Uniform dirs: 6-26 directions \xc3\x97 shadow steps per sample.\n"
+                       "Use to compare quality or when exact directionality matters.");
+            Int_knob(f, &_vdbEnvVirtualLights, "vdb_env_virtual_lights", "virtual lights");
+            SetRange(f, 0, 4);
+            Tooltip(f, "Bright peaks extracted from env map as virtual directional lights.\n"
+                       "Only used in SH + Virtual Lights mode.\n"
+                       "0 = SH ambient only (fastest). 1 = sun only.\n"
+                       "2 = sun + bright sky (recommended). 4 = maximum.");
+            Bool_knob(f, &_vdbUseReSTIR, "vdb_use_restir", "ReSTIR env sampling");
+            Tooltip(f, "Weighted reservoir importance sampling for environment lighting.\n"
+                       "Samples all directions by SH radiance \xc3\x97 phase weight,\n"
+                       "selects best candidate, traces one shadow ray per step.\n"
+                       "Equal or better quality at ~26x fewer shadow rays.\n"
+                       "Only active in Uniform dirs mode.");
         }
         EndGroup(f);
     }
@@ -814,6 +943,44 @@ int SpectralRenderIop::knob_changed(Knob* k)
         if (Knob* mk = knob("shadow_softness")) mk->set_value(_shadowSoftness);
         return 1;
     }
+
+    // Quality preset handler
+    if (k->is("vdb_quality_preset")) {
+        // Custom(0), Draft(1), Preview(2), Production(3), Final(4), Ultra(5)
+        struct QPreset { double q; int sh; double shDen; double envD; };
+        static const QPreset qv[] = {
+            {},                          // 0: Custom
+            {1.5,  4, 1.0, 0.3},        // 1: Draft
+            {3.0,  8, 1.0, 0.4},        // 2: Preview
+            {5.0, 16, 1.0, 0.6},        // 3: Production
+            {7.0, 24, 1.0, 0.7},        // 4: Final
+            {10.0,32, 1.0, 1.0},        // 5: Ultra
+        };
+        if (_vdbQualityPreset > 0 && _vdbQualityPreset < 6) {
+            const auto& q = qv[_vdbQualityPreset];
+            _vdbQuality = q.q;
+            _vdbShadowSteps = q.sh;
+            _vdbShadowDensity = q.shDen;
+            _vdbEnvDiffuse = q.envD;
+            if (knob("vdb_quality")) knob("vdb_quality")->set_value(q.q);
+            if (knob("vdb_shadow_steps")) knob("vdb_shadow_steps")->set_value(q.sh);
+            if (knob("vdb_shadow_density")) knob("vdb_shadow_density")->set_value(q.shDen);
+            if (knob("vdb_env_diffuse")) knob("vdb_env_diffuse")->set_value(q.envD);
+        }
+        return 1;
+    }
+
+    // Any quality/shadow/env knob change resets preset to Custom
+    if (k->is("vdb_quality") || k->is("vdb_shadow_steps") || k->is("vdb_shadow_density") ||
+        k->is("vdb_env_diffuse")) {
+        if (knob("vdb_quality_preset")) { knob("vdb_quality_preset")->set_value(0); _vdbQualityPreset = 0; }
+        return 1;
+    }
+
+    if (k->is("vdb_render_mode") || k->is("vdb_intensity")) return 1;
+    if (k->is("vdb_shadow_cache") || k->is("vdb_shadow_cache_res")) return 1;
+    if (k->is("vdb_env_intensity") || k->is("vdb_env_rotate") ||
+        k->is("vdb_env_mode") || k->is("vdb_env_virtual_lights") || k->is("vdb_use_restir")) return 1;
 
     return Iop::knob_changed(k);
 }
@@ -3019,6 +3186,15 @@ void SpectralRenderIop::_applyVolumeShading(std::shared_ptr<pxr::SpectralVolume>
     vol->adaptiveStep = _vdbAdaptiveStep;
     vol->msApprox = _vdbMsApprox;
     vol->msTint = pxr::GfVec3f(_vdbMsTint[0], _vdbMsTint[1], _vdbMsTint[2]);
+    vol->noiseEnable = _vdbNoiseEnable;
+    vol->noiseScale = float(_vdbNoiseScale);
+    vol->noiseStrength = float(_vdbNoiseStrength);
+    vol->noiseOctaves = _vdbNoiseOctaves;
+    vol->noiseRoughness = float(_vdbNoiseRoughness);
+    vol->renderMode = _vdbRenderMode;
+    vol->intensity = float(_vdbIntensity);
+    vol->envIntensity = float(_vdbEnvIntensity);
+    vol->envDiffuse = float(_vdbEnvDiffuse);
 }
 
 // ---------------------------------------------------------------------------

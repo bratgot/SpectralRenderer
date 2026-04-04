@@ -65,6 +65,21 @@ struct SpectralVolume {
     bool  msApprox       = true;
     GfVec3f msTint       = GfVec3f(1.f, 0.97f, 0.95f);
 
+    // Procedural detail noise (fBm)
+    bool  noiseEnable    = false;
+    float noiseScale     = 4.0f;
+    float noiseStrength  = 0.3f;
+    int   noiseOctaves   = 3;
+    float noiseRoughness = 0.5f;
+
+    // Render mode: 0=Lit,1=Greyscale,2=Heat,3=Cool,4=Blackbody,5=Explosion
+    int   renderMode     = 0;
+    float intensity      = 1.0f;    // master brightness
+
+    // Environment
+    float envIntensity   = 1.0f;
+    float envDiffuse     = 0.5f;
+
     bool IsValid() const { return !density.empty() && resX > 0; }
     bool HasBbox() const { return resX > 0 && resY > 0 && resZ > 0; }
 

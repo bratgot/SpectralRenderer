@@ -21,6 +21,41 @@ static SpectralMaterial _ResolveMaterial(
     float w, float u, float v, const SpectralScene& scene);
 
 // ---------------------------------------------------------------------------
+// Procedural fBm noise — deterministic, no tables, world-space
+// Ported from VDBmarcher (Marten Blumen)
+// ---------------------------------------------------------------------------
+static double _noiseHash3(double x, double y, double z) {
+    int ix = (int)std::floor(x), iy = (int)std::floor(y), iz = (int)std::floor(z);
+    double fx = x - ix, fy = y - iy, fz = z - iz;
+    fx = fx * fx * (3.0 - 2.0 * fx);
+    fy = fy * fy * (3.0 - 2.0 * fy);
+    fz = fz * fz * (3.0 - 2.0 * fz);
+    auto h = [](int a, int b, int c) -> double {
+        uint32_t u = (uint32_t)a * 1664525u ^ (uint32_t)b * 1013904223u ^ (uint32_t)c * 2246822519u;
+        u ^= u >> 16; u *= 0x45d9f3bu; u ^= u >> 16;
+        return (int)(u & 0xFFFFu) / 32768.0 - 1.0;
+    };
+    double v000=h(ix,iy,iz),     v100=h(ix+1,iy,iz);
+    double v010=h(ix,iy+1,iz),   v110=h(ix+1,iy+1,iz);
+    double v001=h(ix,iy,iz+1),   v101=h(ix+1,iy,iz+1);
+    double v011=h(ix,iy+1,iz+1), v111=h(ix+1,iy+1,iz+1);
+    return v000 + fx*(v100-v000)
+         + fy*(v010-v000 + fx*(v110-v010-v100+v000))
+         + fz*(v001-v000 + fx*(v101-v001-v100+v000)
+               + fy*(v011-v001-v010+v000
+                    + fx*(v111-v011-v101+v001-v110+v010+v100-v000)));
+}
+
+static double _noiseFBm(double x, double y, double z, int octaves, double roughness) {
+    double val = 0.0, amp = 1.0, total = 0.0, freq = 1.0;
+    for (int i = 0; i < octaves; ++i) {
+        val += amp * _noiseHash3(x * freq, y * freq, z * freq);
+        total += amp; amp *= roughness; freq *= 2.0;
+    }
+    return (total > 0.0) ? val / total : 0.0;
+}
+
+// ---------------------------------------------------------------------------
 // RenderFrame  — full image, parallel over rows
 // ---------------------------------------------------------------------------
 void SpectralIntegrator::RenderFrame(
@@ -354,6 +389,15 @@ void SpectralIntegrator::RenderFrame(
                                         GfVec3f uv = volume->WorldToNorm(p);
                                         float density = volume->SampleDensity(uv[0], uv[1], uv[2]);
 
+                                        // Procedural fBm noise — perturbs density at render time
+                                        if (volume->noiseEnable && density > 1e-6f) {
+                                            float bboxDiag = (volume->bboxMax - volume->bboxMin).GetLength();
+                                            float ns = volume->noiseScale / std::max(bboxDiag, 1e-4f);
+                                            double n = _noiseFBm(p[0]*ns, p[1]*ns, p[2]*ns,
+                                                                 volume->noiseOctaves, volume->noiseRoughness);
+                                            density = std::max(0.f, density * float(1.0 + volume->noiseStrength * n));
+                                        }
+
                                         // Adaptive stepping: skip faster in thin regions
                                         if (density < 1e-5f) {
                                             if (volume->adaptiveStep) t += dt * 3.f; // 4x step in empty
@@ -375,81 +419,111 @@ void SpectralIntegrator::RenderFrame(
                                         float stepTrans = std::exp(-sigma_t * dt);
                                         float absorption = 1.f - stepTrans;
 
-                                        // Powder effect (Schneider & Vos 2015)
-                                        float powder = 1.f;
-                                        if (volume->powderStrength > 0.01f)
-                                            powder = 1.f - std::exp(-density * volume->powderStrength * 2.f);
+                                        float stepRadiance = 0.f;
 
-                                        // Accumulate in-scatter from ALL lights
-                                        float totalScatter = 0.f;
-                                        for (const auto& vl : volLights) {
-                                            // Dual-lobe Henyey-Greenstein phase function
-                                            float cosTheta = -(rd[0]*vl.dir[0] + rd[1]*vl.dir[1] + rd[2]*vl.dir[2]);
-                                            float gF = volume->gForward;
-                                            float gB = volume->gBackward;
-                                            float denomF = 1.f + gF*gF - 2.f*gF*cosTheta;
-                                            float denomB = 1.f + gB*gB - 2.f*gB*cosTheta;
-                                            float phaseF = (1.f - gF*gF) / (4.f * 3.14159f * std::pow(std::max(denomF,1e-4f), 1.5f));
-                                            float phaseB = (1.f - gB*gB) / (4.f * 3.14159f * std::pow(std::max(denomB,1e-4f), 1.5f));
-                                            float phase = volume->lobeMix * phaseF + (1.f - volume->lobeMix) * phaseB;
-
-                                            // Shadow ray — march toward light to compute transmittance
-                                            float shadowTrans = 1.f;
-                                            if (volume->shadowSteps > 0 && volume->shadowDensity > 0.01f) {
-                                                GfVec3f shadowDir = -vl.dir; // toward light
-                                                // March through volume toward light
-                                                float shadowDt = bboxSize.GetLength() / float(volume->shadowSteps);
-                                                for (int ss = 1; ss <= volume->shadowSteps; ++ss) {
-                                                    GfVec3f sp = p + shadowDir * (shadowDt * ss);
-                                                    GfVec3f suv = volume->WorldToNorm(sp);
-                                                    if (suv[0] < 0 || suv[0] > 1 || suv[1] < 0 || suv[1] > 1 || suv[2] < 0 || suv[2] > 1) break;
-                                                    float sd = volume->SampleDensity(suv[0], suv[1], suv[2]);
-                                                    shadowTrans *= std::exp(-sd * volume->extinction * volume->shadowDensity * shadowDt);
-                                                    if (shadowTrans < 0.001f) break;
-                                                }
-                                            }
-
-                                            // Spectral light colour response
-                                            float lightResponse = vl.color[0] * volume->scatterColor[0]; // spectral channel
-                                            totalScatter += volume->scattering * density * phase * lightResponse * shadowTrans * powder;
-                                        }
-
-                                        // Analytical multiple scattering (Wrenninge 2015)
-                                        if (volume->msApprox && volume->scattering > 0.01f) {
-                                            // Isotropic approximation: diffuse light fills dense interiors
-                                            float msPhase = 1.f / (4.f * 3.14159f); // isotropic
-                                            float msFactor = density * volume->scattering * msPhase;
-                                            // Approximate infinite bounces: L_ms ≈ L_ss * albedo / (1 - albedo * g)
-                                            float albedo = volume->scattering / std::max(volume->extinction, 0.01f);
-                                            float gEff = volume->gForward * volume->lobeMix;
-                                            float msBoost = albedo / std::max(1.f - albedo * gEff, 0.01f);
-                                            float msTintV = volume->msTint[0]; // spectral channel
-                                            totalScatter += msFactor * msBoost * msTintV * 0.3f; // scaled down
-                                        }
-
-                                        // Emission from temperature
-                                        float emission = 0.f;
-                                        if (volume->emissionIntensity > 0.01f) {
+                                        // Render mode branching
+                                        int rmode = volume->renderMode;
+                                        if (rmode == 1) {
+                                            // Greyscale — density only, no lighting
+                                            stepRadiance = density * volume->intensity;
+                                        } else if (rmode == 2) {
+                                            // Heat ramp: black → red → yellow → white
+                                            float t = std::min(density * volume->extinction * 0.5f, 1.f);
+                                            stepRadiance = t * volume->intensity;
+                                        } else if (rmode == 3) {
+                                            // Cool ramp: black → blue → cyan → white
+                                            float t = std::min(density * volume->extinction * 0.5f, 1.f);
+                                            stepRadiance = t * volume->intensity;
+                                        } else if (rmode == 4) {
+                                            // Blackbody only — emission from temperature, no scatter
                                             float temp = volume->SampleTemperature(uv[0], uv[1], uv[2]);
                                             if (temp > volume->tempMin) {
                                                 float tNorm = std::min((temp - volume->tempMin) / (volume->tempMax - volume->tempMin + 1e-6f), 1.f);
-                                                if (volume->useBlackbody) {
-                                                    float T = volume->tempMin + tNorm * (volume->tempMax - volume->tempMin);
-                                                    float lam_m = lambda * 1e-9f;
-                                                    const float h = 6.626e-34f, c = 3e8f, kB = 1.381e-23f;
-                                                    float x = (h * c) / (lam_m * kB * std::max(T, 1.f));
-                                                    float planck = 0.f;
-                                                    if (x < 80.f)
-                                                        planck = (2.f * h * c * c) / (std::pow(lam_m, 5.f) * (std::exp(x) - 1.f));
-                                                    emission = planck * 3.85e-14f * volume->emissionIntensity * density;
-                                                } else {
-                                                    emission = tNorm * tNorm * volume->emissionIntensity * density;
+                                                float T = volume->tempMin + tNorm * (volume->tempMax - volume->tempMin);
+                                                float lam_m = lambda * 1e-9f;
+                                                const float h = 6.626e-34f, c = 3e8f, kB = 1.381e-23f;
+                                                float x = (h * c) / (lam_m * kB * std::max(T, 1.f));
+                                                if (x < 80.f) {
+                                                    float planck = (2.f * h * c * c) / (std::pow(lam_m, 5.f) * (std::exp(x) - 1.f));
+                                                    stepRadiance = planck * 3.85e-14f * volume->emissionIntensity * density * volume->intensity;
                                                 }
                                             }
+                                        } else {
+                                            // Lit (0) and Explosion (5) — full lighting pipeline
+
+                                            // Powder effect (Schneider & Vos 2015)
+                                            float powder = 1.f;
+                                            if (volume->powderStrength > 0.01f)
+                                                powder = 1.f - std::exp(-density * volume->powderStrength * 2.f);
+
+                                            // Accumulate in-scatter from ALL lights
+                                            float totalScatter = 0.f;
+                                            for (const auto& vl : volLights) {
+                                                // Dual-lobe Henyey-Greenstein phase function
+                                                float cosTheta = -(rd[0]*vl.dir[0] + rd[1]*vl.dir[1] + rd[2]*vl.dir[2]);
+                                                float gF = volume->gForward;
+                                                float gB = volume->gBackward;
+                                                float denomF = 1.f + gF*gF - 2.f*gF*cosTheta;
+                                                float denomB = 1.f + gB*gB - 2.f*gB*cosTheta;
+                                                float phaseF = (1.f - gF*gF) / (4.f * 3.14159f * std::pow(std::max(denomF,1e-4f), 1.5f));
+                                                float phaseB = (1.f - gB*gB) / (4.f * 3.14159f * std::pow(std::max(denomB,1e-4f), 1.5f));
+                                                float phase = volume->lobeMix * phaseF + (1.f - volume->lobeMix) * phaseB;
+
+                                                // Shadow ray — march toward light to compute transmittance
+                                                float shadowTrans = 1.f;
+                                                if (volume->shadowSteps > 0 && volume->shadowDensity > 0.01f) {
+                                                    GfVec3f shadowDir = -vl.dir;
+                                                    float shadowDt = bboxSize.GetLength() / float(volume->shadowSteps);
+                                                    for (int ss = 1; ss <= volume->shadowSteps; ++ss) {
+                                                        GfVec3f sp = p + shadowDir * (shadowDt * ss);
+                                                        GfVec3f suv = volume->WorldToNorm(sp);
+                                                        if (suv[0] < 0 || suv[0] > 1 || suv[1] < 0 || suv[1] > 1 || suv[2] < 0 || suv[2] > 1) break;
+                                                        float sd = volume->SampleDensity(suv[0], suv[1], suv[2]);
+                                                        shadowTrans *= std::exp(-sd * volume->extinction * volume->shadowDensity * shadowDt);
+                                                        if (shadowTrans < 0.001f) break;
+                                                    }
+                                                }
+
+                                                float lightResponse = vl.color[0] * volume->scatterColor[0];
+                                                totalScatter += volume->scattering * density * phase * lightResponse * shadowTrans * powder;
+                                            }
+
+                                            // Analytical multiple scattering (Wrenninge 2015)
+                                            if (volume->msApprox && volume->scattering > 0.01f) {
+                                                float msPhase = 1.f / (4.f * 3.14159f);
+                                                float msFactor = density * volume->scattering * msPhase;
+                                                float albedo = volume->scattering / std::max(volume->extinction, 0.01f);
+                                                float gEff = volume->gForward * volume->lobeMix;
+                                                float msBoost = albedo / std::max(1.f - albedo * gEff, 0.01f);
+                                                totalScatter += msFactor * msBoost * volume->msTint[0] * 0.3f;
+                                            }
+
+                                            // Emission from temperature
+                                            float emission = 0.f;
+                                            if (volume->emissionIntensity > 0.01f || rmode == 5) {
+                                                float temp = volume->SampleTemperature(uv[0], uv[1], uv[2]);
+                                                if (temp > volume->tempMin) {
+                                                    float tNorm = std::min((temp - volume->tempMin) / (volume->tempMax - volume->tempMin + 1e-6f), 1.f);
+                                                    if (volume->useBlackbody) {
+                                                        float T = volume->tempMin + tNorm * (volume->tempMax - volume->tempMin);
+                                                        float lam_m = lambda * 1e-9f;
+                                                        const float h = 6.626e-34f, c = 3e8f, kB = 1.381e-23f;
+                                                        float x = (h * c) / (lam_m * kB * std::max(T, 1.f));
+                                                        if (x < 80.f) {
+                                                            float planck = (2.f * h * c * c) / (std::pow(lam_m, 5.f) * (std::exp(x) - 1.f));
+                                                            emission = planck * 3.85e-14f * volume->emissionIntensity * density;
+                                                        }
+                                                    } else {
+                                                        emission = tNorm * tNorm * volume->emissionIntensity * density;
+                                                    }
+                                                }
+                                            }
+
+                                            stepRadiance = (totalScatter + emission) * volume->intensity;
                                         }
 
                                         // Accumulate
-                                        volRadiance += volTransmittance * absorption * (totalScatter + emission);
+                                        volRadiance += volTransmittance * absorption * stepRadiance;
                                         volTransmittance *= stepTrans;
 
                                         if (volTransmittance < 0.001f) break;

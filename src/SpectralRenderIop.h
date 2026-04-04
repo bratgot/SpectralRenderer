@@ -184,6 +184,30 @@ private:
     bool   _vdbMsApprox = true;
     float  _vdbMsTint[3] = {1.f, 0.97f, 0.95f};
 
+    // Procedural detail noise
+    bool   _vdbNoiseEnable = false;
+    double _vdbNoiseScale = 4.0;
+    double _vdbNoiseStrength = 0.3;
+    int    _vdbNoiseOctaves = 3;
+    double _vdbNoiseRoughness = 0.5;
+
+    // Render mode + quality preset
+    int    _vdbRenderMode = 0;       // 0=Lit,1=Greyscale,2=Heat,3=Cool,4=Blackbody,5=Explosion
+    int    _vdbQualityPreset = 0;    // 0=Custom,1=Draft,2=Preview,3=Production,4=Final,5=Ultra
+    double _vdbIntensity = 1.0;      // master brightness multiplier
+
+    // Shadow cache
+    bool   _vdbShadowCache = false;
+    int    _vdbShadowCacheRes = 1;   // 0=Full,1=Half,2=Quarter
+
+    // Environment map
+    double _vdbEnvIntensity = 1.0;
+    double _vdbEnvRotate = 0.0;
+    double _vdbEnvDiffuse = 0.5;
+    int    _vdbEnvMode = 1;          // 0=Uniform dirs,1=SH+Virtual Lights
+    int    _vdbEnvVirtualLights = 2;
+    bool   _vdbUseReSTIR = false;
+
     // VDB sequence
     bool   _vdbAutoSequence = false;
     int    _vdbFrameOffset = 0;
