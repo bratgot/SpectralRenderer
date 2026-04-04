@@ -75,6 +75,7 @@ struct SpectralVolume {
 
     // Procedural detail noise (fBm)
     bool  noiseEnable    = false;
+    bool  noiseNormalize = true;
     float noiseScale     = 4.0f;
     float noiseStrength  = 0.3f;
     int   noiseOctaves   = 3;

@@ -124,6 +124,8 @@ struct LaunchParams {
     // Phase 12 additions
     float              volGBackward;
     float              volLobeMix;
+    int                volPhaseMode;      // 0=dual-lobe HG, 1=Cornette-Shanks Mie
+    float              volMieDropletD;    // microns
     int                volShadowSteps;
     float              volShadowDensity;
     float              volQuality;

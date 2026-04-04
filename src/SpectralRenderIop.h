@@ -128,13 +128,18 @@ private:
     int   _refractionBounces = 8;  // separate limit for glass paths
 
     // Built-in lighting rig
-    int    _skyPreset = 0;         // 0=off, 1=custom, 2=day, 3=golden, 4=overcast, 5=blue hour, 6=night
+    int    _skyPreset = 0;         // 0=off, 1=custom, 2+ presets
     double _skyMix = 1.0;
     double _sunElevation = 45.0;
     double _sunAzimuth = 180.0;
     double _sunIntensity = 5.0;
     double _skyIntensity = 1.0;
     double _turbidity = 3.0;
+    int    _locationPreset = 0;   // 0=Custom, 1+ = named locations
+    double _latitude = 51.5;      // London default
+    double _longitude = -0.12;
+    double _timeOfDay = 12.0;     // 24h clock
+    int    _dayOfYear = 172;      // June 21 (summer solstice)
 
     int    _studioPreset = 0;      // 0=off, 1=portrait, 2=product, 3=dramatic
     double _studioMix = 1.0;
@@ -192,6 +197,7 @@ private:
 
     // Procedural detail noise
     bool   _vdbNoiseEnable = false;
+    bool   _vdbNoiseNormalize = true;
     double _vdbNoiseScale = 4.0;
     double _vdbNoiseStrength = 0.3;
     int    _vdbNoiseOctaves = 3;
@@ -278,10 +284,29 @@ private:
     bool  _aovDirect   = false;
     bool  _aovIndirect = false;
     bool  _aovEmission = false;
+
+    // Volume-specific AOVs
+    bool  _aovVolDensity = false;
+    bool  _aovVolEmission = false;
+    bool  _aovVolShadow = false;
+    bool  _aovVolLights = false;
+    bool  _aovVolDepth = false;
+    bool  _aovMotion = false;
+    bool  _aovDenoiseAlbedo = false;
+    bool  _aovDenoiseNormal = false;
+
+    // Deep output
+    int   _deepSamples = 0;  // 0=disabled, 16-128
+
+    // Motion blur
+    bool  _motionBlur = false;
+    int   _shutterPreset = 1;  // 0=Start,1=Centre,2=End,3=Custom
+    int   _motionSamples = 3;
+
     int   _progressiveSppDone = 0;      // samples accumulated so far
     bool  _denoise = false;             // OptiX AI denoiser
-    float _shutterOpen  = -0.5f;   // shutter open  (relative to frame)
-    float _shutterClose =  0.5f;   // shutter close (relative to frame)
+    double _shutterOpen  = -0.5;   // shutter open  (relative to frame)
+    double _shutterClose =  0.5;   // shutter close (relative to frame)
     float _lightIntensity = 1.0f;  // global light intensity multiplier
     int   _illuminant = 0;         // 0=auto, 1=D50, 2=D65, 3=A, 4=F2, 5=F11
     const char* _cameraPath = "";

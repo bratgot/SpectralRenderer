@@ -68,6 +68,19 @@ struct SpectralLight
     int         envTexId = -1;          // texture ID for HDRI map
     int         envWidth = 0, envHeight = 0;
     const float* envPixels = nullptr;   // pointer to loaded HDRI data (RGB)
+    GfVec3f     envAvgColor = GfVec3f(1.f); // average HDRI colour (computed at load)
+
+    // Compute average HDRI colour — call after setting envPixels
+    void ComputeEnvAverage() {
+        if (!envPixels || envWidth <= 0 || envHeight <= 0) return;
+        double sumR=0, sumG=0, sumB=0;
+        int total = envWidth * envHeight;
+        for (int i = 0; i < total; ++i) {
+            sumR += envPixels[i*3]; sumG += envPixels[i*3+1]; sumB += envPixels[i*3+2];
+        }
+        float inv = 1.f / std::max(1, total);
+        envAvgColor = GfVec3f(float(sumR*inv), float(sumG*inv), float(sumB*inv));
+    }
 
     std::string name;
 

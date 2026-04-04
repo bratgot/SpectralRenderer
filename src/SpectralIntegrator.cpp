@@ -393,7 +393,9 @@ void SpectralIntegrator::RenderFrame(
                                         // Procedural fBm noise — perturbs density at render time
                                         if (volume->noiseEnable && density > 1e-6f) {
                                             float bboxDiag = (volume->bboxMax - volume->bboxMin).GetLength();
-                                            float ns = volume->noiseScale / std::max(bboxDiag, 1e-4f);
+                                            float ns = volume->noiseNormalize
+                                                ? volume->noiseScale / std::max(bboxDiag, 1e-4f)
+                                                : volume->noiseScale;
                                             double n = _noiseFBm(p[0]*ns, p[1]*ns, p[2]*ns,
                                                                  volume->noiseOctaves, volume->noiseRoughness);
                                             density = std::max(0.f, density * float(1.0 + volume->noiseStrength * n));
@@ -452,11 +454,25 @@ void SpectralIntegrator::RenderFrame(
                                                 if (vl.type==int(SpectralLight::Type::Sphere)||vl.type==int(SpectralLight::Type::Spot)) {
                                                     lDir = p - vl.pos; float len = lDir.GetLength(); if (len>1e-6f) lDir /= len; }
                                                 float cosTheta = -(rd[0]*lDir[0]+rd[1]*lDir[1]+rd[2]*lDir[2]);
-                                                float gF=volume->gForward, gB=volume->gBackward;
-                                                float denomF=1.f+gF*gF-2.f*gF*cosTheta, denomB=1.f+gB*gB-2.f*gB*cosTheta;
-                                                float phaseF=(1.f-gF*gF)/(4.f*3.14159f*std::pow(std::max(denomF,1e-4f),1.5f));
-                                                float phaseB=(1.f-gB*gB)/(4.f*3.14159f*std::pow(std::max(denomB,1e-4f),1.5f));
-                                                float phase = volume->lobeMix*phaseF + (1.f-volume->lobeMix)*phaseB;
+
+                                                // Phase function — mode 0: dual-lobe HG, mode 1: Cornette-Shanks Mie
+                                                float phase;
+                                                if (volume->phaseMode == 1) {
+                                                    // Cornette-Shanks approximation to Mie scattering
+                                                    // g derived from droplet diameter (Jendersie & d'Eon 2023 fit)
+                                                    float d = volume->mieDropletD;
+                                                    float g = 0.85f * (1.f - std::exp(-d * 0.8f)); // saturates at ~0.85 for large drops
+                                                    float g2 = g*g;
+                                                    float num = (1.f-g2) * (1.f+cosTheta*cosTheta);
+                                                    float denom = (2.f+g2) * std::pow(std::max(1.f+g2-2.f*g*cosTheta, 1e-4f), 1.5f);
+                                                    phase = (3.f/(8.f*3.14159f)) * num / denom;
+                                                } else {
+                                                    float gF=volume->gForward, gB=volume->gBackward;
+                                                    float denomF=1.f+gF*gF-2.f*gF*cosTheta, denomB=1.f+gB*gB-2.f*gB*cosTheta;
+                                                    float phaseF=(1.f-gF*gF)/(4.f*3.14159f*std::pow(std::max(denomF,1e-4f),1.5f));
+                                                    float phaseB=(1.f-gB*gB)/(4.f*3.14159f*std::pow(std::max(denomB,1e-4f),1.5f));
+                                                    phase = volume->lobeMix*phaseF + (1.f-volume->lobeMix)*phaseB;
+                                                }
                                                 float shadowTrans = 1.f;
                                                 if (volume->shadowSteps>0 && volume->shadowDensity>0.01f) {
                                                     GfVec3f sDir = -lDir;
@@ -469,10 +485,13 @@ void SpectralIntegrator::RenderFrame(
                                                 GfVec3f lRGB(vl.color[0]*volume->scatterColor[0], vl.color[1]*volume->scatterColor[1], vl.color[2]*volume->scatterColor[2]);
                                                 scatRGB += lRGB * (volume->scattering*density*phase*shadowTrans*powder);
                                             }
-                                            // Dome ambient RGB
+                                            // Dome ambient RGB (uses HDRI average if available)
                                             if (scene.HasLights()) for (const auto& L : scene.GetLights()) {
                                                 if (L.type!=SpectralLight::Type::Dome) continue;
-                                                scatRGB += L.color*L.intensity*volume->envDiffuse * (volume->scattering*density*(1.f/(4.f*3.14159f))); }
+                                                GfVec3f domeCol = (L.envPixels && L.envWidth > 0)
+                                                    ? L.envAvgColor * L.intensity
+                                                    : L.color * L.intensity;
+                                                scatRGB += domeCol*volume->envDiffuse * (volume->scattering*density*(1.f/(4.f*3.14159f))); }
                                             // Analytical MS RGB
                                             if (volume->msApprox && volume->scattering>0.01f) {
                                                 float albedo = volume->scattering/std::max(volume->extinction,0.01f);

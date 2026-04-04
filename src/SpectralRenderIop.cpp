@@ -307,24 +307,111 @@ void SpectralRenderIop::knobs(Knob_Callback f)
 
     Tab_knob(f, "Lighting");
     {
-        static const char* const skyP[] = {"Off", "Custom", "Day Sky", "Golden Hour", "Overcast", "Blue Hour", "Night", nullptr};
-        Enumeration_knob(f, &_skyPreset, skyP, "sky_preset", "Sky Preset");
-        Tooltip(f, "Analytical sun/sky lighting (Preetham model).\n"
-                   "Composes with scene lights from the scn input.\n"
-                   "Off = disabled, Day Sky = noon clear,\n"
-                   "Golden Hour = warm sunset, Overcast = soft cloudy,\n"
-                   "Blue Hour = cool twilight, Night = moonlit.");
-        Double_knob(f, &_skyMix, "sky_mix", "sky mix"); SetRange(f, 0, 2);
+        Text_knob(f,
+            "<font color='#777' size='-1'>"
+            "Analytical sun/sky lighting. Composes additively with scene lights<br>"
+            "from the scn input \xe2\x80\x94 Direct, Sphere, and Dome lights all contribute."
+            "</font>"
+        );
 
+        // ─── Sky Preset ─────────────────────────────────────────────
+        static const char* const skyP[] = {
+            "Off", "Custom",
+            "Clear Day", "Golden Hour", "Red Sky Dawn", "Sunrise",
+            "Overcast", "Blue Hour", "Moonlit", "Starlight",
+            "Alpine Light", "Desert Noon", "Arctic Twilight",
+            "Mars", "Titan", "Krypton", "Tatooine", "Pandora",
+            nullptr
+        };
+        Enumeration_knob(f, &_skyPreset, skyP, "sky_preset", "Sky Preset");
+        Tooltip(f, "Analytical sun/sky presets.\n\n"
+                   "Earth atmospheres:\n"
+                   "  Clear Day \xe2\x80\x94 bright noon, low turbidity\n"
+                   "  Golden Hour \xe2\x80\x94 warm low sun, long shadows\n"
+                   "  Red Sky Dawn \xe2\x80\x94 deep red/orange pre-sunrise\n"
+                   "  Sunrise \xe2\x80\x94 first light, warm golds and pinks\n"
+                   "  Overcast \xe2\x80\x94 soft diffuse, no direct sun\n"
+                   "  Blue Hour \xe2\x80\x94 cool twilight, 2\xc2\xb0 elevation\n"
+                   "  Moonlit \xe2\x80\x94 silver-blue moonlight\n"
+                   "  Starlight \xe2\x80\x94 deep night, minimal ambient\n"
+                   "  Alpine Light \xe2\x80\x94 high altitude, UV-rich, clear\n"
+                   "  Desert Noon \xe2\x80\x94 harsh overhead, high turbidity\n"
+                   "  Arctic Twilight \xe2\x80\x94 perpetual low sun\n\n"
+                   "Other worlds:\n"
+                   "  Mars \xe2\x80\x94 butterscotch sky, cold thin atmosphere\n"
+                   "  Titan \xe2\x80\x94 orange methane haze\n"
+                   "  Krypton \xe2\x80\x94 red giant star, deep crimson sky\n"
+                   "  Tatooine \xe2\x80\x94 binary sunset, twin warm suns\n"
+                   "  Pandora \xe2\x80\x94 bioluminescent blue-violet");
+        Double_knob(f, &_skyMix, "sky_mix", "sky mix"); SetRange(f, 0, 2);
+        Tooltip(f, "Blend between sky model and scene lights.\n"
+                   "0 = scene lights only. 1 = full sky. >1 = boost.");
+
+        // ─── Location + Time ────────────────────────────────────────
+        BeginClosedGroup(f, "grp_location", "Location and time of day");
+        {
+            Text_knob(f,
+                "<font color='#777' size='-1'>"
+                "Calculate sun position from geographic location and time.<br>"
+                "Uses the solar position algorithm (SPA) for accurate elevation/azimuth.<br>"
+                "Clicking 'Apply' sets sun elevation and azimuth from these values."
+                "</font>"
+            );
+            Newline(f);
+            static const char* const locP[] = {
+                "Custom", "London", "New York", "Los Angeles", "Tokyo", "Sydney",
+                "Paris", "Dubai", "Reykjavik", "Cape Town", "Mumbai",
+                "North Pole", "Equator (Quito)", nullptr
+            };
+            Enumeration_knob(f, &_locationPreset, locP, "location_preset", "location");
+            Tooltip(f, "Named locations set latitude and longitude.\n"
+                       "Choose Custom to enter coordinates manually.");
+            Double_knob(f, &_latitude, "latitude", "latitude"); SetRange(f, -90, 90);
+            Tooltip(f, "Geographic latitude. +90 = North Pole. -90 = South Pole.");
+            Double_knob(f, &_longitude, "longitude", "longitude"); SetRange(f, -180, 180);
+            ClearFlags(f, Knob::STARTLINE);
+            Double_knob(f, &_timeOfDay, "time_of_day", "time (24h)"); SetRange(f, 0, 24);
+            Tooltip(f, "Local solar time. 6 = sunrise, 12 = noon, 18 = sunset.\n"
+                       "Fractional hours: 14.5 = 2:30 PM.");
+            Int_knob(f, &_dayOfYear, "day_of_year", "day of year"); SetRange(f, 1, 365);
+            ClearFlags(f, Knob::STARTLINE);
+            Tooltip(f, "1 = Jan 1. 80 = March equinox. 172 = June solstice.\n"
+                       "264 = Sep equinox. 355 = Dec solstice.");
+            Button(f, "apply_sun_position", "Apply Sun Position");
+            Tooltip(f, "Calculate sun elevation and azimuth from location,\n"
+                       "time, and day. Sets sun_elevation and sun_azimuth knobs.");
+        }
+        EndGroup(f);
+
+        // ─── Sun and Sky ────────────────────────────────────────────
         BeginClosedGroup(f, "grp_sun", "Sun and sky settings");
         {
-            Double_knob(f, &_sunElevation, "sun_elevation", "sun elevation"); SetRange(f, 0, 90);
-            Tooltip(f, "Sun angle above horizon. 90=noon, 10=sunset.");
+            Double_knob(f, &_sunElevation, "sun_elevation", "sun elevation"); SetRange(f, -10, 90);
+            Tooltip(f, "Sun angle above horizon in degrees.\n"
+                       "-5 to 0 = below horizon (twilight/dawn colours)\n"
+                       "0 to 10 = golden/red hour\n"
+                       "10 to 30 = morning/afternoon\n"
+                       "60 to 90 = near noon");
             Double_knob(f, &_sunAzimuth, "sun_azimuth", "sun azimuth"); SetRange(f, 0, 360);
-            Double_knob(f, &_sunIntensity, "sun_intensity", "sun intensity"); SetRange(f, 0, 20);
-            Double_knob(f, &_skyIntensity, "sky_intensity", "sky fill"); SetRange(f, 0, 5);
+            Tooltip(f, "Sun compass direction. 0/360 = North. 90 = East.\n"
+                       "180 = South. 270 = West.");
+            Double_knob(f, &_sunIntensity, "sun_intensity", "sun intensity"); SetRange(f, 0, 100);
+            SetFlags(f, Knob::LOG_SLIDER);
+            Tooltip(f, "Direct sun brightness (squared for exponential feel).\n"
+                       "Effective = value^2. So 3->9, 5->25, 10->100.\n"
+                       "1 = dim fill. 5 = overcast. 8 = bright sun. 15+ = intense.");
+            Double_knob(f, &_skyIntensity, "sky_intensity", "sky fill"); SetRange(f, 0, 20);
+            SetFlags(f, Knob::LOG_SLIDER);
+            Tooltip(f, "Sky dome fill brightness (squared).\n"
+                       "Effective = value^2. So 2->4, 5->25.\n"
+                       "1 = subtle. 3 = natural. 5+ = bright overcast.");
             Double_knob(f, &_turbidity, "turbidity", "turbidity"); SetRange(f, 2, 10);
-            Tooltip(f, "Atmospheric haze. 2=clear, 5=hazy, 10=heavy smog.");
+            Tooltip(f, "Atmospheric haze / particulates.\n"
+                       "2 = crystal clear mountain air\n"
+                       "3 = clear day (default)\n"
+                       "5 = light haze / coastal\n"
+                       "8 = heavy haze / smog\n"
+                       "10 = dense urban pollution");
         }
         EndGroup(f);
 
@@ -466,19 +553,26 @@ void SpectralRenderIop::knobs(Knob_Callback f)
             "</font>"
         );
         static const char* const volPresets[] = {
-            "Custom", "Smoke", "Fire / Explosion",
+            "Custom",
+            // Smoke (1-3)
+            "Light Smoke", "Dense Smoke", "Industrial",
+            // Fire (4-6)
+            "Campfire", "Explosion", "Pyroclastic",
+            // Clouds (7-10)
             "Cumulus", "Cirrus", "Stratus", "Storm Cloud",
-            "Fog / Mist", "Nebula", nullptr
+            // Atmosphere (11-14)
+            "Fog", "Ground Mist", "Haze", "Dust Storm",
+            // Effects (15-16)
+            "Nebula", "Underwater Caustic",
+            nullptr
         };
         Enumeration_knob(f, &_vdbShadingPreset, volPresets, "vdb_shading_preset", "Shading Preset");
-        Tooltip(f, "One-click setup for common volume types.\n"
-                   "Sets extinction, scattering, phase function, and emission.\n\n"
-                   "Cloud types based on real atmospheric data:\n"
-                   "  Cumulus \xe2\x80\x94 puffy white clouds, bright, albedo \xe2\x89\x88 0.99\n"
-                   "  Cirrus \xe2\x80\x94 wispy ice crystals, thin and translucent\n"
-                   "  Stratus \xe2\x80\x94 flat overcast layer, even illumination\n"
-                   "  Storm Cloud \xe2\x80\x94 dense cumulonimbus, dark base\n\n"
-                   "Choose Custom to adjust settings manually.");
+        Tooltip(f, "One-click setup for common volume types.\n\n"
+                   "Smoke \xe2\x80\x94 varying density and absorption\n"
+                   "Fire \xe2\x80\x94 emission + scattering with temperature grids\n"
+                   "Clouds \xe2\x80\x94 high albedo (0.95-0.99), Mie-like scattering\n"
+                   "Atmosphere \xe2\x80\x94 environmental effects\n"
+                   "Effects \xe2\x80\x94 stylised and sci-fi looks");
         Double_knob(f, &_vdbExtinction, "vdb_extinction", "extinction"); SetRange(f, 0, 50);
         Tooltip(f, "How quickly light is absorbed per unit density.\n"
                    "Higher = more opaque volume.\n"
@@ -689,8 +783,15 @@ void SpectralRenderIop::knobs(Knob_Callback f)
             );
             Newline(f);
             Bool_knob(f, &_vdbNoiseEnable, "vdb_noise_enable", "enable");
+            Bool_knob(f, &_vdbNoiseNormalize, "vdb_noise_normalize", "normalize to bbox");
+            ClearFlags(f, Knob::STARTLINE);
+            Tooltip(f, "Scale noise frequency relative to the volume bounding box.\n"
+                       "ON: noise looks the same regardless of volume world size.\n"
+                       "OFF: noise is in absolute world units.\n"
+                       "Enable for large clouds where default scale is too coarse.");
             Double_knob(f, &_vdbNoiseScale, "vdb_noise_scale", "scale"); SetRange(f, 0.1, 20);
-            Tooltip(f, "1 = one cycle across bbox. 4 = fine. 8 = very fine. 0.5 = lumpy.");
+            Tooltip(f, "Noise frequency. With normalize ON: 4 = 4 cycles across bbox.\n"
+                       "With normalize OFF: world-space frequency.");
             Double_knob(f, &_vdbNoiseStrength, "vdb_noise_strength", "strength"); SetRange(f, 0, 1);
             Tooltip(f, "0 = none. 0.3 = natural. 0.5 = strong. 1 = extreme.");
             Int_knob(f, &_vdbNoiseOctaves, "vdb_noise_octaves", "octaves"); SetRange(f, 1, 6);
@@ -755,6 +856,13 @@ void SpectralRenderIop::knobs(Knob_Callback f)
 
     Tab_knob(f, "AOVs");
 
+    Text_knob(f,
+        "<font color='#777' size='-1'>"
+        "Surface AOVs for compositing and relighting. These work for<br>"
+        "geometry renders \xe2\x80\x94 volume-specific passes are in the Output tab."
+        "</font>"
+    );
+
     BeginClosedGroup(f, "aov_grp", "AOV outputs");
     {
         Divider(f, "Geometry");
@@ -795,6 +903,81 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         Tooltip(f, "Ambient occlusion. 0 samples = disabled.");
     }
     EndGroup(f);
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  TAB: Output
+    // ═══════════════════════════════════════════════════════════════════
+    Tab_knob(f, "Output");
+
+    Divider(f, "Volume AOV Passes");
+    Text_knob(f,
+        "<font size='-1' color='#777'>"
+        "Extra output layers for compositing. Each pass appears as a<br>"
+        "separate layer accessible via Shuffle or Copy nodes downstream."
+        "</font>"
+    );
+    Newline(f);
+    Bool_knob(f, &_aovVolDensity, "aov_vol_density", "Density");
+    Tooltip(f, "Integrated volume density as vol_density layer.\nGreyscale -- equivalent to beauty alpha.");
+    Bool_knob(f, &_aovVolEmission, "aov_vol_emission", "Emission");
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "Emission contribution as vol_emission (RGB).\nFire/blackbody glow before BG compositing.");
+    Bool_knob(f, &_aovVolShadow, "aov_vol_shadow", "Shadow");
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "Per-light shadow transmittance as vol_shadow.\n1.0 = fully lit, 0.0 = fully self-shadowed.");
+    Newline(f);
+    Bool_knob(f, &_aovVolLights, "aov_vol_lights", "Per-light (x4)");
+    Tooltip(f, "Up to 4 separate light contribution layers.\nvol_light0 through vol_light3.");
+    Bool_knob(f, &_aovVolDepth, "aov_vol_depth", "Depth");
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "First-hit depth as vol_depth (single channel).");
+    Bool_knob(f, &_aovMotion, "aov_motion", "Motion vectors");
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "Screen-space motion vectors as vol_motion (RG).\nRequires velocity grid in Grids tab.");
+
+    Divider(f, "Denoiser Inputs");
+    Text_knob(f,
+        "<font size='-1' color='#777'>"
+        "Auxiliary buffers for downstream Denoise nodes."
+        "</font>"
+    );
+    Newline(f);
+    Bool_knob(f, &_aovDenoiseAlbedo, "aov_denoise_albedo", "Albedo");
+    Tooltip(f, "Unlit scatter albedo as vol_denoise_albedo (RGB).");
+    Bool_knob(f, &_aovDenoiseNormal, "aov_denoise_normal", "Normal");
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "Density-gradient normals as vol_denoise_normal (RGB).");
+
+    Divider(f, "Deep Output");
+    Text_knob(f,
+        "<font size='-1' color='#777'>"
+        "Depth-sorted RGBA slabs for DeepMerge compositing."
+        "</font>"
+    );
+    Newline(f);
+    Int_knob(f, &_deepSamples, "deep_samples", "deep samples"); SetRange(f, 0, 128);
+    Tooltip(f, "0 = disabled. 16 = preview. 64 = smooth. 128 = final.");
+
+    Divider(f, "Motion Blur");
+    Text_knob(f,
+        "<font size='-1' color='#777'>"
+        "Velocity-based motion blur from VDB velocity grids."
+        "</font>"
+    );
+    Newline(f);
+    Bool_knob(f, &_motionBlur, "motion_blur", "enable");
+    Tooltip(f, "Enable velocity-based motion blur.\nRequires velocity grid (vel/v) in Grids tab.");
+    static const char* const shutP[] = {
+        "Start (0 to 1)", "Centre (-0.5 to 0.5)", "End (-1 to 0)", "Custom", nullptr
+    };
+    Enumeration_knob(f, &_shutterPreset, shutP, "shutter_preset", "shutter");
+    ClearFlags(f, Knob::STARTLINE);
+    Newline(f);
+    Double_knob(f, &_shutterOpen, "shutter_open", "open"); SetRange(f, -1, 0);
+    Double_knob(f, &_shutterClose, "shutter_close", "close"); SetRange(f, 0, 1);
+    ClearFlags(f, Knob::STARTLINE);
+    Int_knob(f, &_motionSamples, "motion_samples", "samples"); SetRange(f, 2, 8);
+    ClearFlags(f, Knob::STARTLINE);
 
     BeginClosedGroup(f, "spectral_engine", "Spectral rendering engine — how it works");
     {
@@ -897,9 +1080,9 @@ int SpectralRenderIop::knob_changed(Knob* k)
     // Update DAG node label with CPU/GPU indicator
     if (k->is("device_mode") || k->is("showPanel")) {
         const char* labels[] = {
-            "<font size='+1'><b>CPU</b></font> / <font color='#888'>GPU</font>",
-            "<font color='#888'>CPU</font> / <font size='+1'><b>GPU</b></font>",
-            "<font color='#888'>CPU</font> / <font size='+1'><b>AUTO</b></font>"
+            "<center><font size='-2' color='#999'><b>cpu</b>&nbsp;&nbsp;gpu</font></center>",
+            "<center><font size='-2' color='#999'>cpu&nbsp;&nbsp;<b>gpu</b></font></center>",
+            "<center><font size='-2' color='#999'>cpu&nbsp;&nbsp;<b>auto</b></font></center>"
         };
         int idx = std::max(0, std::min(_deviceMode, 2));
         if (Knob* lk = knob("label")) lk->set_text(labels[idx]);
@@ -992,13 +1175,28 @@ int SpectralRenderIop::knob_changed(Knob* k)
 
     // Sky preset
     if (k->is("sky_preset")) {
+        // Intensity values are squared in _BuildLightRig
+        // sunR/G/B derived from sunColorFromElevation + turbidity
         switch (_skyPreset) {
             case 0: _skyMix = 0; break;  // Off
-            case 2: _sunElevation=60; _sunAzimuth=180; _sunIntensity=5; _skyIntensity=1; _turbidity=2.5; _skyMix=1; break; // Day
-            case 3: _sunElevation=8; _sunAzimuth=240; _sunIntensity=4; _skyIntensity=0.6; _turbidity=4; _skyMix=1; break; // Golden
-            case 4: _sunElevation=50; _sunAzimuth=180; _sunIntensity=0.5; _skyIntensity=1.5; _turbidity=8; _skyMix=1; break; // Overcast
-            case 5: _sunElevation=2; _sunAzimuth=270; _sunIntensity=0.3; _skyIntensity=0.4; _turbidity=3; _skyMix=1; break; // Blue Hour
-            case 6: _sunElevation=30; _sunAzimuth=180; _sunIntensity=0.2; _skyIntensity=0.05; _turbidity=2; _skyMix=0.3; break; // Night
+            // Earth
+            case 2:  _sunElevation=60; _sunAzimuth=180; _sunIntensity=8;   _skyIntensity=3;   _turbidity=2.5; _skyMix=1; break; // Clear Day
+            case 3:  _sunElevation=8;  _sunAzimuth=240; _sunIntensity=6;   _skyIntensity=2.5; _turbidity=4;   _skyMix=1; break; // Golden Hour
+            case 4:  _sunElevation=1;  _sunAzimuth=90;  _sunIntensity=5;   _skyIntensity=2;   _turbidity=7;   _skyMix=1; break; // Red Sky Dawn
+            case 5:  _sunElevation=5;  _sunAzimuth=100; _sunIntensity=5.5; _skyIntensity=2.5; _turbidity=5;   _skyMix=1; break; // Sunrise
+            case 6:  _sunElevation=50; _sunAzimuth=180; _sunIntensity=3;   _skyIntensity=5;   _turbidity=8;   _skyMix=1; break; // Overcast
+            case 7:  _sunElevation=2;  _sunAzimuth=270; _sunIntensity=2;   _skyIntensity=1.5; _turbidity=3;   _skyMix=1; break; // Blue Hour
+            case 8:  _sunElevation=30; _sunAzimuth=180; _sunIntensity=0.8; _skyIntensity=0.4; _turbidity=2;   _skyMix=0.4; break; // Moonlit
+            case 9:  _sunElevation=30; _sunAzimuth=180; _sunIntensity=0.1; _skyIntensity=0.05;_turbidity=2;   _skyMix=0.1; break; // Starlight
+            case 10: _sunElevation=55; _sunAzimuth=180; _sunIntensity=9;   _skyIntensity=4;   _turbidity=1.8; _skyMix=1; break; // Alpine Light
+            case 11: _sunElevation=80; _sunAzimuth=180; _sunIntensity=10;  _skyIntensity=3;   _turbidity=6;   _skyMix=1; break; // Desert Noon
+            case 12: _sunElevation=3;  _sunAzimuth=180; _sunIntensity=3;   _skyIntensity=2;   _turbidity=2;   _skyMix=1; break; // Arctic Twilight
+            // Planets
+            case 13: _sunElevation=35; _sunAzimuth=200; _sunIntensity=4;   _skyIntensity=1.5; _turbidity=9;   _skyMix=1; break; // Mars
+            case 14: _sunElevation=25; _sunAzimuth=180; _sunIntensity=1;   _skyIntensity=0.8; _turbidity=10;  _skyMix=1; break; // Titan
+            case 15: _sunElevation=20; _sunAzimuth=160; _sunIntensity=3;   _skyIntensity=1.5; _turbidity=4;   _skyMix=1; break; // Krypton
+            case 16: _sunElevation=15; _sunAzimuth=240; _sunIntensity=5;   _skyIntensity=2;   _turbidity=4;   _skyMix=1; break; // Tatooine
+            case 17: _sunElevation=40; _sunAzimuth=180; _sunIntensity=3;   _skyIntensity=3;   _turbidity=3;   _skyMix=1; break; // Pandora
             default: break;
         }
         if (Knob* mk = knob("sky_mix")) mk->set_value(_skyMix);
@@ -1027,6 +1225,59 @@ int SpectralRenderIop::knob_changed(Knob* k)
         if (Knob* mk = knob("studio_fill_ratio")) mk->set_value(_studioFillRatio);
         if (Knob* mk = knob("studio_rim_intensity")) mk->set_value(_studioRimIntensity);
         if (Knob* mk = knob("shadow_softness")) mk->set_value(_shadowSoftness);
+        return 1;
+    }
+
+    // Location preset — set lat/long from named city
+    if (k->is("location_preset") && _locationPreset > 0) {
+        static const double locs[][2] = {
+            {0,0},                // 0: Custom
+            {51.5074, -0.1278},   // London
+            {40.7128, -74.006},   // New York
+            {34.0522, -118.244},  // Los Angeles
+            {35.6762, 139.6503},  // Tokyo
+            {-33.8688, 151.2093}, // Sydney
+            {48.8566, 2.3522},    // Paris
+            {25.2048, 55.2708},   // Dubai
+            {64.1466, -21.9426},  // Reykjavik
+            {-33.9249, 18.4241},  // Cape Town
+            {19.076, 72.8777},    // Mumbai
+            {90.0, 0.0},          // North Pole
+            {-0.1807, -78.4678},  // Quito (Equator)
+        };
+        if (_locationPreset < 13) {
+            _latitude = locs[_locationPreset][0];
+            _longitude = locs[_locationPreset][1];
+            if (knob("latitude")) knob("latitude")->set_value(_latitude);
+            if (knob("longitude")) knob("longitude")->set_value(_longitude);
+        }
+        return 1;
+    }
+
+    // Solar position algorithm — compute elevation/azimuth from lat/long/time/day
+    if (k->is("apply_sun_position")) {
+        // Solar declination (Spencer 1971)
+        double B = (360.0 / 365.0) * (_dayOfYear - 81) * M_PI / 180.0;
+        double dec = 23.45 * std::sin(B);
+        // Hour angle: 15° per hour from solar noon
+        double hourAngle = (_timeOfDay - 12.0) * 15.0;
+        double latR = _latitude * M_PI / 180.0;
+        double decR = dec * M_PI / 180.0;
+        double haR = hourAngle * M_PI / 180.0;
+        // Solar elevation
+        double sinElev = std::sin(latR) * std::sin(decR) + std::cos(latR) * std::cos(decR) * std::cos(haR);
+        _sunElevation = std::asin(std::max(-1.0, std::min(1.0, sinElev))) * 180.0 / M_PI;
+        // Solar azimuth
+        double cosElev = std::cos(_sunElevation * M_PI / 180.0);
+        if (cosElev > 1e-6) {
+            double cosAz = (std::sin(decR) - std::sin(latR) * sinElev) / (std::cos(latR) * cosElev);
+            double az = std::acos(std::max(-1.0, std::min(1.0, cosAz))) * 180.0 / M_PI;
+            _sunAzimuth = (hourAngle > 0) ? 360.0 - az : az;
+        }
+        if (knob("sun_elevation")) knob("sun_elevation")->set_value(_sunElevation);
+        if (knob("sun_azimuth")) knob("sun_azimuth")->set_value(_sunAzimuth);
+        fprintf(stderr, "SpectralRender: sun position — elev=%.1f° az=%.1f° (lat=%.2f lon=%.2f time=%.1f day=%d)\n",
+                _sunElevation, _sunAzimuth, _latitude, _longitude, _timeOfDay, _dayOfYear);
         return 1;
     }
 
@@ -1131,35 +1382,47 @@ int SpectralRenderIop::knob_changed(Knob* k)
     if (k->is("vdb_env_intensity") || k->is("vdb_env_rotate") ||
         k->is("vdb_env_mode") || k->is("vdb_env_virtual_lights") || k->is("vdb_use_restir")) return 1;
     if (k->is("vdb_noise_enable") || k->is("vdb_noise_scale") || k->is("vdb_noise_strength") ||
-        k->is("vdb_noise_octaves") || k->is("vdb_noise_roughness")) return 1;
+        k->is("vdb_noise_octaves") || k->is("vdb_noise_roughness") || k->is("vdb_noise_normalize")) return 1;
 
     // Shading preset handler
     if (k->is("vdb_shading_preset") && _vdbShadingPreset > 0) {
-        // Physically-based presets. Cloud albedo ≈ 0.99 (near-pure scattering).
-        // ext/scat tuned for typical VDB scale (1-10 world units).
         struct SPreset { double ext; double scat; double dens; double gF; double gB; double lM;
-                         double pow; double emI; double tMin; double tMax; double flI; bool bb;
-                         bool chrom; double sR; double sG; double sB;
-                         float scR; float scG; float scB; int rmode; };
-        //                              ext  scat dens  gF    gB    lM    pow emI  tMin  tMax   flI  bb    chr   sR  sG   sB     scR  scG  scB   rmode
+                         double pow; double emI; double tMin; double tMax; double flI;
+                         float scR; float scG; float scB; int rmode; double inten; };
+        //                             ext  scat dens  gF    gB    lM   pow emI  tMin  tMax  flI   scR   scG   scB  rmode inten
         static const SPreset sp[] = {
-            {},                                                                                                                                      // 0: Custom
-            {5,  2,  1,   0.3, -0.1,  0.8,  0,  0,    0,    0,    0,    false,false, 1,1,1,       0.7f,0.7f,0.7f,   0}, // 1: Smoke — absorptive, low albedo
-            {3,  2,  1,   0.5, -0.2,  0.7,  2,  8,  300, 3000,  10,    true, false, 1,1,1,       1.f,0.85f,0.6f,   5}, // 2: Fire — low ext, emission visible
-            {2.5,2.4,1,   0.85,-0.1,  0.85, 3,  0,    0,    0,    0,    false,false, 1,1,1,       1.f,1.f,1.f,      0}, // 3: Cumulus — bright puffy, albedo 0.96
-            {0.4,0.38,0.6,0.75,-0.05, 0.9,  1,  0,    0,    0,    0,    false,false, 1,1,1,       1.f,1.f,1.f,      0}, // 4: Cirrus — thin wispy ice, translucent
-            {3.5,3.4,1,   0.85,-0.1,  0.85, 2,  0,    0,    0,    0,    false,false, 1,1,1,       0.98f,0.98f,1.f,  0}, // 5: Stratus — flat overcast, slight blue
-            {6,  5.7,1.5, 0.87,-0.25, 0.8,  4,  0,    0,    0,    0,    false,false, 1,1,1,       0.9f,0.9f,0.92f,  0}, // 6: Storm — dense, dark base, albedo 0.95
-            {1.5,1.4,0.5, 0.6, -0.15, 0.85, 0,  0,    0,    0,    0,    false,true,  1,1,1.1,     0.92f,0.94f,0.97f,0}, // 7: Fog — ground fog, slight blue
-            {0.8,0.4,0.8, 0.2,  0,    1,    0,  5, 2000,15000,   0,    true, true,  0.8,1,1.4,   0.6f,0.4f,1.f,    0}, // 8: Nebula — ethereal, emission
+            {},                                                                                                              // 0: Custom
+            // ── Smoke ──
+            {3,   1.5, 1,   0.3, -0.1,  0.8,  0,  0,    0,    0,    0,  0.7f, 0.7f, 0.7f,  0, 1},   // 1: Light Smoke
+            {8,   3,   1.5, 0.25,-0.15, 0.75, 0,  0,    0,    0,    0,  0.5f, 0.5f, 0.5f,  0, 1},   // 2: Dense Smoke
+            {12,  4,   2,   0.2, -0.1,  0.7,  0,  0,    0,    0,    0,  0.4f, 0.38f,0.35f, 0, 1},   // 3: Industrial
+            // ── Fire ──
+            {2,   1.5, 1,   0.4, -0.15, 0.7,  1,  5,  800, 2500,   8,  1.f,  0.9f, 0.7f,  5, 1.5}, // 4: Campfire
+            {4,   3,   1.2, 0.6, -0.25, 0.75, 3, 10,  300, 5000,  15,  1.f,  0.85f,0.6f,  5, 2},   // 5: Explosion
+            {6,   4,   1.5, 0.7, -0.3,  0.8,  4, 15,  200, 8000,  20,  0.9f, 0.8f, 0.6f,  5, 2.5}, // 6: Pyroclastic
+            // ── Clouds ──
+            {2.5, 2.4, 1,   0.85,-0.1,  0.85, 3,  0,    0,    0,    0,  1.f,  1.f,  1.f,   0, 2},   // 7: Cumulus
+            {0.4, 0.38,0.6, 0.75,-0.05, 0.9,  1,  0,    0,    0,    0,  1.f,  1.f,  1.f,   0, 3},   // 8: Cirrus
+            {3.5, 3.4, 1,   0.85,-0.1,  0.85, 2,  0,    0,    0,    0,  0.98f,0.98f,1.f,   0, 2},   // 9: Stratus
+            {6,   5.7, 1.5, 0.87,-0.25, 0.8,  4,  0,    0,    0,    0,  0.9f, 0.9f, 0.92f, 0, 1.5}, // 10: Storm Cloud
+            // ── Atmosphere ──
+            {1.5, 1.4, 0.5, 0.6, -0.15, 0.85, 0,  0,    0,    0,    0,  0.92f,0.94f,0.97f, 0, 1.5}, // 11: Fog
+            {0.8, 0.75,0.3, 0.5, -0.1,  0.85, 0,  0,    0,    0,    0,  0.95f,0.96f,1.f,   0, 2},   // 12: Ground Mist
+            {0.3, 0.28,0.2, 0.7, -0.05, 0.9,  0,  0,    0,    0,    0,  0.9f, 0.92f,0.98f, 0, 3},   // 13: Haze
+            {5,   2,   1.5, 0.4, -0.1,  0.6,  0,  0,    0,    0,    0,  0.85f,0.75f,0.6f,  0, 1},   // 14: Dust Storm
+            // ── Effects ──
+            {0.8, 0.4, 0.8, 0.2,  0,    1,    0,  5, 2000,15000,   0,  0.6f, 0.4f, 1.f,   0, 2},   // 15: Nebula
+            {0.5, 0.48,0.4, 0.85,-0.1,  0.9,  1,  0,    0,    0,    0,  0.7f, 0.9f, 1.f,   0, 2},   // 16: Underwater Caustic
         };
-        if (_vdbShadingPreset < 9) {
+        int presetCount = sizeof(sp) / sizeof(sp[0]);
+        if (_vdbShadingPreset < presetCount) {
             const auto& s = sp[_vdbShadingPreset];
             _vdbExtinction=s.ext; _vdbScattering=s.scat; _vdbDensityMult=s.dens;
             _vdbGForward=s.gF; _vdbGBackward=s.gB; _vdbLobeMix=s.lM;
             _vdbPowder=s.pow; _vdbEmissionIntensity=s.emI;
             _vdbTempMin=s.tMin; _vdbTempMax=s.tMax; _vdbFlameIntensity=s.flI;
             _vdbScatterColor[0]=s.scR; _vdbScatterColor[1]=s.scG; _vdbScatterColor[2]=s.scB;
+            _vdbIntensity=s.inten;
             if (knob("vdb_extinction"))   knob("vdb_extinction")->set_value(s.ext);
             if (knob("vdb_scattering"))   knob("vdb_scattering")->set_value(s.scat);
             if (knob("vdb_density_mult")) knob("vdb_density_mult")->set_value(s.dens);
@@ -1171,6 +1434,7 @@ int SpectralRenderIop::knob_changed(Knob* k)
             if (knob("vdb_temp_min"))     knob("vdb_temp_min")->set_value(s.tMin);
             if (knob("vdb_temp_max"))     knob("vdb_temp_max")->set_value(s.tMax);
             if (knob("vdb_flame_intensity")) knob("vdb_flame_intensity")->set_value(s.flI);
+            if (knob("vdb_intensity"))    knob("vdb_intensity")->set_value(s.inten);
             if (knob("vdb_scatter_color")) {
                 knob("vdb_scatter_color")->set_value(s.scR, 0);
                 knob("vdb_scatter_color")->set_value(s.scG, 1);
@@ -1726,8 +1990,10 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                                 light.envWidth = tex->GetWidth();
                                 light.envHeight = tex->GetHeight();
                                 light.envPixels = tex->_pixels.data();
-                                fprintf(stderr, "SpectralRender: HDRI env map '%s' (%dx%d)\n",
-                                        filePath.c_str(), light.envWidth, light.envHeight);
+                                light.ComputeEnvAverage();
+                                fprintf(stderr, "SpectralRender: HDRI env map '%s' (%dx%d) avg=(%.2f,%.2f,%.2f)\n",
+                                        filePath.c_str(), light.envWidth, light.envHeight,
+                                        light.envAvgColor[0], light.envAvgColor[1], light.envAvgColor[2]);
                             }
                         }
                     }
@@ -3448,6 +3714,7 @@ void SpectralRenderIop::_applyVolumeShading(std::shared_ptr<pxr::SpectralVolume>
     vol->msApprox = _vdbMsApprox;
     vol->msTint = pxr::GfVec3f(_vdbMsTint[0], _vdbMsTint[1], _vdbMsTint[2]);
     vol->noiseEnable = _vdbNoiseEnable;
+    vol->noiseNormalize = _vdbNoiseNormalize;
     vol->noiseScale = float(_vdbNoiseScale);
     vol->noiseStrength = float(_vdbNoiseStrength);
     vol->noiseOctaves = _vdbNoiseOctaves;
@@ -3496,11 +3763,24 @@ SpectralRenderIop::VDBCacheEntry* SpectralRenderIop::_VDBCacheGet(const std::str
 // _BuildLightRig — sun/sky + studio lights (Preetham model)
 // ---------------------------------------------------------------------------
 static void sunColorFromElevation(double elev, double turbidity, double& r, double& g, double& b) {
-    double t = std::max(0.0, std::min(elev / 90.0, 1.0));
+    // Extended model: supports negative elevation for dawn/twilight
+    double t = std::max(-0.1, std::min(elev / 90.0, 1.0));
     double turbShift = (turbidity - 2.0) / 8.0 * 0.15;
-    r = 1.0;
-    g = std::max(0.15, std::min(0.4 + 0.55 * t - turbShift, 1.0));
-    b = std::max(0.02, std::min(0.1 + 0.8 * t * t - turbShift * 2, 0.95));
+    if (elev < 0) {
+        // Below horizon: deep red/orange
+        double f = std::max(0.0, 1.0 + elev / 10.0); // fades to 0 at -10°
+        r = f; g = f * 0.2; b = f * 0.02;
+    } else if (elev < 5) {
+        // Near horizon: intense warm — red sky at dawn
+        double f = elev / 5.0;
+        r = 1.0;
+        g = std::max(0.1, 0.15 + 0.35 * f - turbShift);
+        b = std::max(0.01, 0.02 + 0.1 * f * f - turbShift * 2);
+    } else {
+        r = 1.0;
+        g = std::max(0.15, std::min(0.4 + 0.55 * t - turbShift, 1.0));
+        b = std::max(0.02, std::min(0.1 + 0.8 * t * t - turbShift * 2, 0.95));
+    }
 }
 
 static void skyColorFromElevation(double elev, double turbidity, double& r, double& g, double& b) {
@@ -3548,10 +3828,9 @@ void SpectralRenderIop::_BuildLightRig()
         GfVec3f sunDir = dirFromElevAzim(_sunElevation, _sunAzimuth);
 
         // Direct sun — use sphere light for soft shadows
-        // Scale factor for physically plausible volume illumination
-        // (real sun illuminance ≈ 120,000 lux, typical surface rendering uses 1-10)
-        double sunScale = 3.0;  // boost sun for volume visibility
-        double si = _sunIntensity * std::max(0.1, std::min(_sunElevation / 15.0, 1.0)) * m * sunScale;
+        // Exponential: high values rapidly increase brightness
+        double sunPow = _sunIntensity * _sunIntensity;  // squared for exponential feel
+        double si = sunPow * std::max(0.1, std::min(_sunElevation / 12.0, 1.0)) * m;
         if (si > 0.001) {
             SpectralLight sun;
             if (_shadowSoftness > 0.01) {
@@ -3569,14 +3848,28 @@ void SpectralRenderIop::_BuildLightRig()
             _scene->AddLight(sun);
         }
 
-        // Sky dome fill — boosted for volume illumination
-        double skyScale = 2.5;
-        double ski = _skyIntensity * m * skyScale;
+        // Sky dome fill — exponential for quick brightness ramp
+        double skyPow = _skyIntensity * _skyIntensity;  // squared
+        double ski = skyPow * m;
         if (ski > 0.001) {
             SpectralLight sky;
             sky.type = SpectralLight::Type::Dome;
             sky.color = GfVec3f(float(skyR * ski), float(skyG * ski), float(skyB * ski));
             sky.intensity = 1.f;
+
+            // Planet sky colour overrides
+            if (_skyPreset == 13) { // Mars — butterscotch sky, pink-red sun
+                sky.color = GfVec3f(float(0.8*ski), float(0.55*ski), float(0.3*ski));
+            } else if (_skyPreset == 14) { // Titan — thick orange methane haze
+                sky.color = GfVec3f(float(0.7*ski), float(0.45*ski), float(0.15*ski));
+            } else if (_skyPreset == 15) { // Krypton — red giant star, crimson sky
+                sky.color = GfVec3f(float(0.9*ski), float(0.2*ski), float(0.15*ski));
+            } else if (_skyPreset == 16) { // Tatooine — warm amber twin-sun sky
+                sky.color = GfVec3f(float(0.9*ski), float(0.7*ski), float(0.35*ski));
+            } else if (_skyPreset == 17) { // Pandora — bioluminescent blue-violet
+                sky.color = GfVec3f(float(0.3*ski), float(0.4*ski), float(0.9*ski));
+            }
+
             _scene->AddLight(sky);
         }
     }

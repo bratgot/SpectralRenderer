@@ -642,6 +642,8 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
         // Phase 12 params
         launchParams.volGBackward = volume->gBackward;
         launchParams.volLobeMix = volume->lobeMix;
+        launchParams.volPhaseMode = volume->phaseMode;
+        launchParams.volMieDropletD = volume->mieDropletD;
         launchParams.volShadowSteps = volume->shadowSteps;
         launchParams.volShadowDensity = volume->shadowDensity;
         launchParams.volQuality = volume->quality;

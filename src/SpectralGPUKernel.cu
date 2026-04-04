@@ -762,11 +762,22 @@ static __forceinline__ __device__ void marchVolume(
                 float3 lCol=make_float3(L.color.x*L.intensity, L.color.y*L.intensity, L.color.z*L.intensity);
 
                 float cosTheta = -(rd.x*lDir.x+rd.y*lDir.y+rd.z*lDir.z);
-                float gF=params.volGForward, gB=params.volGBackward;
-                float denomF=1.f+gF*gF-2.f*gF*cosTheta, denomB=1.f+gB*gB-2.f*gB*cosTheta;
-                float phaseF=(1.f-gF*gF)/(4.f*3.14159f*powf(fmaxf(denomF,1e-4f),1.5f));
-                float phaseB=(1.f-gB*gB)/(4.f*3.14159f*powf(fmaxf(denomB,1e-4f),1.5f));
-                float phase=params.volLobeMix*phaseF+(1.f-params.volLobeMix)*phaseB;
+                float phase;
+                if (params.volPhaseMode == 1) {
+                    // Cornette-Shanks Mie approximation
+                    float d = params.volMieDropletD;
+                    float g = 0.85f * (1.f - expf(-d * 0.8f));
+                    float g2 = g*g;
+                    float num = (1.f-g2)*(1.f+cosTheta*cosTheta);
+                    float denom = (2.f+g2)*powf(fmaxf(1.f+g2-2.f*g*cosTheta,1e-4f),1.5f);
+                    phase = (3.f/(8.f*3.14159f)) * num / denom;
+                } else {
+                    float gF=params.volGForward, gB=params.volGBackward;
+                    float denomF=1.f+gF*gF-2.f*gF*cosTheta, denomB=1.f+gB*gB-2.f*gB*cosTheta;
+                    float phaseF=(1.f-gF*gF)/(4.f*3.14159f*powf(fmaxf(denomF,1e-4f),1.5f));
+                    float phaseB=(1.f-gB*gB)/(4.f*3.14159f*powf(fmaxf(denomB,1e-4f),1.5f));
+                    phase=params.volLobeMix*phaseF+(1.f-params.volLobeMix)*phaseB;
+                }
 
                 float shadowTrans=1.f;
                 if (params.volShadowSteps>0 && params.volShadowDensity>0.01f) {
