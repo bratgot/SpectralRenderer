@@ -165,6 +165,10 @@ void SpectralVDBRead::knobs(Knob_Callback f)
 
     Int_knob(f, &_frameOffset, "frame_offset", "offset"); SetRange(f, -100, 100);
     Tooltip(f, "Offset the frame number.\nUseful for retiming simulations.");
+    Button(f, "detect_range", "Detect Range");
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "Scan directory for matching VDB files\n"
+               "and set first/last frame automatically.");
 
     Obsolete_knob(f, "orig_file", nullptr);
     String_knob(f, &_origFile, "orig_file", ""); SetFlags(f, Knob::INVISIBLE);
@@ -204,20 +208,10 @@ void SpectralVDBRead::knobs(Knob_Callback f)
     Tab_knob(f, 0, "Display");
     SourceGeomOp::addDisplayOptionsKnobs(f);
 
-    Divider(f, "Volume Preview");
-    Bool_knob(f, &_showBbox, "show_bbox", "show bbox");
-    Tooltip(f, "Green wireframe bounding box\nin the 3D viewer.");
-    Bool_knob(f, &_showPoints, "show_points", "show points");
-    ClearFlags(f, Knob::STARTLINE);
-    Tooltip(f, "Point cloud density preview.\nDenser regions appear brighter.");
-
-    Double_knob(f, &_pointDensity, "point_density", "preview density");
-    SetRange(f, 0.05, 1.0);
-    Tooltip(f, "Proportion of voxels to show.\n"
-               "0.1 = sparse (fast), 1.0 = all (slow).");
-    Double_knob(f, &_pointSize, "point_size", "point size");
-    SetRange(f, 1, 8);
-    Tooltip(f, "GL point size in pixels.");
+    Divider(f, "");
+    Text_knob(f, "<font size='1' color='#555'>"
+                 "SpectralVDBRead \xc2\xb7 SpectralRenderer for Nuke 17 \xc2\xb7 Created by Marten Blumen"
+                 "</font>");
 }
 
 // ---------------------------------------------------------------------------
@@ -226,15 +220,16 @@ void SpectralVDBRead::knobs(Knob_Callback f)
 int SpectralVDBRead::knob_changed(Knob* k)
 {
     if (k->is("discover_grids")) { _DiscoverGrids(); return 1; }
+    if (k->is("detect_range")) { _DetectFrameRange(); return 1; }
     if (k->is("reload")) {
         _loadedPath.clear(); _volume.reset();
-        _previewDirty = true; _previewPoints.clear();
+        
 
         _LoadVDB(); // explicit user action — load now
         return 1;
     }
     if (k->is("file")) {
-        _loadedPath.clear(); _previewDirty = true; _previewPoints.clear();
+        _loadedPath.clear(); 
 
         // Don't load here — render or viewport will trigger it
         return 1;
@@ -271,12 +266,7 @@ int SpectralVDBRead::knob_changed(Knob* k)
     }
     if (k->is("frame_offset") || k->is("density_grid") ||
         k->is("temp_grid") || k->is("density_override") || k->is("temp_override")) {
-        _loadedPath.clear(); _previewDirty = true; _previewPoints.clear();
-        return 1;
-    }
-    if (k->is("show_points") || k->is("point_density") ||
-        k->is("show_bbox") || k->is("point_size")) {
-        _previewDirty = true; _previewPoints.clear();
+        _loadedPath.clear(); 
         return 1;
     }
     return SourceGeomOp::knob_changed(k);
@@ -370,7 +360,7 @@ void SpectralVDBRead::_DiscoverGrids()
     std::string cmd = "python {nuke.message('" + msg + "')}";
     script_command(cmd.c_str());
 
-    _loadedPath.clear(); _previewDirty = true; _previewPoints.clear();
+    _loadedPath.clear(); 
 #else
     error("OpenVDB not compiled.");
 #endif
@@ -468,7 +458,11 @@ void SpectralVDBRead::_DetectFrameRange()
         if (knob("first_frame")) knob("first_frame")->set_value(minFrame);
         if (knob("last_frame"))  knob("last_frame")->set_value(maxFrame);
         fprintf(stderr, "SpectralVDBRead: frame range %d-%d (%d files)\n", minFrame, maxFrame, count);
+        char msg[256];
+        std::snprintf(msg, sizeof(msg), "Frame range: %d - %d\\n%d VDB files found", minFrame, maxFrame, count);
+        script_command((std::string("python {nuke.message('") + msg + "')}").c_str());
     } else {
+        error("No sequence files found matching pattern.");
         fprintf(stderr, "SpectralVDBRead: no sequence files found\n");
     }
 }
@@ -512,7 +506,7 @@ void SpectralVDBRead::_LoadVDBAtFrame(int frame)
     _volume = pxr::SpectralVDBLoader::Load(resolved.c_str(), _GetDensityName(), _GetTempName());
     if (_volume) {
         _loadedPath = resolved;
-        _previewDirty = true; _previewPoints.clear();
+        
         fprintf(stderr, "SpectralVDBRead: %dx%dx%d\n", _volume->resX, _volume->resY, _volume->resZ);
     }
 #endif
@@ -535,7 +529,7 @@ void SpectralVDBRead::_LoadVDB()
     _volume = pxr::SpectralVDBLoader::Load(resolved.c_str(), _GetDensityName(), _GetTempName());
     if (_volume) {
         _loadedPath = resolved;
-        _previewDirty = true; _previewPoints.clear();
+        
         fprintf(stderr, "SpectralVDBRead: %dx%dx%d\n", _volume->resX, _volume->resY, _volume->resZ);
     }
 #endif
@@ -544,79 +538,5 @@ void SpectralVDBRead::_LoadVDB()
 // ---------------------------------------------------------------------------
 // Viewport
 // ---------------------------------------------------------------------------
-void SpectralVDBRead::build_handles(ViewerContext* ctx)
-{
-    SourceGeomOp::build_handles(ctx);
-    if (ctx->transform_mode() == VIEWER_2D) return;
-
-    // Load volume if not yet loaded
-    if (!_volume || !_volume->IsValid()) {
-        if (_filePath && strlen(_filePath) > 0) _LoadVDB();
-    }
-
-    // Check if render loaded a new volume (different resolution = new frame)
-    if (_volume && _volume->IsValid()) {
-        // Detect if volume data changed since last preview build
-        int curRes = _volume->resX * 1000000 + _volume->resY * 1000 + _volume->resZ;
-        if (curRes != _lastPreviewRes) {
-            _lastPreviewRes = curRes;
-            _previewDirty = true;
-            _previewPoints.clear();
-        }
-        add_draw_handle(ctx);
-    }
-}
-
-void SpectralVDBRead::draw_handle(ViewerContext* ctx)
-{
-    if (!_volume || !_volume->IsValid()) return;
-    glPushAttrib(GL_CURRENT_BIT | GL_LINE_BIT | GL_ENABLE_BIT | GL_POINT_BIT);
-    glDisable(GL_LIGHTING);
-
-    if (_showBbox) {
-        float co[8][3];
-        for (int i = 0; i < 8; ++i) {
-            co[i][0] = (i&1) ? _volume->bboxMax[0] : _volume->bboxMin[0];
-            co[i][1] = (i&2) ? _volume->bboxMax[1] : _volume->bboxMin[1];
-            co[i][2] = (i&4) ? _volume->bboxMax[2] : _volume->bboxMin[2];
-        }
-        static const int e[12][2] = {{0,1},{2,3},{4,5},{6,7},{0,2},{1,3},{4,6},{5,7},{0,4},{1,5},{2,6},{3,7}};
-        glLineWidth(1.5f); glColor3f(0,1,0);
-        glBegin(GL_LINES);
-        for (int i = 0; i < 12; ++i) { glVertex3fv(co[e[i][0]]); glVertex3fv(co[e[i][1]]); }
-        glEnd();
-    }
-
-    if (_showPoints) {
-        if (_previewDirty || _previewPoints.empty()) {
-            _previewPoints.clear(); _maxDensity = 1e-6f;
-            pxr::GfVec3f bMin = _volume->bboxMin, bSz = _volume->bboxMax - _volume->bboxMin;
-            int step = std::max(1, int(1.f / float(std::max(0.05, _pointDensity))));
-            for (int iz = 0; iz < _volume->resZ; iz += step)
-              for (int iy = 0; iy < _volume->resY; iy += step)
-                for (int ix = 0; ix < _volume->resX; ix += step) {
-                    float u=float(ix)/_volume->resX, v=float(iy)/_volume->resY, w=float(iz)/_volume->resZ;
-                    float d = _volume->SampleDensity(u,v,w);
-                    if (d < 0.01f) continue;
-                    if (d > _maxDensity) _maxDensity = d;
-                    _previewPoints.push_back({bMin[0]+u*bSz[0], bMin[1]+v*bSz[1], bMin[2]+w*bSz[2], d});
-                }
-            _previewDirty = false;
-            fprintf(stderr, "SpectralVDBRead: %zu preview points\n", _previewPoints.size());
-        }
-        if (!_previewPoints.empty()) {
-            glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-            glPointSize(float(_pointSize)); glEnable(GL_POINT_SMOOTH);
-            float inv = 1.f / _maxDensity;
-            glBegin(GL_POINTS);
-            for (const auto& pt : _previewPoints) {
-                float t = std::min(pt.density*inv, 1.f);
-                glColor4f(std::min(t*3,1.f), std::max(0.f,std::min((t-.33f)*3,1.f)),
-                          std::max(0.f,std::min((t-.66f)*3,1.f)), .15f+.85f*t);
-                glVertex3f(pt.x, pt.y, pt.z);
-            }
-            glEnd(); glDisable(GL_BLEND);
-        }
-    }
-    glPopAttrib();
-}
+// Viewport preview lives on SpectralRender (Iop build_handles works there).
+// SourceGeomOp::build_handles does not propagate GL draws in Nuke 17.

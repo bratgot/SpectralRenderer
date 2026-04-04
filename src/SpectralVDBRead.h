@@ -12,8 +12,6 @@
 
 #include <DDImage/Knobs.h>
 #include <DDImage/SourceGeomOp.h>
-#include <DDImage/ViewerContext.h>
-#include <DDImage/gl.h>
 
 #include <usg/geom/GeomTokens.h>
 
@@ -41,10 +39,6 @@ public:
 
     void knobs(DD::Image::Knob_Callback f) override;
     int  knob_changed(DD::Image::Knob* k) override;
-
-    // Viewport drawing (point cloud + bbox)
-    void build_handles(DD::Image::ViewerContext* ctx) override;
-    void draw_handle(DD::Image::ViewerContext* ctx) override;
 
     std::shared_ptr<pxr::SpectralVolume> GetVolume();
     std::shared_ptr<pxr::SpectralVolume> GetVolumeAtFrame(int frame);
@@ -89,19 +83,7 @@ private:
     const char* _GetDensityName() const;
     const char* _GetTempName() const;
 
-    // Viewport preview
-    bool   _showBbox = true;
-    bool   _showPoints = true;
-    double _pointDensity = 0.3;
-    double _pointSize = 3.0;
-
     std::shared_ptr<pxr::SpectralVolume> _volume;
     std::string _loadedPath;
     int _lastViewportFrame = -999;
-
-    struct PreviewPoint { float x, y, z, density; };
-    std::vector<PreviewPoint> _previewPoints;
-    float _maxDensity = 1.f;
-    bool  _previewDirty = true;
-    int   _lastPreviewRes = 0;
 };

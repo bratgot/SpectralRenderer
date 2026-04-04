@@ -19,19 +19,28 @@ const char* SpectralVolumeMaterial::node_help() const
 {
     return "SpectralVolumeMaterial \xe2\x80\x94 Volume Shader\n\n"
            "Defines volume shading for SpectralRender.\n"
-           "Connect to SpectralRender's VolMat input.\n\n"
+           "Connect to SpectralRender's Vol input, optionally\n"
+           "after a SpectralVDBRead node.\n\n"
+           "CONNECTION\n"
+           "  VDBRead -> VolumeMaterial -> SpectralRender (Vol)\n"
+           "  or: VolumeMaterial -> SpectralRender (Vol)\n"
+           "  Without this node, SpectralRender uses its Volumes tab.\n\n"
            "PRESETS\n"
-           "Quick starting points for common volume types.\n"
-           "Tweak individual parameters after selecting a preset.\n\n"
+           "  Smoke: low extinction, isotropic scatter, grey.\n"
+           "  Fire: blackbody emission, warm scatter, powder.\n"
+           "  Clouds: high extinction, strong forward scatter.\n"
+           "  Fog: low density, chromatic extinction (blue haze).\n"
+           "  Nebula: emission + colour grid, ethereal.\n\n"
            "CIE BLACKBODY EMISSION\n"
-           "Maps temperature grid values to physically accurate\n"
-           "fire colours using Planck's law + CIE 1931 XYZ.\n"
-           "500K = deep red, 1500K = orange, 3000K = yellow,\n"
-           "6500K = white, 10000K+ = blue-white.\n\n"
+           "  Planck's law at each sampled wavelength (not RGB approx).\n"
+           "  500K=embers 1500K=candle 3000K=fire 6500K=white 10000K+=plasma\n\n"
            "CHROMATIC EXTINCTION\n"
-           "Per-wavelength absorption: shorter wavelengths\n"
-           "scatter more, giving blue edges on smoke and\n"
-           "warm colours in thick regions.\n\n"
+           "  Per-wavelength sigma_t. Blue scatters more = blue haze edges.\n\n"
+           "ARTIST TIPS\n"
+           "  Start with a preset, then tweak.\n"
+           "  Fire: enable CIE blackbody, match temp range to sim output.\n"
+           "  Clouds: high forward scatter (0.7-0.85) + powder effect.\n"
+           "  Step size: 0.1 = fine quality, 1.0 = fast preview.\n\n"
            "Created by Marten Blumen\n"
            "github.com/bratgot/SpectralRenderer";
 }
@@ -92,6 +101,14 @@ void SpectralVolumeMaterial::knobs(Knob_Callback f)
     Text_knob(f, "<b>SpectralVolumeMaterial</b>");
     Newline(f);
     Text_knob(f, "<font color='#888'>Volume shader for SpectralRender</font>");
+    Newline(f);
+    Text_knob(f,
+        "<font color='#666' size='-1'>"
+        "Connect to SpectralRender's Vol input to override volume shading.<br>"
+        "Without this node, SpectralRender uses its own Volumes tab defaults.<br>"
+        "Chain: SpectralVDBRead \xe2\x86\x92 SpectralVolumeMaterial \xe2\x86\x92 SpectralRender (Vol)"
+        "</font>"
+    );
 
     Divider(f, "Preset");
     static const char* const presetNames[] = {
@@ -100,9 +117,21 @@ void SpectralVolumeMaterial::knobs(Knob_Callback f)
     };
     Enumeration_knob(f, &preset, presetNames, "vol_preset", "");
     Tooltip(f, "Volume shading presets \xe2\x80\x94 good starting points.\n"
-               "Adjusting any parameter switches to Custom.");
+               "Adjusting any parameter switches to Custom.\n\n"
+               "Smoke: low scatter, isotropic, grey\n"
+               "Fire: blackbody emission, warm scatter, powder\n"
+               "Clouds: strong forward scatter, powder effect\n"
+               "Fog: low density, chromatic extinction (blue haze)\n"
+               "Nebula: emission + colour grid, ethereal blue/purple");
 
     Divider(f, "Density");
+    Text_knob(f,
+        "<font color='#666' size='-1'>"
+        "Controls how opaque and bright the volume appears.<br>"
+        "Extinction = overall opacity. Scattering = brightness from light bouncing inside."
+        "</font>"
+    );
+    Newline(f);
     Double_knob(f, &extinction, "vol_extinction", "extinction");
     SetRange(f, 0.1, 50);
     Tooltip(f, "Overall opacity of the volume.\n"
@@ -122,6 +151,14 @@ void SpectralVolumeMaterial::knobs(Knob_Callback f)
                "Smaller = higher quality, slower.");
 
     Divider(f, "Emission");
+    Text_knob(f,
+        "<font color='#666' size='-1'>"
+        "Temperature-driven emission using the VDB temperature grid.<br>"
+        "CIE blackbody uses Planck's law for physically accurate fire colours \xe2\x80\x94<br>"
+        "the spectral renderer evaluates real B(\xce\xbb,T) at each sampled wavelength."
+        "</font>"
+    );
+    Newline(f);
     Double_knob(f, &emissionIntensity, "vol_emission", "intensity");
     SetRange(f, 0, 50);
     Tooltip(f, "Emission brightness multiplier.");
@@ -150,6 +187,14 @@ void SpectralVolumeMaterial::knobs(Knob_Callback f)
                "Multiplied with emission intensity.");
 
     Divider(f, "Chromatic extinction");
+    Text_knob(f,
+        "<font color='#666' size='-1'>"
+        "Wavelength-dependent absorption \xe2\x80\x94 shorter wavelengths scatter more.<br>"
+        "Creates blue edges on smoke and warm colours in thick regions (Rayleigh-like).<br>"
+        "R/G/B are relative multipliers on the extinction coefficient per channel."
+        "</font>"
+    );
+    Newline(f);
     Bool_knob(f, &chromaticExtinction, "vol_chromatic", "enable");
     Tooltip(f, "Wavelength-dependent absorption.\n"
                "Short wavelengths scatter more, giving blue\n"
@@ -169,6 +214,14 @@ void SpectralVolumeMaterial::knobs(Knob_Callback f)
                "Default: R=1.0 G=1.0 B=1.2");
 
     BeginClosedGroup(f, "vol_phase", "Phase function");
+    Text_knob(f,
+        "<font color='#666' size='-1'>"
+        "Dual-lobe Henyey-Greenstein controls how light scatters inside the volume.<br>"
+        "Forward lobe = light passes through (clouds, fog). Backward = backlit glow.<br>"
+        "Powder effect darkens forward-lit edges \xe2\x80\x94 creates the 'silver lining' on clouds."
+        "</font>"
+    );
+    Newline(f);
     Double_knob(f, &gForward, "vol_g_forward", "forward lobe");
     SetRange(f, 0, 0.95);
     Tooltip(f, "Forward scattering anisotropy (0=isotropic, 0.95=very forward).\n"

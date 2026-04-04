@@ -83,7 +83,7 @@ SpectralRenderIop::SpectralRenderIop(Node* node)
     : Iop(node)
     , _scene(std::make_unique<pxr::SpectralScene>())
 {
-    inputs(5);  // scene, cam, bg, vol, vol_mat
+    inputs(4);  // scene, cam, bg, vol
     fprintf(stderr, "SpectralRender: DLL build %s %s\n", __DATE__, __TIME__);
 }
 
@@ -132,7 +132,6 @@ const char* SpectralRenderIop::input_label(int idx, char*) const
         case 1: return "Cam";
         case 2: return "BG";
         case 3: return "Vol";
-        case 4: return "VolMat";
         default: return "";
     }
 }
@@ -2872,9 +2871,25 @@ void SpectralRenderIop::_LoadVDB()
     }
 #endif
 
-    // Path 2: Vol input (input 3) for SpectralVDBRead direct connection
+    // Path 2: Vol input (input 3) — SpectralVDBRead or SpectralVolumeMaterial chain
     if (inputs() > 3 && input(3)) {
+        // Validate the Vol input so it loads its VDB
+        input(3)->validate(true);
+
+        // Direct SpectralVDBRead
         SpectralVDBRead* vdbRead = dynamic_cast<SpectralVDBRead*>(input(3));
+        // Or SpectralVolumeMaterial → check its input for VDBRead
+        if (!vdbRead) {
+            SpectralVolumeMaterial* volMat = dynamic_cast<SpectralVolumeMaterial*>(input(3));
+            if (volMat) {
+                for (int i = 0; i < volMat->inputs() && !vdbRead; ++i) {
+                    if (volMat->input(i)) {
+                        volMat->input(i)->validate(true);
+                        vdbRead = dynamic_cast<SpectralVDBRead*>(volMat->input(i));
+                    }
+                }
+            }
+        }
         if (vdbRead) {
             int renderFrame = int(outputContext().frame());
             auto vol = vdbRead->GetVolumeAtFrame(renderFrame);
@@ -2932,10 +2947,20 @@ void SpectralRenderIop::_LoadVDBForRender()
 // ---------------------------------------------------------------------------
 void SpectralRenderIop::_applyVolumeShading(std::shared_ptr<pxr::SpectralVolume>& vol)
 {
-    // Check VolMat input (input 4) for SpectralVolumeMaterial
+    // Walk Vol input (input 3) chain for SpectralVolumeMaterial
+    // Connects: SpectralVDBRead → SpectralVolumeMaterial → SpectralRender
+    //       or: SpectralVolumeMaterial → SpectralRender
     SpectralVolumeMaterial* mat = nullptr;
-    if (inputs() > 4 && input(4)) {
-        mat = dynamic_cast<SpectralVolumeMaterial*>(input(4));
+    if (inputs() > 3 && input(3)) {
+        mat = dynamic_cast<SpectralVolumeMaterial*>(input(3));
+        if (!mat) {
+            // Check if Vol input's own input is a VolumeMaterial
+            Op* volOp = input(3);
+            for (int i = 0; i < volOp->inputs() && !mat; ++i) {
+                if (volOp->input(i))
+                    mat = dynamic_cast<SpectralVolumeMaterial*>(volOp->input(i));
+            }
+        }
     }
 
     if (mat) {
