@@ -833,10 +833,10 @@ static __forceinline__ __device__ void marchVolume(
                 stepRGB.z+=lCol.z*params.volScatterColor.z*scatW;
             }
 
-            // Dome ambient RGB
+            // Dome ambient RGB — phase integral over sphere = 1.0
             for (unsigned li=0; li<params.lightCount; ++li) {
                 if (params.lights[li].type==3) {
-                    float dW = params.volScattering*density*(1.f/(4.f*3.14159f))*0.5f;
+                    float dW = params.volScattering*density;
                     stepRGB.x+=params.lights[li].color.x*params.lights[li].intensity*dW;
                     stepRGB.y+=params.lights[li].color.y*params.lights[li].intensity*dW;
                     stepRGB.z+=params.lights[li].color.z*params.lights[li].intensity*dW;

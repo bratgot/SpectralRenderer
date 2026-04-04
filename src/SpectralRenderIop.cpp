@@ -417,13 +417,22 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         EndGroup(f);
 
         Divider(f, "Studio lights");
+        Text_knob(f,
+            "<font color='#777' size='-1'>"
+            "Three-point studio rig: key (main), fill (shadow lift), rim (edge separation).<br>"
+            "Composes additively with the sun/sky model above."
+            "</font>"
+        );
         static const char* const stuP[] = {"Off", "Portrait", "Product", "Dramatic", "Softbox", nullptr};
         Enumeration_knob(f, &_studioPreset, stuP, "studio_preset", "Studio Preset");
-        Tooltip(f, "Three-point studio light rig.\n"
-                   "Portrait = soft key/fill, subtle rim.\n"
-                   "Product = bright key, strong rim.\n"
-                   "Dramatic = hard single key, dark fill.\n"
-                   "Softbox = broad soft key, gentle fill.");
+        Tooltip(f, "Portrait -- soft key 45deg, moderate fill, subtle rim.\n"
+                   "  Best for: character lighting, close-ups.\n"
+                   "Product -- bright key 60deg, low fill, strong rim.\n"
+                   "  Best for: product shots, hard surfaces.\n"
+                   "Dramatic -- steep key 80deg, near-zero fill, intense rim.\n"
+                   "  Best for: moody scenes, noir look.\n"
+                   "Softbox -- broad key 30deg, high fill, gentle rim.\n"
+                   "  Best for: beauty, soft wrapping light.");
         Double_knob(f, &_studioMix, "studio_mix", "studio mix"); SetRange(f, 0, 2);
 
         BeginClosedGroup(f, "grp_studio", "Studio light settings");
@@ -437,13 +446,52 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         }
         EndGroup(f);
 
-        Divider(f, "Shadow softness");
+        Divider(f, "");
         Double_knob(f, &_shadowSoftness, "shadow_softness", "shadow softness"); SetRange(f, 0, 1);
-        Tooltip(f, "Softens shadows from built-in lights.\n"
-                   "0 = hard shadows (point source)\n"
-                   "0.3 = soft (default for studio)\n"
-                   "1.0 = very diffuse (overcast look)\n"
-                   "Simulates area light sources.");
+        Tooltip(f, "Controls shadow edge quality from built-in lights.\n"
+                   "Simulates area light sources (larger = softer shadows).\n"
+                   "0 = razor sharp (point light)\n"
+                   "0.2 = slightly soft (small area)\n"
+                   "0.5 = medium soft (overcast feel)\n"
+                   "1.0 = very diffuse (large softbox)");
+
+        // ─── Environment Map ────────────────────────────────────────────
+        Divider(f, "Environment map");
+        Text_knob(f,
+            "<font color='#777' size='-1'>"
+            "HDRI environment maps provide image-based lighting from all directions.<br>"
+            "Picked up from EnvironLight or Dome light connected to the scn input.<br>"
+            "Controls below adjust how the env map interacts with both geometry and volumes."
+            "</font>"
+        );
+        Newline(f);
+        Double_knob(f, &_vdbEnvIntensity, "vdb_env_intensity", "env intensity"); SetRange(f, 0, 10);
+        SetFlags(f, Knob::LOG_SLIDER);
+        Tooltip(f, "Environment map brightness multiplier.\n"
+                   "Logarithmic slider. 0.5 = dim. 1 = as-authored. 3+ = bright.");
+        Double_knob(f, &_vdbEnvRotate, "vdb_env_rotate", "env rotate");
+        ClearFlags(f, Knob::STARTLINE); SetRange(f, 0, 360);
+        Tooltip(f, "Rotate the environment map horizontally in degrees.\n"
+                   "Useful to reposition the sun in an HDRI without re-rendering.");
+        Double_knob(f, &_vdbEnvDiffuse, "vdb_env_diffuse", "env diffuse"); SetRange(f, 0, 2);
+        Tooltip(f, "Environment contribution to diffuse illumination.\n"
+                   "0 = off. 0.5 = natural. 1 = full. >1 = boosted.\n"
+                   "Affects both volume scatter and surface diffuse lighting.");
+        Divider(f, "");
+        static const char* const envModes[] = {
+            "Average colour (fast)", "SH + Virtual Lights", nullptr
+        };
+        Enumeration_knob(f, &_vdbEnvMode, envModes, "vdb_env_mode", "env mode");
+        Tooltip(f, "Average colour: uses mean HDRI colour for isotropic ambient.\n"
+                   "SH + Virtual Lights: 9 SH coefficients + brightest peaks\n"
+                   "extracted as virtual directional lights with shadow rays.");
+        Int_knob(f, &_vdbEnvVirtualLights, "vdb_env_virtual_lights", "virtual lights"); SetRange(f, 0, 4);
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "HDRI peaks extracted as virtual directional lights.\n"
+                   "0 = ambient only. 2 = recommended. 4 = max.");
+        Bool_knob(f, &_vdbUseReSTIR, "vdb_use_restir", "ReSTIR env sampling");
+        Tooltip(f, "Importance sampling for env lighting. ~26x fewer shadow rays.\n"
+                   "Currently stubbed -- full implementation in Phase 13.");
     }
 
     Tab_knob(f, "Volumes");
@@ -631,18 +679,21 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                    "Clouds \xe2\x80\x94 high albedo (0.95-0.99), Mie-like scattering\n"
                    "Atmosphere \xe2\x80\x94 environmental effects\n"
                    "Effects \xe2\x80\x94 stylised and sci-fi looks");
-        Double_knob(f, &_vdbExtinction, "vdb_extinction", "extinction"); SetRange(f, 0, 50);
+        Double_knob(f, &_vdbExtinction, "vdb_extinction", "extinction"); SetRange(f, 0.01, 50);
+        SetFlags(f, Knob::LOG_SLIDER);
         Tooltip(f, "How quickly light is absorbed per unit density.\n"
-                   "Higher = more opaque volume.\n"
-                   "Thin smoke: 1-5. Cloud: 10-20. Solid: 30+");
-        Double_knob(f, &_vdbScattering, "vdb_scattering", "scattering"); SetRange(f, 0, 50);
+                   "Logarithmic slider for fine control at low values.\n"
+                   "0.1 = wisps. 1-3 = clouds. 5 = smoke. 10+ = dense/opaque.");
+        Double_knob(f, &_vdbScattering, "vdb_scattering", "scattering"); SetRange(f, 0.01, 50);
+        SetFlags(f, Knob::LOG_SLIDER);
         Tooltip(f, "How bright the volume appears under direct lighting.\n"
-                   "Only active in Lit and Explosion modes.\n"
-                   "0 = pure absorption (dark). Higher = brighter.");
-        Double_knob(f, &_vdbDensityMult, "vdb_density_mult", "density mult"); SetRange(f, 0, 10);
+                   "Logarithmic slider. 0 = pure absorption (dark).\n"
+                   "Higher = brighter. Albedo = scattering / extinction.");
+        Double_knob(f, &_vdbDensityMult, "vdb_density_mult", "density mult"); SetRange(f, 0.01, 10);
+        SetFlags(f, Knob::LOG_SLIDER);
         Tooltip(f, "Scales raw density values from VDB.\n"
-                   "1 = as-is. 0.5 = half. 2 = double.\n"
-                   "Useful when simulation outputs very high/low values.");
+                   "Logarithmic for fine adjustment.\n"
+                   "0.1 = very thin. 1 = as-is. 3+ = dense.");
         Double_knob(f, &_vdbStepSize, "vdb_step_size", "step size"); SetRange(f, 0, 2);
         Tooltip(f, "Ray march step size (world units). 0 = auto from quality.\n"
                    "Override for precise control. Smaller = finer detail, slower.");
@@ -859,37 +910,6 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         }
         EndGroup(f);
 
-        // ─── Environment Map ────────────────────────────────────────────
-        BeginClosedGroup(f, "vdb_env", "Environment Map");
-        {
-            Text_knob(f,
-                "<font color='#777' size='-1'>"
-                "Picked up from EnvironLight or dome light in the scene.<br>"
-                "SH + Virtual Lights is 10-70x faster than Uniform dirs."
-                "</font>"
-            );
-            Newline(f);
-            Double_knob(f, &_vdbEnvIntensity, "vdb_env_intensity", "intensity"); SetRange(f, 0, 10);
-            Double_knob(f, &_vdbEnvRotate, "vdb_env_rotate", "rotate");
-            ClearFlags(f, Knob::STARTLINE); SetRange(f, 0, 360);
-            Double_knob(f, &_vdbEnvDiffuse, "vdb_env_diffuse", "diffuse"); SetRange(f, 0, 1);
-            Tooltip(f, "Environment contribution to diffuse illumination.\n"
-                       "0 = off. 0.5 = natural. 1 = full.");
-            Divider(f, "");
-            static const char* const envModes[] = {
-                "Uniform dirs (slow, accurate)", "SH + Virtual Lights (fast)", nullptr
-            };
-            Enumeration_knob(f, &_vdbEnvMode, envModes, "vdb_env_mode", "env mode");
-            Tooltip(f, "SH + Virtual Lights: 9 SH coefficients + HDRI peak extraction.\n"
-                       "Uniform dirs: 6-26 directions \xc3\x97 shadow steps.");
-            Int_knob(f, &_vdbEnvVirtualLights, "vdb_env_virtual_lights", "virtual lights"); SetRange(f, 0, 4);
-            Tooltip(f, "HDRI peaks as virtual directional lights.\n"
-                       "0 = ambient only. 2 = recommended. 4 = max.");
-            Bool_knob(f, &_vdbUseReSTIR, "vdb_use_restir", "ReSTIR env sampling");
-            Tooltip(f, "Importance sampling for env lighting. ~26x fewer shadow rays.");
-        }
-        EndGroup(f);
-
         // ─── Technical Reference ────────────────────────────────────────
         Divider(f, "");
         Text_knob(f,
@@ -912,130 +932,214 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         );
     }
 
-    Tab_knob(f, "AOVs");
+    Tab_knob(f, "AOV");
 
     Text_knob(f,
         "<font color='#777' size='-1'>"
-        "Surface AOVs for compositing and relighting. These work for<br>"
-        "geometry renders \xe2\x80\x94 volume-specific passes are in the Output tab."
+        "Arbitrary Output Variables for compositing, relighting, and denoising.<br>"
+        "Each enabled pass appears as a separate layer in the EXR output.<br>"
+        "Access via Shuffle or Copy nodes downstream."
         "</font>"
     );
 
-    BeginClosedGroup(f, "aov_grp", "AOV outputs");
+    // ─── Geometry AOVs ──────────────────────────────────────────────
+    Divider(f, "Geometry");
+    Text_knob(f,
+        "<font color='#777' size='-1'>"
+        "Surface data passes from geometry renders. Used for relighting,<br>"
+        "contact shadows, and CG integration in comp."
+        "</font>"
+    );
+    Newline(f);
+    Bool_knob(f, &_aovNormals, "aov_normals", "N (normals)");
+    Tooltip(f, "World-space surface normals as aov_N (RGB).\n"
+               "R=X, G=Y, B=Z. Range -1 to 1, remapped to 0-1.\n"
+               "Use for relighting, edge detection, and rim mattes in comp.");
+    Bool_knob(f, &_aovPosition, "aov_position", "P (position)");
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "World-space hit position as aov_P (RGB = XYZ).\n"
+               "32-bit float. Use for world-space effects,\n"
+               "position-based grading, and depth reconstruction.");
+    Bool_knob(f, &_aovPRef, "aov_pref", "Pref");
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "Reference position (pre-deformation) as aov_Pref.\n"
+               "Object-space coordinates before animation.\n"
+               "Use for projection mapping that sticks to deforming surfaces.");
+    Newline(f);
+    Bool_knob(f, &_aovUV, "aov_uv", "UV");
+    Tooltip(f, "Texture coordinates as aov_UV (RG = U,V).\n"
+               "Use for texture-space effects or UV-based mattes.");
+    Bool_knob(f, &_aovAlbedo, "aov_albedo", "albedo");
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "Surface albedo (unlit base colour) as aov_albedo.\n"
+               "The material colour before any lighting.\n"
+               "Useful for colour grading without affecting lighting.");
+
+    Divider(f, "Lighting decomposition");
+    Text_knob(f,
+        "<font color='#777' size='-1'>"
+        "beauty = direct + indirect + emission. Adjust each in comp<br>"
+        "to relight without re-rendering."
+        "</font>"
+    );
+    Newline(f);
+    Bool_knob(f, &_aovDirect, "aov_direct", "direct");
+    Tooltip(f, "All direct lighting (light -> surface -> camera).\n"
+               "Includes all light types. Multiply to dim/boost key lights.");
+    Bool_knob(f, &_aovIndirect, "aov_indirect", "indirect");
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "All indirect lighting (light -> bounce -> surface -> camera).\n"
+               "GI, reflections, colour bleed. Multiply to adjust bounce light.");
+    Bool_knob(f, &_aovEmission, "aov_emission", "emission");
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "Self-illumination (glowing materials, fire, neon).\n"
+               "Add to adjust glow intensity in comp.");
+
+    BeginClosedGroup(f, "aov_lpe", "LPE decomposition (advanced)");
     {
-        Divider(f, "Geometry");
-        Bool_knob(f, &_aovNormals, "aov_normals", "N");
-        Bool_knob(f, &_aovPosition, "aov_position", "P");
-        Bool_knob(f, &_aovPRef, "aov_pref", "Pref");
-        Bool_knob(f, &_aovUV, "aov_uv", "UV");
-        Bool_knob(f, &_aovAlbedo, "aov_albedo", "albedo");
-        Tooltip(f, "N = world normals, P = world position,<br>"
-                   "Pref = undisplaced object-space position,<br>"
-                   "UV = texture coordinates, albedo = surface colour.");
-
-        Divider(f, "Lighting");
-        Bool_knob(f, &_aovDirect, "aov_direct", "direct");
-        Bool_knob(f, &_aovIndirect, "aov_indirect", "indirect");
-        Bool_knob(f, &_aovEmission, "aov_emission", "emission");
-        Tooltip(f, "Light decomposition for comp relighting.<br>"
-                   "beauty = direct + indirect + emission.");
-
-        Divider(f, "LPE decomposition");
+        Text_knob(f,
+            "<font color='#777' size='-1'>"
+            "Light Path Expressions split direct/indirect by BSDF lobe.<br>"
+            "Gives fine control over specular highlights vs diffuse fill."
+            "</font>"
+        );
+        Newline(f);
         Bool_knob(f, &_aovDiffuseDirect, "aov_diffuse_direct", "diffuse direct");
+        Tooltip(f, "LPE: C<RD>L -- direct diffuse only.\n"
+                   "Matte lighting without specular highlights.");
         Bool_knob(f, &_aovSpecularDirect, "aov_specular_direct", "specular direct");
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "LPE: C<RS>L -- direct specular highlights only.\n"
+                   "Useful for adjusting highlight intensity/colour.");
         Newline(f);
         Bool_knob(f, &_aovDiffuseIndirect, "aov_diffuse_indirect", "diffuse indirect");
+        Tooltip(f, "LPE: C<RD>+L -- bounced diffuse (colour bleed, GI).");
         Bool_knob(f, &_aovSpecularIndirect, "aov_specular_indirect", "specular indirect");
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "LPE: C<RS>+L -- bounced specular (reflections).");
         Newline(f);
         Bool_knob(f, &_aovTransmission, "aov_transmission", "transmission");
-        Tooltip(f, "Light Path Expression decomposition.<br>"
-                   "diffuse direct = C&lt;RD&gt;L<br>"
-                   "specular direct = C&lt;RS&gt;L<br>"
-                   "diffuse indirect = C&lt;RD&gt;+L<br>"
-                   "specular indirect = C&lt;RS&gt;+L<br>"
-                   "transmission = C&lt;TS&gt;L");
-
-        Divider(f, "Utility");
-        Int_knob(f, &_aoSamples, "ao_samples", "AO samples"); SetRange(f, 0, 64);
-        Float_knob(f, &_aoRadius, "ao_radius", "AO radius"); SetRange(f, 0.1f, 100.f);
-        Tooltip(f, "Ambient occlusion. 0 samples = disabled.");
+        Tooltip(f, "LPE: C<TS>L -- light transmitted through glass/SSS.\n"
+                   "Refraction, subsurface scatter, translucency.");
     }
     EndGroup(f);
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  TAB: Output
-    // ═══════════════════════════════════════════════════════════════════
-    Tab_knob(f, "Output");
+    BeginClosedGroup(f, "aov_util", "Utility passes");
+    {
+        Int_knob(f, &_aoSamples, "ao_samples", "AO samples"); SetRange(f, 0, 64);
+        Tooltip(f, "Ambient occlusion ray count. 0 = disabled.\n"
+                   "8 = fast preview. 32 = smooth. 64 = final.\n"
+                   "Output as aov_AO (greyscale contact shadow).");
+        Float_knob(f, &_aoRadius, "ao_radius", "AO radius"); SetRange(f, 0.1f, 100.f);
+        Tooltip(f, "Maximum distance for AO rays (world units).\n"
+                   "Small = tight contact shadows. Large = broad ambient darkening.");
+    }
+    EndGroup(f);
 
-    Divider(f, "Volume AOV Passes");
+    // ─── Volume AOVs ────────────────────────────────────────────────
+    Divider(f, "Volume");
     Text_knob(f,
-        "<font size='-1' color='#777'>"
-        "Extra output layers for compositing. Each pass appears as a<br>"
-        "separate layer accessible via Shuffle or Copy nodes downstream."
+        "<font color='#777' size='-1'>"
+        "Volume-specific passes. Each appears as a separate layer.<br>"
+        "Use Shuffle to isolate, Grade to adjust, Merge to composite."
         "</font>"
     );
     Newline(f);
-    Bool_knob(f, &_aovVolDensity, "aov_vol_density", "Density");
-    Tooltip(f, "Integrated volume density as vol_density layer.\nGreyscale -- equivalent to beauty alpha.");
-    Bool_knob(f, &_aovVolEmission, "aov_vol_emission", "Emission");
+    Bool_knob(f, &_aovVolDensity, "aov_vol_density", "density");
+    Tooltip(f, "Integrated volume density as vol_density (greyscale).\n"
+               "Equivalent to beauty alpha. Use for holdout mattes,\n"
+               "density grading, or as a luma matte for the volume.");
+    Bool_knob(f, &_aovVolEmission, "aov_vol_emission", "emission");
     ClearFlags(f, Knob::STARTLINE);
-    Tooltip(f, "Emission contribution as vol_emission (RGB).\nFire/blackbody glow before BG compositing.");
-    Bool_knob(f, &_aovVolShadow, "aov_vol_shadow", "Shadow");
+    Tooltip(f, "Volume emission as vol_emission (RGB).\n"
+               "Fire and blackbody glow before background compositing.\n"
+               "Grade this to adjust fire brightness without re-rendering.");
+    Bool_knob(f, &_aovVolShadow, "aov_vol_shadow", "shadow");
     ClearFlags(f, Knob::STARTLINE);
-    Tooltip(f, "Per-light shadow transmittance as vol_shadow.\n1.0 = fully lit, 0.0 = fully self-shadowed.");
+    Tooltip(f, "Self-shadow transmittance as vol_shadow (greyscale).\n"
+               "1.0 = fully lit, 0.0 = fully self-shadowed.\n"
+               "Multiply with beauty to deepen/lighten shadows in comp.");
     Newline(f);
-    Bool_knob(f, &_aovVolLights, "aov_vol_lights", "Per-light (x4)");
-    Tooltip(f, "Up to 4 separate light contribution layers.\nvol_light0 through vol_light3.");
-    Bool_knob(f, &_aovVolDepth, "aov_vol_depth", "Depth");
+    Bool_knob(f, &_aovVolLights, "aov_vol_lights", "per-light (x4)");
+    Tooltip(f, "Individual light contributions as vol_light0-3 (RGB).\n"
+               "Each layer = scatter from one light source.\n"
+               "Grade each to relight volumes in comp without re-rendering.");
+    Bool_knob(f, &_aovVolDepth, "aov_vol_depth", "depth");
     ClearFlags(f, Knob::STARTLINE);
-    Tooltip(f, "First-hit depth as vol_depth (single channel).");
-    Bool_knob(f, &_aovMotion, "aov_motion", "Motion vectors");
+    Tooltip(f, "First-hit depth as vol_depth (single channel).\n"
+               "Distance from camera to first dense voxel.\n"
+               "Use for depth-of-field, fog cards, or Z-compositing.");
+    Bool_knob(f, &_aovMotion, "aov_motion", "motion vectors");
     ClearFlags(f, Knob::STARTLINE);
-    Tooltip(f, "Screen-space motion vectors as vol_motion (RG).\nRequires velocity grid in Grids tab.");
+    Tooltip(f, "Screen-space motion vectors as vol_motion (RG).\n"
+               "Pixels/frame displacement. Requires velocity grid.\n"
+               "Feed to VectorBlur or MotionBlur nodes in comp.");
 
-    Divider(f, "Denoiser Inputs");
+    // ─── Denoiser ───────────────────────────────────────────────────
+    Divider(f, "Denoiser auxiliary");
     Text_knob(f,
-        "<font size='-1' color='#777'>"
-        "Auxiliary buffers for downstream Denoise nodes."
+        "<font color='#777' size='-1'>"
+        "Feed these to a downstream Denoise node alongside beauty.<br>"
+        "Works for both geometry and volume renders."
         "</font>"
     );
     Newline(f);
-    Bool_knob(f, &_aovDenoiseAlbedo, "aov_denoise_albedo", "Albedo");
-    Tooltip(f, "Unlit scatter albedo as vol_denoise_albedo (RGB).");
-    Bool_knob(f, &_aovDenoiseNormal, "aov_denoise_normal", "Normal");
+    Bool_knob(f, &_aovDenoiseAlbedo, "aov_denoise_albedo", "denoise albedo");
+    Tooltip(f, "Unlit surface/volume albedo as vol_denoise_albedo.\n"
+               "Helps the denoiser separate noise from texture detail.");
+    Bool_knob(f, &_aovDenoiseNormal, "aov_denoise_normal", "denoise normal");
     ClearFlags(f, Knob::STARTLINE);
-    Tooltip(f, "Density-gradient normals as vol_denoise_normal (RGB).");
+    Tooltip(f, "Surface/density-gradient normals as vol_denoise_normal.\n"
+               "Helps the denoiser preserve edges and surface detail.");
 
-    Divider(f, "Deep Output");
+    // ─── Deep Output ────────────────────────────────────────────────
+    Divider(f, "Deep output");
     Text_knob(f,
-        "<font size='-1' color='#777'>"
-        "Depth-sorted RGBA slabs for DeepMerge compositing."
+        "<font color='#777' size='-1'>"
+        "Generates depth-sorted RGBA slabs for deep compositing.<br>"
+        "Connect to DeepMerge for volume-over-geometry setups."
         "</font>"
     );
     Newline(f);
     Int_knob(f, &_deepSamples, "deep_samples", "deep samples"); SetRange(f, 0, 128);
-    Tooltip(f, "0 = disabled. 16 = preview. 64 = smooth. 128 = final.");
+    Tooltip(f, "Depth slabs per pixel. 0 = disabled.\n"
+               "16 = fast preview. 64 = smooth gradients.\n"
+               "128 = final quality for deep compositing.\n"
+               "Each slab stores RGBA + front/back depth.");
 
-    Divider(f, "Motion Blur");
+    // ─── Motion Blur ────────────────────────────────────────────────
+    Divider(f, "Motion blur");
     Text_knob(f,
-        "<font size='-1' color='#777'>"
-        "Velocity-based motion blur from VDB velocity grids."
+        "<font color='#777' size='-1'>"
+        "Velocity-based motion blur from VDB velocity grids (vel/v).<br>"
+        "Set the velocity grid in the Volumes tab Grids section."
         "</font>"
     );
     Newline(f);
     Bool_knob(f, &_motionBlur, "motion_blur", "enable");
-    Tooltip(f, "Enable velocity-based motion blur.\nRequires velocity grid (vel/v) in Grids tab.");
+    Tooltip(f, "Render motion blur from velocity grid data.\n"
+               "Offsets ray origins across the shutter interval.\n"
+               "Requires a velocity grid to be loaded.");
     static const char* const shutP[] = {
         "Start (0 to 1)", "Centre (-0.5 to 0.5)", "End (-1 to 0)", "Custom", nullptr
     };
     Enumeration_knob(f, &_shutterPreset, shutP, "shutter_preset", "shutter");
     ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "Start = blur trails behind motion direction\n"
+               "Centre = blur centred on current frame (default)\n"
+               "End = blur leads ahead of motion\n"
+               "Custom = set open/close manually");
     Newline(f);
     Double_knob(f, &_shutterOpen, "shutter_open", "open"); SetRange(f, -1, 0);
+    Tooltip(f, "Shutter open time relative to frame.\n"
+               "-0.5 = half frame before current.");
     Double_knob(f, &_shutterClose, "shutter_close", "close"); SetRange(f, 0, 1);
     ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "Shutter close time relative to frame.\n"
+               "0.5 = half frame after current.");
     Int_knob(f, &_motionSamples, "motion_samples", "samples"); SetRange(f, 2, 8);
     ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "Time samples across shutter. 2 = fast. 3 = good. 5 = smooth.");
 
     BeginClosedGroup(f, "spectral_engine", "Spectral rendering engine — how it works");
     {
@@ -1478,31 +1582,32 @@ int SpectralRenderIop::knob_changed(Knob* k)
     if (k->is("vdb_shading_preset") && _vdbShadingPreset > 0) {
         struct SPreset { double ext; double scat; double dens; double gF; double gB; double lM;
                          double pow; double emI; double tMin; double tMax; double flI;
-                         float scR; float scG; float scB; int rmode; double inten; };
-        //                             ext  scat dens  gF    gB    lM   pow emI  tMin  tMax  flI   scR   scG   scB  rmode inten
+                         float scR; float scG; float scB; int rmode; double inten;
+                         int phase; double mieD; };
+        //                             ext  scat dens  gF    gB    lM   pow emI  tMin  tMax  flI   scR   scG   scB  rm  int  ph  mie
         static const SPreset sp[] = {
-            {},                                                                                                              // 0: Custom
-            // ── Smoke ──
-            {3,   1.5, 1,   0.3, -0.1,  0.8,  0,  0,    0,    0,    0,  0.7f, 0.7f, 0.7f,  0, 1},   // 1: Light Smoke
-            {8,   3,   1.5, 0.25,-0.15, 0.75, 0,  0,    0,    0,    0,  0.5f, 0.5f, 0.5f,  0, 1},   // 2: Dense Smoke
-            {12,  4,   2,   0.2, -0.1,  0.7,  0,  0,    0,    0,    0,  0.4f, 0.38f,0.35f, 0, 1},   // 3: Industrial
-            // ── Fire ──
-            {2,   1.5, 1,   0.4, -0.15, 0.7,  1,  5,  800, 2500,   8,  1.f,  0.9f, 0.7f,  5, 1.5}, // 4: Campfire
-            {4,   3,   1.2, 0.6, -0.25, 0.75, 3, 10,  300, 5000,  15,  1.f,  0.85f,0.6f,  5, 2},   // 5: Explosion
-            {6,   4,   1.5, 0.7, -0.3,  0.8,  4, 15,  200, 8000,  20,  0.9f, 0.8f, 0.6f,  5, 2.5}, // 6: Pyroclastic
-            // ── Clouds ──
-            {2.5, 2.4, 1,   0.85,-0.1,  0.85, 3,  0,    0,    0,    0,  1.f,  1.f,  1.f,   0, 2},   // 7: Cumulus
-            {0.4, 0.38,0.6, 0.75,-0.05, 0.9,  1,  0,    0,    0,    0,  1.f,  1.f,  1.f,   0, 3},   // 8: Cirrus
-            {3.5, 3.4, 1,   0.85,-0.1,  0.85, 2,  0,    0,    0,    0,  0.98f,0.98f,1.f,   0, 2},   // 9: Stratus
-            {6,   5.7, 1.5, 0.87,-0.25, 0.8,  4,  0,    0,    0,    0,  0.9f, 0.9f, 0.92f, 0, 1.5}, // 10: Storm Cloud
-            // ── Atmosphere ──
-            {1.5, 1.4, 0.5, 0.6, -0.15, 0.85, 0,  0,    0,    0,    0,  0.92f,0.94f,0.97f, 0, 1.5}, // 11: Fog
-            {0.8, 0.75,0.3, 0.5, -0.1,  0.85, 0,  0,    0,    0,    0,  0.95f,0.96f,1.f,   0, 2},   // 12: Ground Mist
-            {0.3, 0.28,0.2, 0.7, -0.05, 0.9,  0,  0,    0,    0,    0,  0.9f, 0.92f,0.98f, 0, 3},   // 13: Haze
-            {5,   2,   1.5, 0.4, -0.1,  0.6,  0,  0,    0,    0,    0,  0.85f,0.75f,0.6f,  0, 1},   // 14: Dust Storm
-            // ── Effects ──
-            {0.8, 0.4, 0.8, 0.2,  0,    1,    0,  5, 2000,15000,   0,  0.6f, 0.4f, 1.f,   0, 2},   // 15: Nebula
-            {0.5, 0.48,0.4, 0.85,-0.1,  0.9,  1,  0,    0,    0,    0,  0.7f, 0.9f, 1.f,   0, 2},   // 16: Underwater Caustic
+            {},                                                                                                                   // 0: Custom
+            // -- Smoke -- (HG phase, no Mie)
+            {3,   1.5, 1,   0.3, -0.1,  0.8,  0,  0,    0,    0,    0,  0.7f, 0.7f, 0.7f,  0, 1,   0, 0},   // 1: Light Smoke
+            {8,   3,   1.5, 0.25,-0.15, 0.75, 0,  0,    0,    0,    0,  0.5f, 0.5f, 0.5f,  0, 1,   0, 0},   // 2: Dense Smoke
+            {12,  4,   2,   0.2, -0.1,  0.7,  0,  0,    0,    0,    0,  0.4f, 0.38f,0.35f, 0, 1,   0, 0},   // 3: Industrial
+            // -- Fire -- (HG phase)
+            {2,   1.5, 1,   0.4, -0.15, 0.7,  1,  5,  800, 2500,   8,  1.f,  0.9f, 0.7f,  5, 1.5, 0, 0},   // 4: Campfire
+            {4,   3,   1.2, 0.6, -0.25, 0.75, 3, 10,  300, 5000,  15,  1.f,  0.85f,0.6f,  5, 2,   0, 0},   // 5: Explosion
+            {6,   4,   1.5, 0.7, -0.3,  0.8,  4, 15,  200, 8000,  20,  0.9f, 0.8f, 0.6f,  5, 2.5, 0, 0},   // 6: Pyroclastic
+            // -- Clouds -- (Mie phase, water droplets)
+            {2.5, 2.4, 1,   0.85,-0.1,  0.85, 3,  0,    0,    0,    0,  1.f,  1.f,  1.f,   0, 2,   1, 8},   // 7: Cumulus (large drops)
+            {0.4, 0.38,0.6, 0.75,-0.05, 0.9,  1,  0,    0,    0,    0,  1.f,  1.f,  1.f,   0, 3,   1, 1},   // 8: Cirrus (ice crystals, small)
+            {3.5, 3.4, 1,   0.85,-0.1,  0.85, 2,  0,    0,    0,    0,  0.98f,0.98f,1.f,   0, 2,   1, 5},   // 9: Stratus (mid droplets)
+            {6,   5.7, 1.5, 0.87,-0.25, 0.8,  4,  0,    0,    0,    0,  0.9f, 0.9f, 0.92f, 0, 1.5, 1, 10},  // 10: Storm (large drops)
+            // -- Atmosphere -- (Mie for fog/mist/haze, HG for dust)
+            {1.5, 1.4, 0.5, 0.6, -0.15, 0.85, 0,  0,    0,    0,    0,  0.92f,0.94f,0.97f, 0, 1.5, 1, 3},   // 11: Fog (water droplets)
+            {0.8, 0.75,0.3, 0.5, -0.1,  0.85, 0,  0,    0,    0,    0,  0.95f,0.96f,1.f,   0, 2,   1, 2},   // 12: Ground Mist (fine drops)
+            {0.3, 0.28,0.2, 0.7, -0.05, 0.9,  0,  0,    0,    0,    0,  0.9f, 0.92f,0.98f, 0, 3,   1, 0.5}, // 13: Haze (aerosol)
+            {5,   2,   1.5, 0.4, -0.1,  0.6,  0,  0,    0,    0,    0,  0.85f,0.75f,0.6f,  0, 1,   0, 0},   // 14: Dust Storm (HG)
+            // -- Effects --
+            {0.8, 0.4, 0.8, 0.2,  0,    1,    0,  5, 2000,15000,   0,  0.6f, 0.4f, 1.f,   0, 2,   0, 0},   // 15: Nebula
+            {0.5, 0.48,0.4, 0.85,-0.1,  0.9,  1,  0,    0,    0,    0,  0.7f, 0.9f, 1.f,   0, 2,   1, 4},   // 16: Underwater (water)
         };
         int presetCount = sizeof(sp) / sizeof(sp[0]);
         if (_vdbShadingPreset < presetCount) {
@@ -1512,7 +1617,7 @@ int SpectralRenderIop::knob_changed(Knob* k)
             _vdbPowder=s.pow; _vdbEmissionIntensity=s.emI;
             _vdbTempMin=s.tMin; _vdbTempMax=s.tMax; _vdbFlameIntensity=s.flI;
             _vdbScatterColor[0]=s.scR; _vdbScatterColor[1]=s.scG; _vdbScatterColor[2]=s.scB;
-            _vdbIntensity=s.inten;
+            _vdbIntensity=s.inten; _vdbPhaseMode=s.phase; _vdbMieDropletD=s.mieD;
             if (knob("vdb_extinction"))   knob("vdb_extinction")->set_value(s.ext);
             if (knob("vdb_scattering"))   knob("vdb_scattering")->set_value(s.scat);
             if (knob("vdb_density_mult")) knob("vdb_density_mult")->set_value(s.dens);
@@ -1533,6 +1638,13 @@ int SpectralRenderIop::knob_changed(Knob* k)
             // Set render mode
             if (knob("vdb_render_mode")) {
                 knob("vdb_render_mode")->set_value(s.rmode); _vdbRenderMode = s.rmode;
+            }
+            // Set phase function mode
+            if (knob("vdb_phase_mode")) {
+                knob("vdb_phase_mode")->set_value(s.phase); _vdbPhaseMode = s.phase;
+            }
+            if (s.mieD > 0 && knob("vdb_mie_droplet_d")) {
+                knob("vdb_mie_droplet_d")->set_value(s.mieD); _vdbMieDropletD = s.mieD;
             }
         }
         return 1;
@@ -4027,6 +4139,21 @@ void SpectralRenderIop::_BuildLightRig()
             rim.color = GfVec3f(float(ri));
             rim.intensity = 1.f;
             _scene->AddLight(rim);
+        }
+    }
+
+    // Log all lights for debugging
+    {
+        const auto& allLights = _scene->GetLights();
+        fprintf(stderr, "SpectralRender: %zu lights in scene:\n", allLights.size());
+        for (size_t i = 0; i < allLights.size(); ++i) {
+            const auto& L = allLights[i];
+            const char* typeNames[] = {"Distant","Sphere","Rect","Dome","Spot"};
+            int ti = std::min(int(L.type), 4);
+            fprintf(stderr, "  [%zu] %s '%s' color=(%.2f,%.2f,%.2f) intensity=%.2f env=%s\n",
+                    i, typeNames[ti], L.name.c_str(),
+                    L.color[0], L.color[1], L.color[2], L.intensity,
+                    L.envPixels ? "HDRI" : "none");
         }
     }
 }

@@ -486,17 +486,18 @@ void SpectralIntegrator::RenderFrame(
                                                 scatRGB += lRGB * (volume->scattering*density*phase*shadowTrans*powder);
                                             }
                                             // Dome ambient RGB (uses HDRI average if available)
+                                            // Dome illuminates from ALL directions: phase integral over sphere = 1
                                             if (scene.HasLights()) for (const auto& L : scene.GetLights()) {
                                                 if (L.type!=SpectralLight::Type::Dome) continue;
                                                 GfVec3f domeCol = (L.envPixels && L.envWidth > 0)
-                                                    ? L.envAvgColor * L.intensity
-                                                    : L.color * L.intensity;
-                                                scatRGB += domeCol*volume->envDiffuse * (volume->scattering*density*(1.f/(4.f*3.14159f))); }
-                                            // Analytical MS RGB
+                                                    ? L.envAvgColor * L.intensity * volume->envIntensity
+                                                    : L.color * L.intensity * volume->envIntensity;
+                                                scatRGB += domeCol*volume->envDiffuse * (volume->scattering*density); }
+                                            // Analytical MS RGB (Wrenninge 2015)
                                             if (volume->msApprox && volume->scattering>0.01f) {
                                                 float albedo = volume->scattering/std::max(volume->extinction,0.01f);
                                                 float msB = albedo/std::max(1.f-albedo*volume->gForward*volume->lobeMix,0.01f);
-                                                scatRGB += volume->msTint*(density*volume->scattering*(1.f/(4.f*3.14159f))*msB*0.3f); }
+                                                scatRGB += volume->msTint*(density*volume->scattering*msB*0.3f); }
                                             stepRGB = scatRGB * volume->intensity;
                                         }
 
