@@ -121,6 +121,23 @@ struct LaunchParams {
     float              volStepSize;       // 0 = auto
     int                volJitter;
     int                hasVolume;         // 1 = volume active
+    // Phase 12 additions
+    float              volGBackward;
+    float              volLobeMix;
+    int                volShadowSteps;
+    float              volShadowDensity;
+    float              volQuality;
+    int                volAdaptiveStep;
+    int                volRenderMode;     // 0=Lit,1=Grey,2=Heat,3=Cool,4=BB,5=Expl
+    float              volIntensity;
+    float              volFlameIntensity;
+    float*             volumeFlame;       // 3D flame grid (optional)
+    // Noise
+    int                volNoiseEnable;
+    float              volNoiseScale;
+    float              volNoiseStrength;
+    int                volNoiseOctaves;
+    float              volNoiseRoughness;
 };
 
 // Per-ray payload — carried through the trace

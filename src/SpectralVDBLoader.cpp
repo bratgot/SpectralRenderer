@@ -36,7 +36,7 @@ std::vector<SpectralVDBLoader::GridInfo> SpectralVDBLoader::DiscoverGrids(const 
         file.open();
 
         for (auto it = file.beginName(); it != file.endName(); ++it) {
-            std::string name = it.gridName();
+            std::string name = *it;
             auto meta = file.readGridMetadata(name);
             std::string type = meta->valueType();
 
@@ -73,15 +73,19 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::Load(const char* filepath,
         // Find grids by name (override) or auto-detect
         openvdb::FloatGrid::Ptr densityGrid;
         openvdb::FloatGrid::Ptr tempGrid;
+        openvdb::FloatGrid::Ptr flameGrid;
         std::string wantDensity = (densityGridName && strlen(densityGridName) > 0) ? densityGridName : "";
         std::string wantTemp = (tempGridName && strlen(tempGridName) > 0) ? tempGridName : "";
+
+        // Skip loading if density is explicitly "(none)"
+        if (wantDensity == "(none)") wantDensity = "";
 
         // Find grids — only read the ones we need, skip the rest
         for (auto it = file.beginName(); it != file.endName(); ++it) {
             std::string name = *it;
 
             // Check if this grid name matches what we want BEFORE reading it
-            bool isDensity = false, isTemp = false;
+            bool isDensity = false, isTemp = false, isFlame = false;
             if (!densityGrid) {
                 if (!wantDensity.empty() && name == wantDensity) isDensity = true;
                 else if (wantDensity.empty() && _matchName(name, kDensityNames)) isDensity = true;
@@ -90,20 +94,19 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::Load(const char* filepath,
                 if (!wantTemp.empty() && name == wantTemp) isTemp = true;
                 else if (wantTemp.empty() && _matchName(name, kTempNames)) isTemp = true;
             }
+            if (!flameGrid && _matchName(name, kFlameNames)) isFlame = true;
 
             // Only read grid from disk if we actually need it
-            if (isDensity || isTemp || (!densityGrid && wantDensity.empty())) {
+            if (isDensity || isTemp || isFlame || (!densityGrid && wantDensity.empty())) {
                 auto base = file.readGrid(name);
                 auto fg = openvdb::gridPtrCast<openvdb::FloatGrid>(base);
                 if (!fg) continue;
 
                 if (isDensity) densityGrid = fg;
                 else if (isTemp) tempGrid = fg;
+                else if (isFlame) flameGrid = fg;
                 else if (!densityGrid) densityGrid = fg; // first float as fallback
             }
-
-            // Early exit once we have everything
-            if (densityGrid && (tempGrid || wantTemp.empty())) break;
         }
 
         file.close();
@@ -172,11 +175,33 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::Load(const char* filepath,
             }
         }
 
-        fprintf(stderr, "SpectralVDB: loaded '%s' — %dx%dx%d (bbox %.1f,%.1f,%.1f → %.1f,%.1f,%.1f)%s\n",
+        // Sample flame grid if present
+        if (flameGrid) {
+            vol->flame.resize(totalVoxels, 0.f);
+            openvdb::tools::GridSampler<openvdb::FloatGrid, openvdb::tools::BoxSampler> fSampler(*flameGrid);
+            for (int iz = 0; iz < vol->resZ; ++iz) {
+                for (int iy = 0; iy < vol->resY; ++iy) {
+                    for (int ix = 0; ix < vol->resX; ++ix) {
+                        float u = float(ix) / float(vol->resX);
+                        float v = float(iy) / float(vol->resY);
+                        float w = float(iz) / float(vol->resZ);
+                        openvdb::Vec3d worldPos(
+                            wMin.x() + u * (wMax.x() - wMin.x()),
+                            wMin.y() + v * (wMax.y() - wMin.y()),
+                            wMin.z() + w * (wMax.z() - wMin.z()));
+                        openvdb::Vec3d idxPos = flameGrid->worldToIndex(worldPos);
+                        vol->flame[iz * vol->resY * vol->resX + iy * vol->resX + ix] = fSampler.isSample(idxPos);
+                    }
+                }
+            }
+        }
+
+        fprintf(stderr, "SpectralVDB: loaded '%s' — %dx%dx%d (bbox %.1f,%.1f,%.1f → %.1f,%.1f,%.1f)%s%s\n",
                 filepath, vol->resX, vol->resY, vol->resZ,
                 vol->bboxMin[0], vol->bboxMin[1], vol->bboxMin[2],
                 vol->bboxMax[0], vol->bboxMax[1], vol->bboxMax[2],
-                tempGrid ? " +temperature" : "");
+                tempGrid ? " +temperature" : "",
+                flameGrid ? " +flame" : "");
 
         return vol;
     } catch (const std::exception& e) {

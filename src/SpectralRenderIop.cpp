@@ -360,15 +360,11 @@ void SpectralRenderIop::knobs(Knob_Callback f)
 
     Tab_knob(f, "Volumes");
     {
-        Text_knob(f,
-            "<font color='#888' size='-1'>"
-            "Load OpenVDB files for volume rendering. "
-            "Volumes composite over scene geometry using spectral ray marching."
-            "</font>"
-        );
+        // ─── File ───────────────────────────────────────────────────────
         File_knob(f, &_vdbFile, "vdb_file", "VDB file");
         Tooltip(f, "OpenVDB volume file (.vdb).\n"
-                   "Supports #### frame padding for sequences.");
+                   "Supports #### frame padding for sequences.\n"
+                   "Or connect a SpectralVDBRead node to the vol input.");
         Bool_knob(f, &_vdbAutoSequence, "vdb_auto_sequence", "auto sequence");
         ClearFlags(f, Knob::STARTLINE);
         Int_knob(f, &_vdbFrameOffset, "vdb_frame_offset", "frame offset");
@@ -378,162 +374,212 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         String_knob(f, &_vdbOrigFile, "vdb_orig_file", "");
         SetFlags(f, Knob::INVISIBLE);
 
+        // ─── Render Mode ────────────────────────────────────────────────
         Divider(f, "Render Mode");
         static const char* const renderModes[] = {
             "Lit", "Greyscale", "Heat", "Cool", "Blackbody", "Explosion", nullptr
         };
         Enumeration_knob(f, &_vdbRenderMode, renderModes, "vdb_render_mode", "mode");
-        Tooltip(f, "Lit \xe2\x80\x94 full lighting with shadows and phase function\n"
-                   "Greyscale \xe2\x80\x94 quick density preview, no lighting\n"
-                   "Heat/Cool \xe2\x80\x94 artistic temperature ramps\n"
-                   "Blackbody \xe2\x80\x94 physically accurate fire colour\n"
-                   "Explosion \xe2\x80\x94 smoke + self-luminous fire combined");
+        Tooltip(f, "Lit \xe2\x80\x94 full lighting, shadows, phase function\n"
+                   "Greyscale \xe2\x80\x94 density preview, no lighting (fastest)\n"
+                   "Heat \xe2\x80\x94 warm ramp: black \xe2\x86\x92 red \xe2\x86\x92 yellow \xe2\x86\x92 white\n"
+                   "Cool \xe2\x80\x94 cool ramp: black \xe2\x86\x92 blue \xe2\x86\x92 cyan \xe2\x86\x92 white\n"
+                   "Blackbody \xe2\x80\x94 temperature to fire colour (RGB)\n"
+                   "Explosion \xe2\x80\x94 lit smoke + self-luminous fire");
         Double_knob(f, &_vdbIntensity, "vdb_intensity", "intensity");
         ClearFlags(f, Knob::STARTLINE);
         SetRange(f, 0, 10);
-        Tooltip(f, "Master brightness multiplier.\n"
-                   "Does not affect alpha/opacity.");
+        Tooltip(f, "Master brightness. Does not affect alpha.");
+        Bool_knob(f, &_vdbSpectralVolumes, "vdb_spectral_volumes", "spectral volumes");
+        Tooltip(f, "ON: each ray samples one wavelength (physically correct but slow,\n"
+                   "needs 20+ spp for proper colour convergence).\n"
+                   "OFF: direct RGB rendering (fast, full colour at 1 spp).\n"
+                   "Keep OFF unless you need chromatic extinction or spectral emission.\n"
+                   "Surfaces always use full spectral regardless of this setting.");
 
-        Divider(f, "Viewport preview");
+        // ─── Viewport ───────────────────────────────────────────────────
+        Divider(f, "3D Viewport");
         Bool_knob(f, &_vdbShowBbox, "vdb_show_bbox", "bbox");
-        Tooltip(f, "Green wireframe bounding box around the volume.");
+        Tooltip(f, "Green wireframe bounding box in the 3D viewer.\n"
+                   "Useful for camera placement before rendering.");
         Bool_knob(f, &_vdbShowPoints, "vdb_show_points", "points");
         ClearFlags(f, Knob::STARTLINE);
-        Tooltip(f, "Point cloud preview — denser regions appear\n"
-                   "brighter with a heat-map colour ramp.");
+        Tooltip(f, "Coloured point cloud preview.\n"
+                   "Colour scheme follows the current Render Mode.");
         Double_knob(f, &_vdbPointDensity, "vdb_point_density", "density");
         ClearFlags(f, Knob::STARTLINE);
         SetRange(f, 0.1, 1.0);
-        Tooltip(f, "Proportion of voxels to sample as points.\n"
-                   "0.1 = sparse/fast, 1.0 = every voxel.");
+        Tooltip(f, "Point sampling: 0.1 = sparse/fast, 1.0 = all voxels.");
         Double_knob(f, &_vdbPointSize, "vdb_point_size", "size");
         ClearFlags(f, Knob::STARTLINE);
         SetRange(f, 1, 8);
         Tooltip(f, "GL point size in pixels.");
-
         Newline(f);
         Bool_knob(f, &_vdbFastScrub, "vdb_fast_scrub", "fast scrub");
-        Tooltip(f, "Bbox-only during timeline scrub (~1ms per frame).\n"
-                   "Full point cloud loads when playback stops.\n"
-                   "Disable for real-time point cloud updates.");
+        Tooltip(f, "Bbox-only during timeline scrub.\n"
+                   "Full point cloud loads when playback stops.");
         Bool_knob(f, &_vdbCacheEnabled, "vdb_cache_enabled", "cache");
         ClearFlags(f, Knob::STARTLINE);
-        Tooltip(f, "Cache recently visited VDB frames in memory.\n"
-                   "Scrubbing back to a cached frame is instant.");
         Int_knob(f, &_vdbCacheMax, "vdb_cache_max", "");
         ClearFlags(f, Knob::STARTLINE);
         SetRange(f, 1, 32);
-        Tooltip(f, "Number of VDB frames to keep in memory.\n"
-                   "Each preview frame ≈ 1 MB, render frame ≈ 8 MB.");
         Text_knob(f, "frames");
         ClearFlags(f, Knob::STARTLINE);
         Button(f, "vdb_cache_clear", "Clear Cache");
         ClearFlags(f, Knob::STARTLINE);
-        Tooltip(f, "Free all cached VDB frames from memory.");
 
+        // ─── Grids ──────────────────────────────────────────────────────
         Divider(f, "Grids");
         Button(f, "discover_grids", "Discover Grids");
-        Tooltip(f, "Scan VDB file and auto-detect grid names.");
+        Tooltip(f, "Scan VDB file and list available grids.\n"
+                   "Auto-assigns density, temperature, flame, and colour grids.");
         Enumeration_knob(f, &_vdbDensityGridIdx, kVdbGridMenu, "vdb_density_grid", "density");
+        Tooltip(f, "Float grid for smoke opacity and light scattering.\n"
+                   "Common names: density, smoke, soot\n"
+                   "Set to (none) for emission-only rendering (fire without smoke).");
         String_knob(f, &_vdbDensityOverride, "vdb_density_override", "override");
         ClearFlags(f, Knob::STARTLINE);
         Enumeration_knob(f, &_vdbTempGridIdx, kVdbGridMenu, "vdb_temp_grid", "temperature");
+        Tooltip(f, "Float grid for blackbody emission colour.\n"
+                   "Common names: temperature, heat, temp\n"
+                   "Values in Kelvin drive fire colour (orange to white).");
         String_knob(f, &_vdbTempOverride, "vdb_temp_override", "override");
         ClearFlags(f, Knob::STARTLINE);
         Enumeration_knob(f, &_vdbFlameGridIdx, kVdbGridMenu, "vdb_flame_grid", "flame");
+        Tooltip(f, "Float grid for additional flame emission.\n"
+                   "Common names: flame, flames, fire, fuel, burn\n"
+                   "Adds glow on top of temperature emission.");
         String_knob(f, &_vdbFlameOverride, "vdb_flame_override", "override");
         ClearFlags(f, Knob::STARTLINE);
         Enumeration_knob(f, &_vdbColorGridIdx, kVdbGridMenu, "vdb_color_grid", "color");
+        Tooltip(f, "Vec3 grid for per-voxel albedo colour.\n"
+                   "Common names: Cd, color, colour, rgb, albedo");
         String_knob(f, &_vdbColorOverride, "vdb_color_override", "override");
         ClearFlags(f, Knob::STARTLINE);
 
-        Divider(f, "Shading Preset");
+        // ─── Shading ────────────────────────────────────────────────────
+        Divider(f, "Shading");
+        Text_knob(f,
+            "<font color='#777' size='-1'>"
+            "Extinction controls opacity. Scattering controls brightness under lighting.<br>"
+            "Phase function and scatter quality are in advanced groups below."
+            "</font>"
+        );
         static const char* const volPresets[] = {
             "Custom", "Smoke", "Fire / Explosion", "Clouds", "Fog / Mist", "Nebula", nullptr
         };
         Enumeration_knob(f, &_vdbShadingPreset, volPresets, "vdb_shading_preset", "Shading Preset");
-        Double_knob(f, &_vdbExtinction, "vdb_extinction", "extinction"); SetRange(f, 0, 20);
-        Tooltip(f, "Extinction coefficient (sigma_t).\n"
-                   "Controls how quickly light is absorbed.\n"
-                   "0 = fully transparent, 5 = default smoke,\n"
-                   "10-20 = very dense/opaque.");
-        Double_knob(f, &_vdbScattering, "vdb_scattering", "scattering"); SetRange(f, 0, 20);
-        Tooltip(f, "In-scatter coefficient (sigma_s).\n"
-                   "How much light scatters into the camera.\n"
-                   "Higher = brighter volume interior.");
-        Double_knob(f, &_vdbDensityMult, "vdb_density_mult", "density multiplier"); SetRange(f, 0, 10);
-        Tooltip(f, "Scales the raw density values from the VDB.\n"
-                   "1 = use as-is, 2 = double density,\n"
-                   "0.5 = half density. Useful for simulations\n"
-                   "with very high or low density ranges.");
-        Double_knob(f, &_vdbAnisotropy, "vdb_anisotropy", "anisotropy"); SetRange(f, -1, 1);
-        Tooltip(f, "Henyey-Greenstein phase function g parameter.\n"
-                   " 0.0 = isotropic (equal in all directions)\n"
-                   " 0.6 = forward scatter (clouds, fog)\n"
-                   " 0.8 = strong forward (mist, haze)\n"
-                   "-0.3 = backward scatter (silver lining effect)");
+        Tooltip(f, "One-click setup for common volume types.\n"
+                   "Sets extinction, scattering, phase function, emission, and scatter colour.\n"
+                   "Choose Custom to adjust settings manually.");
+        Double_knob(f, &_vdbExtinction, "vdb_extinction", "extinction"); SetRange(f, 0, 50);
+        Tooltip(f, "How quickly light is absorbed per unit density.\n"
+                   "Higher = more opaque volume.\n"
+                   "Thin smoke: 1-5. Cloud: 10-20. Solid: 30+");
+        Double_knob(f, &_vdbScattering, "vdb_scattering", "scattering"); SetRange(f, 0, 50);
+        Tooltip(f, "How bright the volume appears under direct lighting.\n"
+                   "Only active in Lit and Explosion modes.\n"
+                   "0 = pure absorption (dark). Higher = brighter.");
+        Double_knob(f, &_vdbDensityMult, "vdb_density_mult", "density mult"); SetRange(f, 0, 10);
+        Tooltip(f, "Scales raw density values from VDB.\n"
+                   "1 = as-is. 0.5 = half. 2 = double.\n"
+                   "Useful when simulation outputs very high/low values.");
         Double_knob(f, &_vdbStepSize, "vdb_step_size", "step size"); SetRange(f, 0, 2);
-        Tooltip(f, "Ray march step size in world units.\n"
-                   "0 = automatic (half voxel size).\n"
-                   "Smaller = more accurate but slower.\n"
-                   "Larger = faster but may miss thin features.");
-        Int_knob(f, &_vdbMaxSteps, "vdb_max_steps", "max steps"); SetRange(f, 64, 1024);
-        Tooltip(f, "Maximum ray march steps per ray.\n"
-                   "256 = default. Increase for very large or\n"
-                   "very dense volumes. Decrease for faster preview.");
+        Tooltip(f, "Ray march step size (world units). 0 = auto from quality.\n"
+                   "Override for precise control. Smaller = finer detail, slower.");
+        Double_knob(f, &_vdbAnisotropy, "vdb_anisotropy", "anisotropy"); SetRange(f, -1, 1);
+        SetFlags(f, Knob::INVISIBLE);
 
-        Divider(f, "Emission");
-        Double_knob(f, &_vdbEmissionIntensity, "vdb_emission_intensity", "emission intensity"); SetRange(f, 0, 20);
-        Tooltip(f, "Brightness of blackbody emission.\n"
-                   "0 = no emission, 2 = default fire,\n"
-                   "5-10 = bright explosion.");
-        Double_knob(f, &_vdbTempMin, "vdb_temp_min", "temp min"); SetRange(f, 0, 5000);
-        Tooltip(f, "Temperature at which emission begins (Kelvin).\n"
-                   "500 = dull red, 1000 = orange, 2000 = yellow.");
-        Double_knob(f, &_vdbTempMax, "vdb_temp_max", "temp max"); SetRange(f, 500, 40000);
-        Tooltip(f, "Temperature at full emission brightness.\n"
-                   "6500 = daylight white, 10000+ = blue-white.\n"
-                   "Range maps temperature grid to 0-1 emission.");
-        Double_knob(f, &_vdbFlameIntensity, "vdb_flame_intensity", "flame intensity"); SetRange(f, 0, 20);
-        Tooltip(f, "Brightness multiplier for the flame grid.\n"
-                   "Separate from temperature-based emission.\n"
-                   "5 = default. Set to 0 to disable flame.");
-
-        BeginClosedGroup(f, "vdb_phase", "Phase function (advanced)");
+        // ─── Emission ───────────────────────────────────────────────────
+        BeginClosedGroup(f, "vdb_emis", "Emission");
         {
-            Double_knob(f, &_vdbGForward, "vdb_g_forward", "forward lobe"); SetRange(f, 0, 1);
-            Tooltip(f, "Forward scattering lobe strength.\n"
-                       "0 = isotropic, 0.65 = clouds (default),\n"
-                       "0.9 = strong forward (thin mist).");
-            Double_knob(f, &_vdbGBackward, "vdb_g_backward", "backward lobe"); SetRange(f, -1, 0);
-            Tooltip(f, "Backward scattering lobe strength.\n"
-                       "0 = none, -0.25 = default silver lining,\n"
-                       "-0.5 = strong back-scatter.");
+            Text_knob(f,
+                "<font color='#777' size='-1'>"
+                "Temperature and flame emission for fire and explosion rendering.<br>"
+                "Only active when temperature or flame grids are loaded.<br>"
+                "Emission bypasses extinction \xe2\x80\x94 visible even at zero opacity."
+                "</font>"
+            );
+            Newline(f);
+            Double_knob(f, &_vdbEmissionIntensity, "vdb_emission_intensity", "temp emission"); SetRange(f, 0, 20);
+            Tooltip(f, "Brightness of temperature-driven emission.\n"
+                       "Start with 1-5 and adjust to taste.\n"
+                       "Set to 0 to disable temperature glow.");
+            Double_knob(f, &_vdbTempMin, "vdb_temp_min", "temp min (K)"); SetRange(f, 0, 5000);
+            Tooltip(f, "Kelvin temperature at zero emission.\n"
+                       "Candle: 1800K. Fire base: 300-500K.");
+            Double_knob(f, &_vdbTempMax, "vdb_temp_max", "temp max (K)"); SetRange(f, 500, 40000);
+            Tooltip(f, "Kelvin temperature at peak emission.\n"
+                       "Fire: 3000K. Explosion: 8000K. Plasma: 15000K.");
+            Double_knob(f, &_vdbFlameIntensity, "vdb_flame_intensity", "flame emission"); SetRange(f, 0, 20);
+            Tooltip(f, "Brightness of the flame grid emission.\n"
+                       "Additive on top of temperature emission.\n"
+                       "0 = no flame glow. 5-10 = typical fire.");
+        }
+        EndGroup(f);
+
+        // ─── Phase Function ─────────────────────────────────────────────
+        BeginClosedGroup(f, "vdb_phase", "Phase Function");
+        {
+            Text_knob(f,
+                "<font color='#777' size='-1'>"
+                "Controls how light scatters inside the volume.<br>"
+                "Dual-lobe HG is fast and versatile. Approximate Mie is physically<br>"
+                "accurate for water droplets (clouds, fog) \xe2\x80\x94 Jendersie &amp; d'Eon 2023."
+                "</font>"
+            );
+            Newline(f);
+            static const char* const phaseModes[] = {
+                "Dual-lobe HG", "Approximate Mie", nullptr
+            };
+            Enumeration_knob(f, &_vdbPhaseMode, phaseModes, "vdb_phase_mode", "phase mode");
+            Tooltip(f, "Dual-lobe HG \xe2\x80\x94 fast, good for all volume types.\n"
+                       "Approximate Mie \xe2\x80\x94 parametric fit to Lorenz-Mie scattering.\n"
+                       "Physically accurate for spherical water droplets.\n"
+                       "Use for clouds and fog.");
+            Double_knob(f, &_vdbMieDropletD, "vdb_mie_droplet_d", "droplet diameter"); SetRange(f, 0.1, 20);
+            Tooltip(f, "Water droplet diameter in micrometres.\n"
+                       "Only used when Phase Mode = Approximate Mie.\n"
+                       "0.1 = aerosol / haze\n"
+                       "2.0 = typical cloud droplet\n"
+                       "10.0 = large cloud / light drizzle");
+            Divider(f, "HG Parameters");
+            Double_knob(f, &_vdbGForward, "vdb_g_forward", "G forward"); SetRange(f, 0, 1);
+            Tooltip(f, "Forward-scatter lobe asymmetry (HG g1).\n"
+                       "0 = isotropic, 1 = fully forward.\n"
+                       "Smoke: 0.4   Cloud: 0.8   Explosion: 0.85");
+            Double_knob(f, &_vdbGBackward, "vdb_g_backward", "G backward"); SetRange(f, -1, 0);
+            Tooltip(f, "Backward-scatter lobe asymmetry (HG g2).\n"
+                       "0 = isotropic, -1 = fully backward (rim/halo).\n"
+                       "Smoke: -0.15   Cloud: -0.1   Explosion: -0.25");
             Double_knob(f, &_vdbLobeMix, "vdb_lobe_mix", "lobe mix"); SetRange(f, 0, 1);
-            Tooltip(f, "Balance between forward and backward lobes.\n"
-                       "1.0 = pure forward, 0.0 = pure backward,\n"
-                       "0.7 = natural cloud mix (default).");
+            Tooltip(f, "Blend between forward and backward lobes.\n"
+                       "1.0 = pure forward. 0.0 = pure backward.\n"
+                       "Typical range: 0.65-0.85");
+            Divider(f, "Scatter Quality");
             Double_knob(f, &_vdbPowder, "vdb_powder", "powder effect"); SetRange(f, 0, 10);
             Tooltip(f, "Interior brightening (Schneider & Vos 2015).\n"
-                       "0=off, 2=natural, 6=dense fireball.");
-            Bool_knob(f, &_vdbJitter, "vdb_jitter", "jitter steps");
-            Tooltip(f, "Stochastic step offset to remove banding.");
-        }
-        EndGroup(f);
-
-        BeginClosedGroup(f, "vdb_scatter", "Scatter colour");
-        {
-            Color_knob(f, _vdbScatterColor, "vdb_scatter_color", "scatter color");
+                       "0 = off. 2 = natural. 5 = dense explosion. 10 = max.\n"
+                       "Creates the 'silver lining' on clouds. Zero extra rays.");
+            Double_knob(f, &_vdbGradientMix, "vdb_gradient_mix", "gradient mix"); SetRange(f, 0, 1);
+            Tooltip(f, "Blend HG phase with density-gradient Lambertian.\n"
+                       "Gives clouds sculpted billowing edges.\n"
+                       "0 = off (smoke/fire). 0.3 = clouds.\n"
+                       "Adds 6 grid lookups per step when enabled.");
+            Bool_knob(f, &_vdbJitter, "vdb_jitter", "ray jitter");
+            Tooltip(f, "Per-pixel random step offset \xe2\x80\x94 eliminates wood-grain banding.\n"
+                       "Zero render cost. Leave on at all quality levels.");
+            Color_knob(f, _vdbScatterColor, "vdb_scatter_color", "scatter colour");
             Tooltip(f, "Tint of scattered light inside the volume.\n"
-                       "White=neutral, warm=fire, blue=atmosphere.");
+                       "White = neutral. Warm = fire. Blue = atmosphere.");
         }
         EndGroup(f);
 
+        // ─── Quality ────────────────────────────────────────────────────
         Divider(f, "Quality");
         Text_knob(f,
-            "<font color='#666' size='-1'>"
-            "Start with a Quality Preset, then fine-tune individual settings.<br>"
-            "Draft for layout, Production for review, Final for delivery."
+            "<font color='#777' size='-1'>"
+            "Start with a preset, then fine-tune. Draft for layout, Final for delivery."
             "</font>"
         );
         Newline(f);
@@ -541,147 +587,136 @@ void SpectralRenderIop::knobs(Knob_Callback f)
             "Custom", "Draft", "Preview", "Production", "Final", "Ultra", nullptr
         };
         Enumeration_knob(f, &_vdbQualityPreset, qualPresets, "vdb_quality_preset", "preset");
-        Tooltip(f, "Sets all quality controls at once.\n"
-                   "Draft = fastest, rough look for layout\n"
-                   "Preview = quick turnaround for review\n"
-                   "Production = good quality for client review\n"
-                   "Final = full quality for delivery\n"
-                   "Ultra = maximum fidelity, slowest render");
-        Double_knob(f, &_vdbQuality, "vdb_quality", "quality");
-        SetRange(f, 1, 10);
-        Tooltip(f, "Ray march step resolution (logarithmic).\n"
-                   "Step size = 1/(quality^2).\n"
-                   "1 = fast preview, 5 = good, 7 = high, 10 = final.");
+        Tooltip(f, "Draft = fastest preview\n"
+                   "Preview = quick turnaround\n"
+                   "Production = client review\n"
+                   "Final = delivery quality\n"
+                   "Ultra = maximum fidelity");
+        Double_knob(f, &_vdbQuality, "vdb_quality", "quality"); SetRange(f, 1, 10);
+        Tooltip(f, "Step resolution. Step = voxelSize / (quality\xc2\xb2 \xc3\x97 0.25).\n"
+                   "1 = fast. 5 = good. 7 = high. 10 = final.");
         Bool_knob(f, &_vdbAdaptiveStep, "vdb_adaptive_step", "adaptive");
         ClearFlags(f, Knob::STARTLINE);
-        Tooltip(f, "Larger steps in thin regions, smaller in dense.\n"
-                   "2-4x speedup with minimal quality loss.");
-        Int_knob(f, &_vdbShadowSteps, "vdb_shadow_steps", "shadow steps");
-        SetRange(f, 0, 64);
-        Tooltip(f, "Shadow ray samples per light per march step.\n"
-                   "0 = no self-shadowing (flat look).\n"
-                   "4-8 = preview, 16-32 = final render.");
+        Tooltip(f, "4x larger steps in empty regions. 2-4x speedup.");
+        Int_knob(f, &_vdbShadowSteps, "vdb_shadow_steps", "shadow steps"); SetRange(f, 0, 64);
+        Tooltip(f, "Shadow ray samples per light.\n"
+                   "0 = no self-shadowing. 4-8 = preview. 16-32 = final.");
         Double_knob(f, &_vdbShadowDensity, "vdb_shadow_density", "shadow density");
-        ClearFlags(f, Knob::STARTLINE);
-        SetRange(f, 0, 5);
+        ClearFlags(f, Knob::STARTLINE); SetRange(f, 0, 5);
         Tooltip(f, "Extinction multiplier for shadow rays.\n"
-                   "1 = physical, <1 = lighter shadows, >1 = darker.\n"
-                   "0 = no self-shadowing.");
+                   "1 = physical. <1 = lighter. >1 = darker. 0 = none.");
 
-        Divider(f, "Shadow Performance");
-        Text_knob(f,
-            "<font color='#666' size='-1'>"
-            "Shadow Cache precomputes transmittance per directional light,<br>"
-            "reducing shadow cost from O(steps) to O(1) per primary sample."
-            "</font>"
-        );
-        Newline(f);
-        Bool_knob(f, &_vdbShadowCache, "vdb_shadow_cache", "shadow cache");
-        Tooltip(f, "Precomputes a transmittance grid per directional light.\n"
-                   "Shadow rays replaced by a single trilinear lookup.\n"
-                   "5-10x faster shadow evaluation.\n"
-                   "Rebuilt automatically when lights or VDB change.");
-        static const char* const cacheRes[] = {
-            "Full (1:1)", "Half (2:1)", "Quarter (4:1)", nullptr
-        };
-        Enumeration_knob(f, &_vdbShadowCacheRes, cacheRes, "vdb_shadow_cache_res", "");
-        ClearFlags(f, Knob::STARTLINE);
-        Tooltip(f, "Voxel resolution of precomputed transmittance grid.\n"
-                   "Full = same as density grid, best quality.\n"
-                   "Half = recommended for production, 8x less memory.\n"
-                   "Quarter = fastest build, slight shadow softening.");
-
-        BeginClosedGroup(f, "vdb_ms", "Multiple scatter");
+        // ─── Shadow Cache ───────────────────────────────────────────────
+        BeginClosedGroup(f, "vdb_shcache", "Shadow Performance");
         {
-            Bool_knob(f, &_vdbMsApprox, "vdb_ms_approx", "analytical MS");
-            Tooltip(f, "Wrenninge 2015 analytical multiple scattering.\n"
-                       "Approximates infinite-bounce light at near-zero cost.\n"
-                       "Brightens dense volume interiors realistically.");
-            Color_knob(f, _vdbMsTint, "vdb_ms_tint", "tint");
-            Tooltip(f, "Colour tint on the multi-scatter contribution.\n"
-                       "Default (1.0, 0.97, 0.95) = slight warm bias.");
+            Text_knob(f,
+                "<font color='#777' size='-1'>"
+                "Precomputes transmittance per directional light.<br>"
+                "Reduces shadow cost from O(steps) to O(1) per sample."
+                "</font>"
+            );
+            Newline(f);
+            Bool_knob(f, &_vdbShadowCache, "vdb_shadow_cache", "shadow cache");
+            Tooltip(f, "5-10x faster shadow evaluation.\n"
+                       "Rebuilt when lights or VDB change.");
+            static const char* const cacheRes[] = {
+                "Full (1:1)", "Half (2:1)", "Quarter (4:1)", nullptr
+            };
+            Enumeration_knob(f, &_vdbShadowCacheRes, cacheRes, "vdb_shadow_cache_res", "");
+            ClearFlags(f, Knob::STARTLINE);
         }
         EndGroup(f);
 
-        BeginClosedGroup(f, "vdb_noise", "Procedural detail noise");
+        // ─── Multiple Scatter ───────────────────────────────────────────
+        BeginClosedGroup(f, "vdb_ms", "Multiple Scatter (Analytical)");
         {
             Text_knob(f,
-                "<font color='#666' size='-1'>"
-                "fBm noise perturbs density at render time, adding micro-detail<br>"
-                "beyond VDB resolution. World-space \xe2\x80\x94 no UV unwrap needed."
+                "<font color='#777' size='-1'>"
+                "Wrenninge 2015: infinite-bounce approximation at near-zero cost.<br>"
+                "Brightens dense volume interiors. Leave ON."
+                "</font>"
+            );
+            Newline(f);
+            Bool_knob(f, &_vdbMsApprox, "vdb_ms_approx", "analytical MS");
+            Color_knob(f, _vdbMsTint, "vdb_ms_tint", "tint");
+            Tooltip(f, "Colour tint on multi-scatter. Default warm bias (1, 0.97, 0.95).\n"
+                       "Try (0.95, 0.97, 1.0) for cold/overcast scenes.");
+        }
+        EndGroup(f);
+
+        // ─── Procedural Noise ───────────────────────────────────────────
+        BeginClosedGroup(f, "vdb_noise", "Procedural Detail Noise");
+        {
+            Text_knob(f,
+                "<font color='#777' size='-1'>"
+                "fBm noise perturbs density at render time, adding detail beyond<br>"
+                "VDB resolution. World-space \xe2\x80\x94 no UV unwrap needed."
                 "</font>"
             );
             Newline(f);
             Bool_knob(f, &_vdbNoiseEnable, "vdb_noise_enable", "enable");
-            Tooltip(f, "Add procedural fBm detail noise to density.\n"
-                       "Raises apparent VDB resolution without resampling.\n"
-                       "Useful for wispy smoke edges and cloud detail.\n"
-                       "Cost: one noise eval per march step.");
-            Double_knob(f, &_vdbNoiseScale, "vdb_noise_scale", "scale");
-            SetRange(f, 0.1, 20);
-            Tooltip(f, "World-space frequency relative to volume bbox.\n"
-                       "1 = one noise cycle across bbox.\n"
-                       "4 = fine detail. 8 = very fine. 0.5 = large lumps.");
-            Double_knob(f, &_vdbNoiseStrength, "vdb_noise_strength", "strength");
-            SetRange(f, 0, 1);
-            Tooltip(f, "How strongly noise modulates density.\n"
-                       "0 = no effect. 0.3 = natural. 1.0 = extreme.");
-            Int_knob(f, &_vdbNoiseOctaves, "vdb_noise_octaves", "octaves");
-            SetRange(f, 1, 6);
-            Tooltip(f, "fBm octave layers.\n"
-                       "1 = smooth. 3 = natural. 6 = very detailed (slower).");
-            Double_knob(f, &_vdbNoiseRoughness, "vdb_noise_roughness", "roughness");
-            SetRange(f, 0, 1);
-            Tooltip(f, "Amplitude falloff per octave.\n"
-                       "0 = smooth. 0.5 = natural. 1 = all octaves equal.");
+            Double_knob(f, &_vdbNoiseScale, "vdb_noise_scale", "scale"); SetRange(f, 0.1, 20);
+            Tooltip(f, "1 = one cycle across bbox. 4 = fine. 8 = very fine. 0.5 = lumpy.");
+            Double_knob(f, &_vdbNoiseStrength, "vdb_noise_strength", "strength"); SetRange(f, 0, 1);
+            Tooltip(f, "0 = none. 0.3 = natural. 0.5 = strong. 1 = extreme.");
+            Int_knob(f, &_vdbNoiseOctaves, "vdb_noise_octaves", "octaves"); SetRange(f, 1, 6);
+            Tooltip(f, "1 = smooth. 3 = natural. 6 = max detail (slower).");
+            Double_knob(f, &_vdbNoiseRoughness, "vdb_noise_roughness", "roughness"); SetRange(f, 0, 1);
+            Tooltip(f, "0 = smooth. 0.5 = natural. 1 = rough.");
         }
         EndGroup(f);
 
-        BeginClosedGroup(f, "vdb_env", "Environment map");
+        // ─── Environment Map ────────────────────────────────────────────
+        BeginClosedGroup(f, "vdb_env", "Environment Map");
         {
             Text_knob(f,
-                "<font color='#666' size='-1'>"
-                "Picked up from EnvironLight or dome light in the scene tree.<br>"
-                "SH + Virtual Lights mode is 10-70x faster than Uniform dirs."
+                "<font color='#777' size='-1'>"
+                "Picked up from EnvironLight or dome light in the scene.<br>"
+                "SH + Virtual Lights is 10-70x faster than Uniform dirs."
                 "</font>"
             );
             Newline(f);
-            Double_knob(f, &_vdbEnvIntensity, "vdb_env_intensity", "intensity");
-            SetRange(f, 0, 10);
-            Tooltip(f, "Environment map brightness multiplier.");
+            Double_knob(f, &_vdbEnvIntensity, "vdb_env_intensity", "intensity"); SetRange(f, 0, 10);
             Double_knob(f, &_vdbEnvRotate, "vdb_env_rotate", "rotate");
-            ClearFlags(f, Knob::STARTLINE);
-            SetRange(f, 0, 360);
-            Tooltip(f, "Rotate the environment map horizontally in degrees.");
-            Double_knob(f, &_vdbEnvDiffuse, "vdb_env_diffuse", "diffuse");
-            SetRange(f, 0, 1);
-            Tooltip(f, "How much environment light contributes to diffuse illumination.\n"
-                       "0 = no env contribution. 0.5 = natural. 1 = full.");
+            ClearFlags(f, Knob::STARTLINE); SetRange(f, 0, 360);
+            Double_knob(f, &_vdbEnvDiffuse, "vdb_env_diffuse", "diffuse"); SetRange(f, 0, 1);
+            Tooltip(f, "Environment contribution to diffuse illumination.\n"
+                       "0 = off. 0.5 = natural. 1 = full.");
             Divider(f, "");
             static const char* const envModes[] = {
                 "Uniform dirs (slow, accurate)", "SH + Virtual Lights (fast)", nullptr
             };
             Enumeration_knob(f, &_vdbEnvMode, envModes, "vdb_env_mode", "env mode");
-            Tooltip(f, "SH + Virtual Lights (recommended): projects env map to 9 SH\n"
-                       "coefficients. Full-sphere ambient in 9 multiply-adds per step.\n"
-                       "Brightest peaks extracted as virtual directional lights with\n"
-                       "proper shadow rays. 10-70x faster than Uniform dirs.\n\n"
-                       "Uniform dirs: 6-26 directions \xc3\x97 shadow steps per sample.\n"
-                       "Use to compare quality or when exact directionality matters.");
-            Int_knob(f, &_vdbEnvVirtualLights, "vdb_env_virtual_lights", "virtual lights");
-            SetRange(f, 0, 4);
-            Tooltip(f, "Bright peaks extracted from env map as virtual directional lights.\n"
-                       "Only used in SH + Virtual Lights mode.\n"
-                       "0 = SH ambient only (fastest). 1 = sun only.\n"
-                       "2 = sun + bright sky (recommended). 4 = maximum.");
+            Tooltip(f, "SH + Virtual Lights: 9 SH coefficients + HDRI peak extraction.\n"
+                       "Uniform dirs: 6-26 directions \xc3\x97 shadow steps.");
+            Int_knob(f, &_vdbEnvVirtualLights, "vdb_env_virtual_lights", "virtual lights"); SetRange(f, 0, 4);
+            Tooltip(f, "HDRI peaks as virtual directional lights.\n"
+                       "0 = ambient only. 2 = recommended. 4 = max.");
             Bool_knob(f, &_vdbUseReSTIR, "vdb_use_restir", "ReSTIR env sampling");
-            Tooltip(f, "Weighted reservoir importance sampling for environment lighting.\n"
-                       "Samples all directions by SH radiance \xc3\x97 phase weight,\n"
-                       "selects best candidate, traces one shadow ray per step.\n"
-                       "Equal or better quality at ~26x fewer shadow rays.\n"
-                       "Only active in Uniform dirs mode.");
+            Tooltip(f, "Importance sampling for env lighting. ~26x fewer shadow rays.");
         }
         EndGroup(f);
+
+        // ─── Technical Reference ────────────────────────────────────────
+        Divider(f, "");
+        Text_knob(f,
+            "<font size='-1' color='#666'>"
+            "<b>Renderer</b> \xe2\x80\x94 Beer-Lambert ray march, adaptive stepping,<br>"
+            "trilinear BoxSampler, transmittance shadow rays.<br>"
+            "<b>Phase</b> \xe2\x80\x94 Dual-lobe HG + Approximate Mie (Jendersie &amp; d'Eon 2023).<br>"
+            "<b>MS</b> \xe2\x80\x94 Analytical infinite-bounce (Wrenninge 2015).<br>"
+            "<b>Powder</b> \xe2\x80\x94 Schneider &amp; Vos (Horizon Zero Dawn 2015).<br>"
+            "<b>Blackbody</b> \xe2\x80\x94 Tanner Helland RGB approximation.<br>"
+            "<b>Noise</b> \xe2\x80\x94 Hash-based fBm, deterministic, world-space."
+            "</font>"
+        );
+        Newline(f);
+        Text_knob(f,
+            "<font size='-1' color='#555'>"
+            "<b>Created by Marten Blumen</b> \xc2\xb7 "
+            "github.com/bratgot/SpectralRenderer"
+            "</font>"
+        );
     }
 
     Tab_knob(f, "AOVs");
@@ -856,6 +891,11 @@ int SpectralRenderIop::knob_changed(Knob* k)
         _frameReady.store(false);
         _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
         _vdbLoadedPath.clear();
+        _volume.reset();  // force reload
+        // Re-detect sequence if auto is on
+        if (_vdbAutoSequence && k->is("vdb_file")) {
+            if (Knob* ok = knob("vdb_orig_file")) ok->set_text(_vdbFile ? _vdbFile : "");
+        }
         return 1;
     }
     if (k->is("vdb_show_points") || k->is("vdb_point_density") || k->is("vdb_point_size") || k->is("vdb_show_bbox") || k->is("vdb_fast_scrub")) {
@@ -977,10 +1017,59 @@ int SpectralRenderIop::knob_changed(Knob* k)
         return 1;
     }
 
-    if (k->is("vdb_render_mode") || k->is("vdb_intensity")) return 1;
+    if (k->is("vdb_render_mode") || k->is("vdb_intensity") || k->is("vdb_spectral_volumes")) return 1;
     if (k->is("vdb_shadow_cache") || k->is("vdb_shadow_cache_res")) return 1;
+    if (k->is("vdb_phase_mode") || k->is("vdb_mie_droplet_d") || k->is("vdb_gradient_mix")) return 1;
     if (k->is("vdb_env_intensity") || k->is("vdb_env_rotate") ||
         k->is("vdb_env_mode") || k->is("vdb_env_virtual_lights") || k->is("vdb_use_restir")) return 1;
+    if (k->is("vdb_noise_enable") || k->is("vdb_noise_scale") || k->is("vdb_noise_strength") ||
+        k->is("vdb_noise_octaves") || k->is("vdb_noise_roughness")) return 1;
+
+    // Shading preset handler
+    if (k->is("vdb_shading_preset") && _vdbShadingPreset > 0) {
+        // Values tuned to match VDBmarcher presets
+        struct SPreset { double ext; double scat; double dens; double gF; double gB; double lM;
+                         double pow; double emI; double tMin; double tMax; double flI; bool bb;
+                         bool chrom; double sR; double sG; double sB;
+                         float scR; float scG; float scB; };
+        static const SPreset sp[] = {
+            {}, // 0: Custom
+            {5,  2,  1,   0.3, -0.1,  0.8,  0, 0,    0,    0,    0, false, false, 1,1,1,       0.7f,0.7f,0.7f},     // Smoke
+            {3,  2,  1,   0.5, -0.2,  0.7,  2, 8,  300, 3000,  10, true,  false, 1,1,1,       1.f,0.85f,0.6f},      // Fire — low ext so fire visible through smoke
+            {15, 12, 1,   0.8, -0.3,  0.85, 5, 0,    0,    0,    0, false, false, 1,1,1,       1.f,1.f,1.f},         // Clouds
+            {2,  1.5,0.5, 0.6, -0.15, 0.85, 0, 0,    0,    0,    0, false, true,  1,1,1.3,     0.9f,0.92f,0.95f},    // Fog
+            {1,  0.5,0.8, 0.2,  0,    1,    0, 5, 2000,15000,   0, true,  true,  0.8,1,1.4,   0.6f,0.4f,1.f},       // Nebula — low ext, ethereal
+        };
+        if (_vdbShadingPreset < 6) {
+            const auto& s = sp[_vdbShadingPreset];
+            _vdbExtinction=s.ext; _vdbScattering=s.scat; _vdbDensityMult=s.dens;
+            _vdbGForward=s.gF; _vdbGBackward=s.gB; _vdbLobeMix=s.lM;
+            _vdbPowder=s.pow; _vdbEmissionIntensity=s.emI;
+            _vdbTempMin=s.tMin; _vdbTempMax=s.tMax; _vdbFlameIntensity=s.flI;
+            _vdbScatterColor[0]=s.scR; _vdbScatterColor[1]=s.scG; _vdbScatterColor[2]=s.scB;
+            if (knob("vdb_extinction"))   knob("vdb_extinction")->set_value(s.ext);
+            if (knob("vdb_scattering"))   knob("vdb_scattering")->set_value(s.scat);
+            if (knob("vdb_density_mult")) knob("vdb_density_mult")->set_value(s.dens);
+            if (knob("vdb_g_forward"))    knob("vdb_g_forward")->set_value(s.gF);
+            if (knob("vdb_g_backward"))   knob("vdb_g_backward")->set_value(s.gB);
+            if (knob("vdb_lobe_mix"))     knob("vdb_lobe_mix")->set_value(s.lM);
+            if (knob("vdb_powder"))       knob("vdb_powder")->set_value(s.pow);
+            if (knob("vdb_emission"))     knob("vdb_emission")->set_value(s.emI);
+            if (knob("vdb_temp_min"))     knob("vdb_temp_min")->set_value(s.tMin);
+            if (knob("vdb_temp_max"))     knob("vdb_temp_max")->set_value(s.tMax);
+            if (knob("vdb_flame_intensity")) knob("vdb_flame_intensity")->set_value(s.flI);
+            if (knob("vdb_scatter_color")) {
+                knob("vdb_scatter_color")->set_value(s.scR, 0);
+                knob("vdb_scatter_color")->set_value(s.scG, 1);
+                knob("vdb_scatter_color")->set_value(s.scB, 2);
+            }
+            // Set render mode: Fire → Explosion, others → Lit
+            if (_vdbShadingPreset == 2 && knob("vdb_render_mode")) {
+                knob("vdb_render_mode")->set_value(5); _vdbRenderMode = 5; // Explosion
+            }
+        }
+        return 1;
+    }
 
     return Iop::knob_changed(k);
 }
@@ -2997,8 +3086,28 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
             glBegin(GL_POINTS);
             for (const auto& pt : _vdbPreviewPoints) {
                 float t = std::min(pt.density * inv, 1.f);
-                glColor4f(std::min(t*3,1.f), std::max(0.f,std::min((t-.33f)*3,1.f)),
-                          std::max(0.f,std::min((t-.66f)*3,1.f)), .15f+.85f*t);
+                float r, g, b;
+                switch (_vdbRenderMode) {
+                    case 1: // Greyscale
+                        r = g = b = t;
+                        break;
+                    case 3: // Cool — blue → cyan → white
+                        r = std::max(0.f, std::min((t-.5f)*2.f, 1.f));
+                        g = std::max(0.f, std::min((t-.25f)*2.f, 1.f));
+                        b = std::min(t*2.f, 1.f);
+                        break;
+                    case 4: // Blackbody — red → orange → yellow
+                        r = std::min(t*2.f, 1.f);
+                        g = std::max(0.f, std::min((t-.3f)*2.f, 1.f));
+                        b = std::max(0.f, std::min((t-.7f)*3.f, 1.f));
+                        break;
+                    default: // Lit (0), Heat (2), Explosion (5) — heat ramp
+                        r = std::min(t*3.f, 1.f);
+                        g = std::max(0.f, std::min((t-.33f)*3.f, 1.f));
+                        b = std::max(0.f, std::min((t-.66f)*3.f, 1.f));
+                        break;
+                }
+                glColor4f(r, g, b, .15f+.85f*t);
                 glVertex3f(pt.x, pt.y, pt.z);
             }
             glEnd(); glDisable(GL_BLEND);
@@ -3148,6 +3257,7 @@ void SpectralRenderIop::_applyVolumeShading(std::shared_ptr<pxr::SpectralVolume>
         vol->emissionIntensity = float(mat->emissionIntensity);
         vol->tempMin = float(mat->tempMin);
         vol->tempMax = float(mat->tempMax);
+        vol->flameIntensity = float(mat->flameIntensity);
         vol->stepSize = float(mat->stepSize);
         vol->gForward = float(mat->gForward);
         vol->gBackward = float(mat->gBackward);
@@ -3169,6 +3279,7 @@ void SpectralRenderIop::_applyVolumeShading(std::shared_ptr<pxr::SpectralVolume>
         vol->emissionIntensity = float(_vdbEmissionIntensity);
         vol->tempMin = float(_vdbTempMin);
         vol->tempMax = float(_vdbTempMax);
+        vol->flameIntensity = float(_vdbFlameIntensity);
         vol->stepSize = float(_vdbStepSize);
         vol->gForward = float(_vdbGForward);
         vol->gBackward = float(_vdbGBackward);
@@ -3195,6 +3306,9 @@ void SpectralRenderIop::_applyVolumeShading(std::shared_ptr<pxr::SpectralVolume>
     vol->intensity = float(_vdbIntensity);
     vol->envIntensity = float(_vdbEnvIntensity);
     vol->envDiffuse = float(_vdbEnvDiffuse);
+    vol->phaseMode = _vdbPhaseMode;
+    vol->mieDropletD = float(_vdbMieDropletD);
+    vol->spectralVolumes = _vdbSpectralVolumes;
 }
 
 // ---------------------------------------------------------------------------

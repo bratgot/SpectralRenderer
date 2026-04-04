@@ -173,8 +173,12 @@ private:
     double _vdbGBackward = -0.25;
     double _vdbLobeMix = 0.70;
     double _vdbPowder = 2.0;
+    double _vdbGradientMix = 0.0;
     bool   _vdbJitter = true;
     float  _vdbScatterColor[3] = {1.f, 1.f, 1.f};
+    int    _vdbPhaseMode = 0;        // 0=Dual-lobe HG, 1=Approximate Mie
+    double _vdbMieDropletD = 2.0;    // microns
+    bool   _vdbSpectralVolumes = false; // true=spectral (slow), false=RGB (fast)
 
     // Shadow + quality
     int    _vdbShadowSteps = 8;

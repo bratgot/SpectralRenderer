@@ -30,6 +30,7 @@ struct SpectralVolume {
     float emissionIntensity = 2.f;
     float tempMin         = 500.f;
     float tempMax         = 6500.f;
+    float flameIntensity  = 5.f;
     float stepSize        = 0.f;       // 0 = auto
     float shadowStepMult  = 2.f;       // shadow steps are coarser
     float powderStrength  = 2.f;
@@ -39,6 +40,13 @@ struct SpectralVolume {
     float gForward  = 0.65f;
     float gBackward = -0.25f;
     float lobeMix   = 0.70f;
+
+    // Phase function mode: 0=Dual-lobe HG, 1=Approximate Mie
+    int   phaseMode      = 0;
+    float mieDropletD    = 2.0f;     // microns
+
+    // Rendering
+    bool  spectralVolumes = false;   // true=spectral path, false=direct RGB
 
     // Scatter colour
     GfVec3f scatterColor = GfVec3f(1.f);
@@ -99,6 +107,24 @@ struct SpectralVolume {
         int iy = std::max(0, std::min(int(v * resY), resY - 1));
         int iz = std::max(0, std::min(int(w * resZ), resZ - 1));
         return temperature[iz * resY * resX + iy * resX + ix];
+    }
+
+    // Sample flame at normalised coordinates
+    float SampleFlame(float u, float v, float w) const {
+        if (flame.empty()) return 0.f;
+        int ix = std::max(0, std::min(int(u * resX), resX - 1));
+        int iy = std::max(0, std::min(int(v * resY), resY - 1));
+        int iz = std::max(0, std::min(int(w * resZ), resZ - 1));
+        return flame[iz * resY * resX + iy * resX + ix];
+    }
+
+    // Sample colour at normalised coordinates
+    GfVec3f SampleColor(float u, float v, float w) const {
+        if (color.empty()) return GfVec3f(1.f);
+        int ix = std::max(0, std::min(int(u * resX), resX - 1));
+        int iy = std::max(0, std::min(int(v * resY), resY - 1));
+        int iz = std::max(0, std::min(int(w * resZ), resZ - 1));
+        return color[iz * resY * resX + iy * resX + ix];
     }
 
     // World position to normalised [0,1] coordinates

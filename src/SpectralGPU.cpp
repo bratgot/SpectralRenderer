@@ -584,6 +584,7 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     launchParams.hasVolume = 0;
     launchParams.volumeDensity = nullptr;
     launchParams.volumeTemperature = nullptr;
+    launchParams.volumeFlame = nullptr;
     if (volume && volume->IsValid()) {
         launchParams.hasVolume = 1;
         launchParams.volResX = volume->resX;
@@ -624,6 +625,35 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
                                   tempBytes, cudaMemcpyHostToDevice));
             launchParams.volumeTemperature = reinterpret_cast<float*>(_d_volumeTemp);
         }
+
+        // Flame grid upload
+        launchParams.volumeFlame = nullptr;
+        if (!volume->flame.empty()) {
+            size_t flameBytes = volume->flame.size() * sizeof(float);
+            static CUdeviceptr _d_volumeFlame = 0;
+            if (_d_volumeFlame) cudaFree(reinterpret_cast<void*>(_d_volumeFlame));
+            _d_volumeFlame = 0;
+            CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_volumeFlame), flameBytes));
+            CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_volumeFlame), volume->flame.data(),
+                                  flameBytes, cudaMemcpyHostToDevice));
+            launchParams.volumeFlame = reinterpret_cast<float*>(_d_volumeFlame);
+        }
+
+        // Phase 12 params
+        launchParams.volGBackward = volume->gBackward;
+        launchParams.volLobeMix = volume->lobeMix;
+        launchParams.volShadowSteps = volume->shadowSteps;
+        launchParams.volShadowDensity = volume->shadowDensity;
+        launchParams.volQuality = volume->quality;
+        launchParams.volAdaptiveStep = volume->adaptiveStep ? 1 : 0;
+        launchParams.volRenderMode = volume->renderMode;
+        launchParams.volIntensity = volume->intensity;
+        launchParams.volFlameIntensity = volume->flameIntensity;
+        launchParams.volNoiseEnable = volume->noiseEnable ? 1 : 0;
+        launchParams.volNoiseScale = volume->noiseScale;
+        launchParams.volNoiseStrength = volume->noiseStrength;
+        launchParams.volNoiseOctaves = volume->noiseOctaves;
+        launchParams.volNoiseRoughness = volume->noiseRoughness;
 
         fprintf(stderr, "SpectralGPU: volume uploaded %dx%dx%d (%.1f MB)\n",
                 volume->resX, volume->resY, volume->resZ, densBytes / (1024.f * 1024.f));
