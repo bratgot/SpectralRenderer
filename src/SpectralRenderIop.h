@@ -192,7 +192,7 @@ private:
     // VDB viewport preview
     bool   _vdbShowBbox = true;
     bool   _vdbShowPoints = true;
-    bool   _vdbFastScrub = true;  // metadata-only during scrub for instant timeline
+    bool   _vdbFastScrub = false;  // metadata-only during scrub
     double _vdbPointDensity = 0.3;
     double _vdbPointSize = 3.0;
 
@@ -207,7 +207,7 @@ private:
     int    _vdbLastLoadedFrame = -999;  // cached to avoid reload
 
     // LRU frame cache — instant scrub-back for recently visited frames
-    bool   _vdbCacheEnabled = true;
+    bool   _vdbCacheEnabled = false;
     int    _vdbCacheMax = 8;
     struct VDBCacheEntry {
         std::shared_ptr<pxr::SpectralVolume> volume;

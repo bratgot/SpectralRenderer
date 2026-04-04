@@ -62,6 +62,7 @@
 #include <cmath>
 #include <cstdio>
 #include <algorithm>
+#include <cstring>
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
@@ -2903,7 +2904,9 @@ void SpectralRenderIop::_LoadVDB()
     // Path 2: Vol input (input 3) — SpectralVDBRead
     if (inputs() > 3 && input(3)) {
         input(3)->validate(true);
-        SpectralVDBRead* vdbRead = dynamic_cast<SpectralVDBRead*>(input(3));
+        SpectralVDBRead* vdbRead = nullptr;
+        if (strcmp(input(3)->Class(), "SpectralVDBRead") == 0)
+            vdbRead = static_cast<SpectralVDBRead*>(static_cast<Op*>(input(3)));
         if (vdbRead) {
             int renderFrame = int(outputContext().frame());
             auto vol = vdbRead->GetVolumeAtFrame(renderFrame);
@@ -2962,9 +2965,12 @@ void SpectralRenderIop::_LoadVDBForRender()
 void SpectralRenderIop::_applyVolumeShading(std::shared_ptr<pxr::SpectralVolume>& vol)
 {
     // Check VolMat input (input 4) for SpectralVolumeMaterial
+    // Use Class() string match — dynamic_cast fails across MSVC dllexport TUs
     SpectralVolumeMaterial* mat = nullptr;
     if (inputs() > 4 && input(4)) {
-        mat = dynamic_cast<SpectralVolumeMaterial*>(input(4));
+        if (strcmp(input(4)->Class(), "SpectralVolumeMaterial") == 0) {
+            mat = static_cast<SpectralVolumeMaterial*>(static_cast<Op*>(input(4)));
+        }
     }
 
     if (mat) {
