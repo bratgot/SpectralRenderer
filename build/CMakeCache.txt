@@ -216,10 +216,19 @@ LIB_EMBREE:FILEPATH=C:/dev/embree-4/lib/embree4.lib
 LIB_FDKBASE:FILEPATH=C:/Program Files/Nuke17.0v1/FdkBase.2.1.lib
 
 //Path to a library.
+LIB_ILMTHREAD:FILEPATH=C:/vcpkg/installed/x64-windows/lib/IlmThread-3_4.lib
+
+//Path to a library.
 LIB_LZ4:FILEPATH=C:/vcpkg/installed/x64-windows/lib/lz4.lib
 
 //Path to a library.
 LIB_NDK:FILEPATH=C:/Program Files/Nuke17.0v1/Ndk.lib
+
+//Path to a library.
+LIB_OPENEXR:FILEPATH=C:/vcpkg/installed/x64-windows/lib/OpenEXR-3_4.lib
+
+//Path to a library.
+LIB_OPENEXR_CORE:FILEPATH=C:/vcpkg/installed/x64-windows/lib/OpenEXRCore-3_4.lib
 
 //Path to a library.
 LIB_OPENVDB:FILEPATH=C:/vcpkg/installed/x64-windows/lib/openvdb.lib
@@ -256,6 +265,9 @@ OSD_ROOT:PATH=C:/dev/opensubdiv-3.6.0
 
 //The directory containing a CMake configuration file for OpenVDB.
 OpenVDB_DIR:PATH=OpenVDB_DIR-NOTFOUND
+
+//No help, variable specified on the command line.
+SPECTRAL_SKIP_OPENEXR:UNINITIALIZED=1
 
 //vcpkg installed prefix
 VCPKG_INSTALLED:PATH=C:/vcpkg/installed/x64-windows

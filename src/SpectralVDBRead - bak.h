@@ -12,6 +12,7 @@
 
 #include <DDImage/Knobs.h>
 #include <DDImage/SourceGeomOp.h>
+
 #include <usg/geom/GeomTokens.h>
 
 #include <memory>
@@ -21,17 +22,12 @@
 class SpectralVDBRead : public DD::Image::SourceGeomOp
 {
 public:
-    static constexpr const char* kAttrIsVolume    = "spectralIsVolume";
-    static constexpr const char* kAttrVdbFilePath = "spectralVdbFilePath";
-
     class Engine : public SourceEngine
     {
     public:
         Engine(DD::Image::GeomOpNode* parent) : SourceEngine(parent) {}
         void createPrims(usg::GeomSceneContext& context,
                          const usg::Path& path) override;
-    private:
-        static std::string _resolveFrame(const std::string& pattern, int frame);
     };
 
     SpectralVDBRead(Node* node);
@@ -47,7 +43,6 @@ public:
     std::shared_ptr<pxr::SpectralVolume> GetVolume();
     std::shared_ptr<pxr::SpectralVolume> GetVolumeAtFrame(int frame);
     bool HasVolume();
-    std::string ResolvePathAtFrame(int frame) const { return _resolveFramePath(frame); }
 
     static DD::Image::Op* Build(Node* node) { return new SpectralVDBRead(node); }
     static const DD::Image::GeomOp::Description description;
@@ -59,12 +54,10 @@ private:
     void _LoadVDBAtFrame(int frame);
     void _DiscoverGrids();
     void _DetectFrameRange();
-    void _UpdateVDBInfo();
     std::string _resolveFramePath(int frame) const;
     int  _clampedFrame() const;
-    int  _requestFrame = -999;
+    int  _requestFrame = -999; // set by GetVolumeAtFrame
 
-    // File
     const char* _filePath = "";
     bool   _autoSequence = false;
     int    _frameOffset = 0;
@@ -74,33 +67,23 @@ private:
     int    _afterMode  = 0;
     const char* _origFile = "";
 
-    // Grids
     int _densityGridIdx = 1;
     int _tempGridIdx = 0;
     int _flameGridIdx = 0;
     int _velGridIdx = 0;
     int _colorGridIdx = 0;
     static const char* const kGridMenu[];
+
     const char* _densityOverride = "";
     const char* _tempOverride = "";
     const char* _flameOverride = "";
     const char* _velOverride = "";
     const char* _colorOverride = "";
+
     const char* _GetDensityName() const;
     const char* _GetTempName() const;
 
-    // Volume data
     std::shared_ptr<pxr::SpectralVolume> _volume;
     std::string _loadedPath;
     int _lastViewportFrame = -999;
-
-    // Preview (Display tab)
-    bool  _showBbox    = true;
-    float _bboxColor[3] = {0.0f, 0.8f, 0.2f};
-    int   _previewRes  = 32;
-    int   _maxPoints   = 5000;
-    float _pointSize   = 2.0f;
-    float _densityThreshold = 0.01f;
-    bool  _lit         = false;
-    const char* _vdbInfo = "";
 };

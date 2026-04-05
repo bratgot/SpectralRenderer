@@ -140,6 +140,9 @@ private:
     double _longitude = -0.12;
     double _timeOfDay = 12.0;     // 24h clock
     int    _dayOfYear = 172;      // June 21 (summer solstice)
+    const char* _hdriFile = "";   // HDRI environment map file
+    double _hdriIntensity = 1.0;
+    double _hdriRotate = 0.0;
 
     int    _studioPreset = 0;      // 0=off, 1=portrait, 2=product, 3=dramatic
     double _studioMix = 1.0;
@@ -262,7 +265,7 @@ private:
     VDBCacheEntry* _VDBCacheGet(const std::string& path);
 
     int   _tileSize   = 64;
-    int   _deviceMode = 0;         // 0=cpu, 1=gpu, 2=auto
+    int   _deviceMode = 2;         // 0=cpu, 1=gpu, 2=auto
     int   _colorSpace = 0;         // 0=sRGB, 1=ACEScg, 2=ACES 2065-1
 
     // LPE-style AOV decomposition

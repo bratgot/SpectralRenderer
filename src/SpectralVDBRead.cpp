@@ -3,7 +3,11 @@
 
 #include "SpectralVDBRead.h"
 #include "usg/geom/MeshPrim.h"
+#include "usg/geom/PointsPrim.h"
 #include "ndk/geo/utils/MeshUtils.h"
+
+#include <algorithm>
+#include <cmath>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -27,7 +31,22 @@ const char* const SpectralVDBRead::kGridMenu[] = {
 const GeomOp::Description SpectralVDBRead::description(CLASS, SpectralVDBRead::Build);
 
 // ---------------------------------------------------------------------------
-// Engine
+std::string SpectralVDBRead::Engine::_resolveFrame(const std::string& pattern, int frame)
+{
+    std::string p = pattern;
+    size_t h = p.find('#');
+    if (h != std::string::npos) {
+        size_t he = h;
+        while (he < p.size() && p[he] == '#') ++he;
+        char buf[64];
+        std::snprintf(buf, 64, "%0*d", int(he - h), frame);
+        p.replace(h, he - h, buf);
+    }
+    return p;
+}
+
+// ---------------------------------------------------------------------------
+// Engine — createPrims
 // ---------------------------------------------------------------------------
 void SpectralVDBRead::Engine::createPrims(GeomSceneContext& context,
                                            const Path& path)
@@ -36,33 +55,269 @@ void SpectralVDBRead::Engine::createPrims(GeomSceneContext& context,
     LayerRef defineLayer = editLayer();
     if (!defineLayer) return;
 
-    ndk::MeshSample sample;
-    MeshPrim mesh = MeshPrim::defineInLayer(defineLayer, path);
-    _transformSubEngine.apply(context, mesh);
+    TimeValue firstTime = fdk::defaultTimeValue();
+    for (const TimeValue& t : context.processTimes()) { firstTime = t; break; }
 
-    bool buildTopology = context.doGeometryInitialization();
+    // --- Read knobs (constant across time) ---
+    std::string filePath    = knob("file").get<std::string>(firstTime);
+    std::string densityName = knob("density_override").get<std::string>(firstTime);
+    bool autoSeq     = knob("auto_sequence").get<bool>(firstTime);
+    int  firstFrame  = knob("first_frame").get<int>(firstTime);
+    int  lastFrame   = knob("last_frame").get<int>(firstTime);
+    int  frameOffset = knob("frame_offset").get<int>(firstTime);
+    bool showBbox    = knob("show_bbox").get<bool>(firstTime);
+    int  previewRes  = knob("preview_res").get<int>(firstTime);
+    int  maxPoints   = knob("max_points").get<int>(firstTime);
+    float pointSize  = knob("point_size").get<float>(firstTime);
+    float threshold  = knob("density_threshold").get<float>(firstTime);
+    bool  lit        = knob("lit").get<bool>(firstTime);
+
+    previewRes = std::max(4, std::min(previewRes, 256));
+    maxPoints  = std::max(10, maxPoints);
+    pointSize  = std::max(0.01f, pointSize);
+    float densityCap = 50.0f; // cull outlier points with extreme density
+
+    // Define PointsPrim for density cloud
+    PointsPrim prim = PointsPrim::defineInLayer(defineLayer, path);
+    _transformSubEngine.apply(context, prim);
+
+    // Define MeshPrim for bbox wireframe (visible in wireframe display mode)
+    // Bbox wireframe mesh (separate prim, visible in wireframe mode)
+    Path bboxPath("/volume_bbox");
+    MeshPrim bboxMesh = MeshPrim::defineInLayer(defineLayer, bboxPath);
+    _transformSubEngine.apply(context, bboxMesh);
+    bool bboxTopologyDone = false;
+
+    // ---------------------------------------------------------------
+    // Process each time sample
+    // ---------------------------------------------------------------
     for (const TimeValue& time : context.processTimes()) {
-        sample.points = {
-            Vec3f(-0.5f,-0.5f,-0.5f), Vec3f(0.5f,-0.5f,-0.5f),
-            Vec3f(0.5f,0.5f,-0.5f),   Vec3f(-0.5f,0.5f,-0.5f),
-            Vec3f(-0.5f,-0.5f,0.5f),  Vec3f(0.5f,-0.5f,0.5f),
-            Vec3f(0.5f,0.5f,0.5f),    Vec3f(-0.5f,0.5f,0.5f),
-        };
-        if (buildTopology) {
-            sample.faceVertexCounts.clear();
-            sample.faceVertexIndices.clear();
-            sample.all_quads = true; sample.all_tris = false;
-            sample.addQuad(0,3,2,1); sample.addQuad(4,5,6,7);
-            sample.addQuad(0,1,5,4); sample.addQuad(2,3,7,6);
-            sample.addQuad(0,4,7,3); sample.addQuad(1,2,6,5);
-            sample.facevert_normals.resize(1, Vec3f(0,1,0));
-            sample.setMeshPrimFaceTopology(mesh);
-            buildTopology = false;
+
+        // --- Resolve file path at THIS time ---
+        std::string resolvedPath = filePath;
+        if (autoSeq && filePath.find('#') != std::string::npos) {
+            int frame = int(time) + frameOffset;
+            frame = std::max(firstFrame, std::min(frame, lastFrame));
+            resolvedPath = _resolveFrame(filePath, frame);
         }
-        sample.setMeshPrimProperties(mesh, false, true);
-        mesh.setPoints(sample.points, time);
-        mesh.setBoundsAttr(sample.points, time);
-    }
+
+        // --- Load VDB at this frame ---
+        std::vector<Vec3f> samplePos;
+        std::vector<Vec3f> sampleCol;
+        std::vector<Vec3f> sampleNrm;
+        pxr::GfVec3f bboxMin(-0.5f), bboxMax(0.5f);
+        bool hasVDB = false;
+
+#ifdef SPECTRAL_HAS_VDB
+        if (!resolvedPath.empty()) {
+            auto vol = pxr::SpectralVDBLoader::Load(
+                resolvedPath.c_str(),
+                densityName.empty() ? nullptr : densityName.c_str(),
+                nullptr, previewRes);
+
+            if (vol && vol->IsValid()) {
+                hasVDB = true;
+                bboxMin = vol->bboxMin;
+                bboxMax = vol->bboxMax;
+                pxr::GfVec3f sz = bboxMax - bboxMin;
+
+                // Gradient step sizes (in normalised coords)
+                float epsX = 1.0f / float(std::max(1, vol->resX));
+                float epsY = 1.0f / float(std::max(1, vol->resY));
+                float epsZ = 1.0f / float(std::max(1, vol->resZ));
+
+                // Light directions
+                float keyX=0.4f, keyY=0.8f, keyZ=0.3f;
+                float keyLen = std::sqrt(keyX*keyX + keyY*keyY + keyZ*keyZ);
+                keyX/=keyLen; keyY/=keyLen; keyZ/=keyLen;
+
+                bool hasTemp  = !vol->temperature.empty();
+                bool hasFlame = !vol->flame.empty();
+
+                int count = 0, total = vol->resX * vol->resY * vol->resZ;
+                int stride = 1;
+                if (total > maxPoints * 2)
+                    stride = std::max(1, (int)std::cbrt((double)total / maxPoints));
+
+                for (int iz = 0; iz < vol->resZ; iz += stride) {
+                    for (int iy = 0; iy < vol->resY; iy += stride) {
+                        for (int ix = 0; ix < vol->resX; ix += stride) {
+                            if (count >= maxPoints) goto done;
+                            float u = (float(ix) + 0.5f) / float(vol->resX);
+                            float v = (float(iy) + 0.5f) / float(vol->resY);
+                            float w = (float(iz) + 0.5f) / float(vol->resZ);
+                            float d = vol->SampleDensity(u, v, w);
+
+                            if (d > threshold && d < densityCap) {
+                                samplePos.push_back(Vec3f(
+                                    bboxMin[0]+u*sz[0],
+                                    bboxMin[1]+v*sz[1],
+                                    bboxMin[2]+w*sz[2]));
+
+                                // --- Gradient normal from density ---
+                                float gx = vol->SampleDensity(std::min(u+epsX,1.f),v,w)
+                                         - vol->SampleDensity(std::max(u-epsX,0.f),v,w);
+                                float gy = vol->SampleDensity(u,std::min(v+epsY,1.f),w)
+                                         - vol->SampleDensity(u,std::max(v-epsY,0.f),w);
+                                float gz = vol->SampleDensity(u,v,std::min(w+epsZ,1.f))
+                                         - vol->SampleDensity(u,v,std::max(w-epsZ,0.f));
+                                float gl = std::sqrt(gx*gx + gy*gy + gz*gz);
+                                float nx, ny, nz;
+                                if (gl > 1e-6f) {
+                                    nx = -gx/gl; ny = -gy/gl; nz = -gz/gl;
+                                } else {
+                                    nx = 0; ny = 1; nz = 0;
+                                }
+
+                                // --- Key light (warm, top-right-front) ---
+                                float NdotL = nx*keyX + ny*keyY + nz*keyZ;
+                                float wrapD = (NdotL + 0.3f) / 1.3f;
+                                wrapD = std::max(0.0f, wrapD);
+
+                                // --- Fill light (cool, opposite) ---
+                                float fillD = std::max(0.0f, -(NdotL));
+                                fillD *= 0.15f;
+
+                                // --- Density depth ---
+                                float densVis = std::min(d * 3.0f, 1.0f);
+                                densVis = std::sqrt(densVis); // gamma for softer falloff
+
+                                // --- Base shade ---
+                                float ambient = 0.12f;
+                                float shade = ambient + 0.65f * wrapD + fillD;
+                                shade *= densVis;
+                                shade = std::min(shade, 1.0f);
+
+                                // --- Color by field type ---
+                                float cr, cg, cb;
+
+                                if (hasFlame) {
+                                    float fl = vol->SampleFlame(u, v, w);
+                                    if (fl > 0.01f) {
+                                        // Fire ramp: black → dark red → orange → yellow → white
+                                        float t = std::min(fl * 3.0f, 1.0f);
+                                        cr = std::min(1.0f, t * 3.0f);
+                                        cg = std::min(1.0f, std::max(0.0f, (t - 0.3f) * 2.5f));
+                                        cb = std::min(1.0f, std::max(0.0f, (t - 0.7f) * 3.3f));
+                                        cr *= shade * 1.5f;
+                                        cg *= shade * 1.2f;
+                                        cb *= shade;
+                                    } else {
+                                        // Smoke (grey with slight blue)
+                                        cr = shade * 0.85f;
+                                        cg = shade * 0.88f;
+                                        cb = shade * 0.95f;
+                                    }
+                                }
+                                else if (hasTemp) {
+                                    float temp = vol->SampleTemperature(u, v, w);
+                                    float t = (temp - 400.0f) / 5000.0f;
+                                    t = std::max(0.0f, std::min(1.0f, t));
+                                    if (t > 0.01f) {
+                                        // Blackbody ramp
+                                        cr = std::min(1.0f, t * 3.0f) * shade * 1.4f;
+                                        cg = std::min(1.0f, std::max(0.0f, (t-0.25f) * 2.8f)) * shade * 1.1f;
+                                        cb = std::min(1.0f, std::max(0.0f, (t-0.55f) * 3.0f)) * shade;
+                                    } else {
+                                        cr = shade * 0.85f;
+                                        cg = shade * 0.88f;
+                                        cb = shade * 0.95f;
+                                    }
+                                }
+                                else {
+                                    // Density only — warm key + cool fill
+                                    cr = shade * (0.92f + 0.08f * wrapD);
+                                    cg = shade * (0.90f + 0.05f * wrapD);
+                                    cb = shade * (0.85f + 0.15f * fillD / std::max(0.01f, shade));
+                                }
+
+                                cr = std::max(0.0f, std::min(1.0f, cr));
+                                cg = std::max(0.0f, std::min(1.0f, cg));
+                                cb = std::max(0.0f, std::min(1.0f, cb));
+
+                                sampleCol.push_back(Vec3f(cr, cg, cb));
+                                sampleNrm.push_back(Vec3f(nx, ny, nz));
+                                count++;
+                            }
+                        }
+                    }
+                }
+                done:;
+
+                fprintf(stderr, "SpectralVDBRead: frame=%.0f %zu pts, res=%d%s%s\n",
+                        double(time), samplePos.size(), previewRes,
+                        hasTemp ? " +temp" : "", hasFlame ? " +flame" : "");
+            }
+        }
+#endif
+
+        // --- Bbox wireframe mesh (visible in wireframe display mode) ---
+        if (showBbox && hasVDB) {
+            float x0=bboxMin[0], y0=bboxMin[1], z0=bboxMin[2];
+            float x1=bboxMax[0], y1=bboxMax[1], z1=bboxMax[2];
+            ndk::MeshSample bboxSample;
+            bboxSample.points = {
+                Vec3f(x0,y0,z0), Vec3f(x1,y0,z0),
+                Vec3f(x1,y1,z0), Vec3f(x0,y1,z0),
+                Vec3f(x0,y0,z1), Vec3f(x1,y0,z1),
+                Vec3f(x1,y1,z1), Vec3f(x0,y1,z1),
+            };
+            if (!bboxTopologyDone) {
+                bboxSample.faceVertexCounts.clear();
+                bboxSample.faceVertexIndices.clear();
+                bboxSample.all_quads = true; bboxSample.all_tris = false;
+                bboxSample.addQuad(0,3,2,1); bboxSample.addQuad(4,5,6,7);
+                bboxSample.addQuad(0,1,5,4); bboxSample.addQuad(2,3,7,6);
+                bboxSample.addQuad(0,4,7,3); bboxSample.addQuad(1,2,6,5);
+                bboxSample.facevert_normals.resize(1, Vec3f(0,1,0));
+                bboxSample.setMeshPrimFaceTopology(bboxMesh);
+                bboxTopologyDone = true;
+            }
+            bboxSample.setMeshPrimProperties(bboxMesh, false, true);
+            bboxMesh.setPoints(bboxSample.points, time);
+            bboxMesh.setBoundsAttr(bboxSample.points, time);
+            Vec3fArray bboxCols(8, Vec3f(0.0f, 0.8f, 0.2f));
+            bboxMesh.setDisplayColor(bboxCols, time);
+        }
+
+        // --- Build density point arrays ---
+        size_t nDensity = samplePos.size();
+        size_t nTotal   = std::max(nDensity, size_t(1));
+
+        Vec3fArray pts, cols, nrms;
+        FloatArray wids;
+        pts.resize(nTotal); cols.resize(nTotal); nrms.resize(nTotal); wids.resize(nTotal);
+
+        for (size_t i = 0; i < nDensity; ++i) {
+            pts[i]  = samplePos[i];
+            nrms[i] = sampleNrm[i];
+            wids[i] = pointSize;
+            cols[i] = lit ? Vec3f(0.85f, 0.85f, 0.85f) : sampleCol[i];
+        }
+
+        if (nDensity == 0) {
+            pts[0]  = Vec3f(0, 0, 0);
+            cols[0] = Vec3f(0, 0, 0);
+            nrms[0] = Vec3f(0, 1, 0);
+            wids[0] = 0.001f;
+        }
+
+        // --- Set on prim at this time ---
+        prim.setPoints(pts, time);
+        prim.setBoundsAttr(pts, time);
+        prim.setWidths(wids, time);
+        prim.setDisplayColor(cols, time);
+
+        if (lit) {
+            prim.setNormals(nrms, time);
+        } else {
+            usg::Attribute normAttr = prim.getNormalsAttr();
+            if (normAttr) normAttr.block();
+        }
+
+    } // end processTimes loop
+
+    prim.setCustomData("spectralIsVolume", Value(true));
     assignMaterial(context, {path});
 }
 
@@ -72,15 +327,15 @@ void SpectralVDBRead::Engine::createPrims(GeomSceneContext& context,
 SpectralVDBRead::SpectralVDBRead(Node* node)
     : SourceGeomOp(node, BuildEngine<Engine>())
 {
-    fprintf(stderr, "SpectralVDBRead: SourceGeomOp build %s %s\n", __DATE__, __TIME__);
+    fprintf(stderr, "SpectralVDBRead: build %s %s\n", __DATE__, __TIME__);
 }
 
 const char* SpectralVDBRead::node_help() const
 {
     return "SpectralVDBRead — OpenVDB Volume Reader\n\n"
-           "Reads OpenVDB (.vdb) files for volume rendering.\n\n"
+           "Reads OpenVDB (.vdb) files for volume rendering.\n"
+           "Displays density point cloud in the 3D viewer.\n\n"
            "SpectralVDBRead -> GeoScene -> SpectralRender\n\n"
-           "SpectralRender auto-detects this node in the scene.\n\n"
            "Created by Marten Blumen";
 }
 
@@ -98,23 +353,30 @@ const char* SpectralVDBRead::_GetTempName() const
     return nullptr;
 }
 
-std::shared_ptr<pxr::SpectralVolume> SpectralVDBRead::GetVolume()
-{
-    _LoadVDB();
-    return _volume;
-}
+std::shared_ptr<pxr::SpectralVolume> SpectralVDBRead::GetVolume()             { _LoadVDB(); return _volume; }
+std::shared_ptr<pxr::SpectralVolume> SpectralVDBRead::GetVolumeAtFrame(int f) { _requestFrame=f; _LoadVDBAtFrame(f); return _volume; }
+bool SpectralVDBRead::HasVolume()                                              { _LoadVDB(); return _volume && _volume->IsValid(); }
 
-std::shared_ptr<pxr::SpectralVolume> SpectralVDBRead::GetVolumeAtFrame(int frame)
+// ---------------------------------------------------------------------------
+void SpectralVDBRead::_UpdateVDBInfo()
 {
-    _requestFrame = frame;
-    _LoadVDBAtFrame(frame);
-    return _volume;
-}
+#ifdef SPECTRAL_HAS_VDB
+    if (!_filePath || strlen(_filePath) == 0) {
+        if (Knob* k = knob("vdb_info")) k->set_text("");
+        return;
+    }
+    int frame = _clampedFrame();
+    if (frame < 0) frame = _firstFrame;
+    std::string resolved = _autoSequence ? _resolveFramePath(frame) : std::string(_filePath);
+    if (resolved.empty()) return;
 
-bool SpectralVDBRead::HasVolume()
-{
-    _LoadVDB();
-    return _volume && _volume->IsValid();
+    auto meta = pxr::SpectralVDBLoader::LoadMetadataOnly(resolved.c_str(), _GetDensityName());
+    if (meta && meta->HasBbox()) {
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "Native: %d x %d x %d", meta->resX, meta->resY, meta->resZ);
+        if (Knob* k = knob("vdb_info")) k->set_text(buf);
+    }
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -125,64 +387,44 @@ void SpectralVDBRead::knobs(Knob_Callback f)
     SourceGeomOp::knobs(f);
 
     Tab_knob(f, 0, "VDB");
-
-    // Title
     Text_knob(f, "<b><font size='3'>SpectralVDBRead</font></b>");
     Newline(f);
     Text_knob(f, "<font color='#888' size='-1'>OpenVDB volume reader for SpectralRender</font>");
 
-    // --- File ---
     Divider(f, "File");
     File_knob(f, &_filePath, "file", "file");
-    Tooltip(f, "OpenVDB volume file (.vdb).\n"
-               "Supports #### frame padding for sequences.");
+    Tooltip(f, "OpenVDB volume file (.vdb).\nSupports #### frame padding.");
     KnobModifiesAttribValues(f);
 
     Bool_knob(f, &_autoSequence, "auto_sequence", "auto sequence");
     ClearFlags(f, Knob::STARTLINE);
-    Tooltip(f, "Treat as frame sequence.\n"
-               "Replaces frame numbers with ####.\n"
-               "Auto-detects first/last frame on disk.");
     Button(f, "reload", "Reload");
     ClearFlags(f, Knob::STARTLINE);
-    Tooltip(f, "Force reload from disk.");
 
-    // --- Frame Range ---
     Divider(f, "Frame Range");
     Int_knob(f, &_firstFrame, "first_frame", "first"); SetRange(f, 0, 10000);
-    Tooltip(f, "First frame of VDB sequence.");
     static const char* const m1[] = {"hold","black","bounce","loop",nullptr};
     Enumeration_knob(f, &_beforeMode, m1, "before_mode", "");
     ClearFlags(f, Knob::STARTLINE);
-    Tooltip(f, "Behaviour before first frame.");
 
     Int_knob(f, &_lastFrame, "last_frame", "last"); SetRange(f, 0, 10000);
-    Tooltip(f, "Last frame of VDB sequence.");
     static const char* const m2[] = {"hold","black","bounce","loop",nullptr};
     Enumeration_knob(f, &_afterMode, m2, "after_mode", "");
     ClearFlags(f, Knob::STARTLINE);
-    Tooltip(f, "Behaviour after last frame.");
 
     Int_knob(f, &_frameOffset, "frame_offset", "offset"); SetRange(f, -100, 100);
-    Tooltip(f, "Offset the frame number.\nUseful for retiming simulations.");
     Button(f, "detect_range", "Detect Range");
     ClearFlags(f, Knob::STARTLINE);
-    Tooltip(f, "Scan directory for matching VDB files\n"
-               "and set first/last frame automatically.");
 
     Obsolete_knob(f, "orig_file", nullptr);
     String_knob(f, &_origFile, "orig_file", ""); SetFlags(f, Knob::INVISIBLE);
 
-    // --- Grids ---
     Divider(f, "Grids");
     Button(f, "discover_grids", "Discover Grids");
-    Tooltip(f, "Scan VDB file and auto-detect grid names.\n"
-               "Populates override fields below.");
 
     Enumeration_knob(f, &_densityGridIdx, kGridMenu, "density_grid", "density");
     String_knob(f, &_densityOverride, "density_override", "");
     ClearFlags(f, Knob::STARTLINE);
-    Tooltip(f, "Override: type a custom grid name.\nTakes priority over pulldown.");
 
     Enumeration_knob(f, &_tempGridIdx, kGridMenu, "temp_grid", "temperature");
     String_knob(f, &_tempOverride, "temp_override", "");
@@ -200,17 +442,53 @@ void SpectralVDBRead::knobs(Knob_Callback f)
     String_knob(f, &_colorOverride, "color_override", "");
     ClearFlags(f, Knob::STARTLINE);
 
-    // --- Footer ---
     Divider(f, "");
-    Text_knob(f, "<font size='1' color='#555'>Created by Marten Blumen · github.com/bratgot/SpectralRenderer</font>");
+    Text_knob(f, "<font size='1' color='#555'>Created by Marten Blumen</font>");
 
-    // --- Display tab ---
+    // ===================== DISPLAY TAB =====================
     Tab_knob(f, 0, "Display");
     SourceGeomOp::addDisplayOptionsKnobs(f);
 
+    Divider(f, "Preview");
+
+    Int_knob(f, &_previewRes, "preview_res", "resolution");
+    SetRange(f, 8, 128);
+    KnobModifiesAttribValues(f);
+    Tooltip(f, "Grid resolution for preview.\n8-32 for scrubbing, 64+ for detail.");
+
+    String_knob(f, &_vdbInfo, "vdb_info", "");
+    ClearFlags(f, Knob::STARTLINE);
+    SetFlags(f, Knob::DISABLED | Knob::NO_ANIMATION);
+
+    Int_knob(f, &_maxPoints, "max_points", "max points");
+    SetRange(f, 100, 50000);
+    SetFlags(f, Knob::SLIDER);
+    KnobModifiesAttribValues(f);
+
+    Float_knob(f, &_pointSize, "point_size", "point size");
+    SetRange(f, 0.1, 10.0);
+    KnobModifiesAttribValues(f);
+
+    Float_knob(f, &_densityThreshold, "density_threshold", "threshold");
+    SetRange(f, 0.001, 1.0);
+    KnobModifiesAttribValues(f);
+
+    Bool_knob(f, &_lit, "lit", "lit");
+    KnobModifiesAttribValues(f);
+    Tooltip(f, "Use viewport lights for shading.\n"
+               "Off: baked gradient lighting (always visible).\n"
+               "On: neutral color + normals, lit by scene lights.");
+
+    Bool_knob(f, &_showBbox, "show_bbox", "bounding box");
+    ClearFlags(f, Knob::STARTLINE);
+    KnobModifiesAttribValues(f);
+
+    Color_knob(f, _bboxColor, "bbox_color", "bbox color");
+    KnobModifiesAttribValues(f);
+
     Divider(f, "");
     Text_knob(f, "<font size='1' color='#555'>"
-                 "SpectralVDBRead \xc2\xb7 SpectralRenderer for Nuke 17 \xc2\xb7 Created by Marten Blumen"
+                 "SpectralVDBRead \xc2\xb7 VDBReadFix \xc2\xb7 Created by Marten Blumen"
                  "</font>");
 }
 
@@ -220,18 +498,14 @@ void SpectralVDBRead::knobs(Knob_Callback f)
 int SpectralVDBRead::knob_changed(Knob* k)
 {
     if (k->is("discover_grids")) { _DiscoverGrids(); return 1; }
-    if (k->is("detect_range")) { _DetectFrameRange(); return 1; }
+    if (k->is("detect_range"))   { _DetectFrameRange(); return 1; }
     if (k->is("reload")) {
         _loadedPath.clear(); _volume.reset();
-        
-
-        _LoadVDB(); // explicit user action — load now
+        _LoadVDB(); _UpdateVDBInfo();
         return 1;
     }
     if (k->is("file")) {
-        _loadedPath.clear(); 
-
-        // Don't load here — render or viewport will trigger it
+        _loadedPath.clear(); _UpdateVDBInfo();
         return 1;
     }
     if (k->is("auto_sequence")) {
@@ -251,8 +525,7 @@ int SpectralVDBRead::knob_changed(Knob* k)
                     }
                 }
             }
-            // Detect first/last frame from files on disk
-
+            _DetectFrameRange();
         } else {
             const char* orig = _origFile ? _origFile : "";
             if (orig[0]) {
@@ -260,20 +533,22 @@ int SpectralVDBRead::knob_changed(Knob* k)
                 if (Knob* ok = knob("orig_file")) ok->set_text("");
             }
         }
-        _loadedPath.clear();
-        // Don't load here — next render or viewport will pick it up
+        _loadedPath.clear(); _UpdateVDBInfo();
         return 1;
     }
     if (k->is("frame_offset") || k->is("density_grid") ||
         k->is("temp_grid") || k->is("density_override") || k->is("temp_override")) {
-        _loadedPath.clear(); 
+        _loadedPath.clear();
+        return 1;
+    }
+    if (k->is("show_bbox") || k->is("preview_res") || k->is("max_points") ||
+        k->is("point_size") || k->is("density_threshold") || k->is("bbox_color") ||
+        k->is("lit")) {
         return 1;
     }
     return SourceGeomOp::knob_changed(k);
 }
 
-// ---------------------------------------------------------------------------
-// Frame
 // ---------------------------------------------------------------------------
 int SpectralVDBRead::_clampedFrame() const
 {
@@ -284,15 +559,11 @@ int SpectralVDBRead::_clampedFrame() const
     switch (mode) {
         case 0: return (f < _firstFrame) ? _firstFrame : _lastFrame;
         case 1: return -1;
-        case 2: {
-            if (range <= 0) return _firstFrame;
-            int off = std::abs(f - _firstFrame) % (range * 2);
-            return (off <= range) ? _firstFrame + off : _lastFrame - (off - range);
-        }
-        case 3: {
-            int r = range + 1; if (r <= 0) return _firstFrame;
-            return _firstFrame + ((f - _firstFrame) % r + r) % r;
-        }
+        case 2: { if (range<=0) return _firstFrame;
+                  int off=std::abs(f-_firstFrame)%(range*2);
+                  return (off<=range)?_firstFrame+off:_lastFrame-(off-range); }
+        case 3: { int r=range+1; if(r<=0) return _firstFrame;
+                  return _firstFrame+((f-_firstFrame)%r+r)%r; }
         default: return f;
     }
 }
@@ -313,14 +584,11 @@ std::string SpectralVDBRead::_resolveFramePath(int frame) const
 }
 
 // ---------------------------------------------------------------------------
-// Discover — single-line Python via TCL python command
-// ---------------------------------------------------------------------------
 void SpectralVDBRead::_DiscoverGrids()
 {
 #ifdef SPECTRAL_HAS_VDB
     if (!_filePath || strlen(_filePath) == 0) { error("No VDB file."); return; }
-    int frame = _clampedFrame();
-    if (frame < 0) { error("Frame outside range."); return; }
+    int frame = _clampedFrame(); if (frame < 0) { error("Frame outside range."); return; }
     std::string resolved = _autoSequence ? _resolveFramePath(frame) : std::string(_filePath);
     auto grids = pxr::SpectralVDBLoader::DiscoverGrids(resolved.c_str());
     if (grids.empty()) { error("No grids in %s", resolved.c_str()); return; }
@@ -337,206 +605,117 @@ void SpectralVDBRead::_DiscoverGrids()
 
     if (!bestD.empty() && knob("density_override")) knob("density_override")->set_text(bestD.c_str());
     if (!bestT.empty() && knob("temp_override"))    knob("temp_override")->set_text(bestT.c_str());
-    if (!bestF.empty() && knob("flame_override"))   knob("flame_override")->set_text(bestF.c_str());
+    if (!bestF.empty() && knob("flame_override"))    knob("flame_override")->set_text(bestF.c_str());
     if (!bestV.empty() && knob("vel_override"))      knob("vel_override")->set_text(bestV.c_str());
-    if (!bestC.empty() && knob("color_override"))   knob("color_override")->set_text(bestC.c_str());
+    if (!bestC.empty() && knob("color_override"))    knob("color_override")->set_text(bestC.c_str());
 
-    // Build message for popup
-    std::string msg = "Grids found:\\n\\n";
-    for (const auto& g : grids) {
-        msg += g.name + "  (" + g.type + ")";
-        if (g.category != "other" && g.category != "float") msg += "  [" + g.category + "]";
-        msg += "\\n";
-    }
-    msg += "\\n";
-    if (!bestD.empty()) msg += "Density: " + bestD + "\\n";
-    if (!bestT.empty()) msg += "Temperature: " + bestT + "\\n";
-    if (!bestF.empty()) msg += "Flame: " + bestF + "\\n";
-    if (!bestV.empty()) msg += "Velocity: " + bestV + "\\n";
-    if (!bestC.empty()) msg += "Color: " + bestC + "\\n";
-    msg += "\\nOverride fields updated.";
-
-    // Use TCL python command for single-line execution
-    std::string cmd = "python {nuke.message('" + msg + "')}";
-    script_command(cmd.c_str());
-
-    _loadedPath.clear(); 
+    _loadedPath.clear();
+    _UpdateVDBInfo();
 #else
     error("OpenVDB not compiled.");
 #endif
 }
 
 // ---------------------------------------------------------------------------
-// _DetectFrameRange — scan directory for matching VDB sequence files
-// ---------------------------------------------------------------------------
 void SpectralVDBRead::_DetectFrameRange()
 {
-    // Use original file path (before #### substitution) for scanning
     std::string origPath = (_origFile && strlen(_origFile) > 0) ? _origFile : (_filePath ? _filePath : "");
     if (origPath.empty()) return;
-
-    // Normalize slashes
     for (char& c : origPath) if (c == '\\') c = '/';
 
-    // Find where the frame number is in the original filename
-    // e.g. "C:/vdb/explosion.0045.vdb" -> prefix="explosion.", suffix=".vdb"
     size_t dot = origPath.rfind(".vdb");
     if (dot == std::string::npos) dot = origPath.rfind(".VDB");
     if (dot == std::string::npos) return;
 
-    size_t numEnd = dot;
-    size_t numStart = numEnd;
+    size_t numEnd = dot, numStart = numEnd;
     while (numStart > 0 && origPath[numStart-1] >= '0' && origPath[numStart-1] <= '9') --numStart;
     if (numStart >= numEnd) {
-        // No frame number found — try scanning with #### from _filePath
         origPath = _filePath ? _filePath : "";
         for (char& c : origPath) if (c == '\\') c = '/';
         size_t h = origPath.find('#');
         if (h == std::string::npos) return;
-        numStart = h;
-        numEnd = h;
+        numStart = h; numEnd = h;
         while (numEnd < origPath.size() && origPath[numEnd] == '#') ++numEnd;
         dot = origPath.rfind(".vdb");
         if (dot == std::string::npos) dot = origPath.rfind(".VDB");
         if (dot == std::string::npos) return;
     }
 
-    int ndig = int(numEnd - numStart);
-    if (ndig < 1) ndig = 4;
-
-    // Extract directory and filename parts
     std::string dir, filePrefix, fileSuffix;
     size_t lastSlash = origPath.rfind('/');
     if (lastSlash != std::string::npos) {
         dir = origPath.substr(0, lastSlash + 1);
         filePrefix = origPath.substr(lastSlash + 1, numStart - (lastSlash + 1));
-    } else {
-        dir = "";
-        filePrefix = origPath.substr(0, numStart);
-    }
+    } else { filePrefix = origPath.substr(0, numStart); }
     fileSuffix = origPath.substr(numEnd);
 
-    fprintf(stderr, "SpectralVDBRead: scanning '%s' for '%s*%s'\n", dir.c_str(), filePrefix.c_str(), fileSuffix.c_str());
-
-    int minFrame = 999999, maxFrame = -999999;
-    int count = 0;
-
+    int minFrame = 999999, maxFrame = -999999, count = 0;
 #ifdef _WIN32
-    // Convert to backslash for Windows API
     std::string searchDir = dir;
     for (char& c : searchDir) if (c == '/') c = '\\';
-    std::string pattern = searchDir + filePrefix + "*" + fileSuffix;
-
     WIN32_FIND_DATAA fd;
-    HANDLE hFind = FindFirstFileA(pattern.c_str(), &fd);
+    HANDLE hFind = FindFirstFileA((searchDir + filePrefix + "*" + fileSuffix).c_str(), &fd);
     if (hFind != INVALID_HANDLE_VALUE) {
         do {
             std::string name(fd.cFileName);
-            // Extract frame number between prefix and suffix
             if (name.size() > filePrefix.size() + fileSuffix.size()) {
                 std::string numStr = name.substr(filePrefix.size(),
                     name.size() - filePrefix.size() - fileSuffix.size());
-                bool allDigits = !numStr.empty();
-                for (char c : numStr) if (c < '0' || c > '9') { allDigits = false; break; }
-                if (allDigits) {
-                    int frame = std::atoi(numStr.c_str());
-                    if (frame < minFrame) minFrame = frame;
-                    if (frame > maxFrame) maxFrame = frame;
+                bool ok = !numStr.empty();
+                for (char c : numStr) if (c < '0' || c > '9') { ok = false; break; }
+                if (ok) {
+                    int fr = std::atoi(numStr.c_str());
+                    if (fr < minFrame) minFrame = fr;
+                    if (fr > maxFrame) maxFrame = fr;
                     count++;
                 }
             }
         } while (FindNextFileA(hFind, &fd));
         FindClose(hFind);
-    } else {
-        fprintf(stderr, "SpectralVDBRead: FindFirstFile failed for '%s'\n", pattern.c_str());
     }
 #endif
-
     if (count > 0) {
-        _firstFrame = minFrame;
-        _lastFrame = maxFrame;
+        _firstFrame = minFrame; _lastFrame = maxFrame;
         if (knob("first_frame")) knob("first_frame")->set_value(minFrame);
         if (knob("last_frame"))  knob("last_frame")->set_value(maxFrame);
-        fprintf(stderr, "SpectralVDBRead: frame range %d-%d (%d files)\n", minFrame, maxFrame, count);
-        char msg[256];
-        std::snprintf(msg, sizeof(msg), "Frame range: %d - %d\\n%d VDB files found", minFrame, maxFrame, count);
-        script_command((std::string("python {nuke.message('") + msg + "')}").c_str());
-    } else {
-        error("No sequence files found matching pattern.");
-        fprintf(stderr, "SpectralVDBRead: no sequence files found\n");
     }
 }
 
-// ---------------------------------------------------------------------------
-// _LoadVDBAtFrame — load VDB at a specific frame
 // ---------------------------------------------------------------------------
 void SpectralVDBRead::_LoadVDBAtFrame(int frame)
 {
 #ifdef SPECTRAL_HAS_VDB
     if (!_filePath || strlen(_filePath) == 0) { _volume.reset(); return; }
-
-    // Apply frame clamping
     if (frame < _firstFrame || frame > _lastFrame) {
         int mode = (frame < _firstFrame) ? _beforeMode : _afterMode;
         int range = _lastFrame - _firstFrame;
         switch (mode) {
-            case 0: frame = (frame < _firstFrame) ? _firstFrame : _lastFrame; break;
+            case 0: frame = (frame<_firstFrame)?_firstFrame:_lastFrame; break;
             case 1: _volume.reset(); return;
-            case 2: {
-                if (range > 0) {
-                    int off = std::abs(frame - _firstFrame) % (range * 2);
-                    frame = (off <= range) ? _firstFrame + off : _lastFrame - (off - range);
-                } else frame = _firstFrame;
-                break;
-            }
-            case 3: {
-                int r = range + 1;
-                if (r > 0) frame = _firstFrame + ((frame - _firstFrame) % r + r) % r;
-                else frame = _firstFrame;
-                break;
-            }
+            case 2: { if(range>0){int o=std::abs(frame-_firstFrame)%(range*2);
+                      frame=(o<=range)?_firstFrame+o:_lastFrame-(o-range);}
+                      else frame=_firstFrame; break; }
+            case 3: { int r=range+1; if(r>0) frame=_firstFrame+((frame-_firstFrame)%r+r)%r;
+                      else frame=_firstFrame; break; }
         }
     }
-
     std::string resolved = _autoSequence ? _resolveFramePath(frame) : std::string(_filePath);
     if (resolved.empty()) return;
     if (_volume && _volume->IsValid() && _loadedPath == resolved) return;
-
-    fprintf(stderr, "SpectralVDBRead: loading frame %d '%s'\n", frame, resolved.c_str());
     _volume = pxr::SpectralVDBLoader::Load(resolved.c_str(), _GetDensityName(), _GetTempName());
-    if (_volume) {
-        _loadedPath = resolved;
-        
-        fprintf(stderr, "SpectralVDBRead: %dx%dx%d\n", _volume->resX, _volume->resY, _volume->resZ);
-    }
+    if (_volume) _loadedPath = resolved;
 #endif
 }
 
-// ---------------------------------------------------------------------------
-// _LoadVDB — load at current UI frame
-// ---------------------------------------------------------------------------
 void SpectralVDBRead::_LoadVDB()
 {
 #ifdef SPECTRAL_HAS_VDB
     if (!_filePath || strlen(_filePath) == 0) { _volume.reset(); return; }
-    int frame = _clampedFrame();
-    if (frame < 0) { _volume.reset(); return; }
+    int frame = _clampedFrame(); if (frame < 0) { _volume.reset(); return; }
     std::string resolved = _autoSequence ? _resolveFramePath(frame) : std::string(_filePath);
     if (resolved.empty()) return;
     if (_volume && _volume->IsValid() && _loadedPath == resolved) return;
-
-    fprintf(stderr, "SpectralVDBRead: loading '%s'\n", resolved.c_str());
     _volume = pxr::SpectralVDBLoader::Load(resolved.c_str(), _GetDensityName(), _GetTempName());
-    if (_volume) {
-        _loadedPath = resolved;
-        
-        fprintf(stderr, "SpectralVDBRead: %dx%dx%d\n", _volume->resX, _volume->resY, _volume->resZ);
-    }
+    if (_volume) _loadedPath = resolved;
 #endif
 }
-
-// ---------------------------------------------------------------------------
-// Viewport
-// ---------------------------------------------------------------------------
-// Viewport preview lives on SpectralRender (Iop build_handles works there).
-// SourceGeomOp::build_handles does not propagate GL draws in Nuke 17.

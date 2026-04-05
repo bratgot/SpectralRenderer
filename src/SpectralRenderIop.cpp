@@ -460,11 +460,24 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         Text_knob(f,
             "<font color='#777' size='-1'>"
             "HDRI environment maps provide image-based lighting from all directions.<br>"
-            "Picked up from EnvironLight or Dome light connected to the scn input.<br>"
-            "Controls below adjust how the env map interacts with both geometry and volumes."
+            "Load an .hdr or .exr file below, or connect an EnvironLight to scn input."
             "</font>"
         );
         Newline(f);
+        File_knob(f, &_hdriFile, "hdri_file", "HDRI file");
+        Tooltip(f, "Load an HDRI environment map (.hdr, .exr, .tx).\n"
+                   "Creates a dome light that illuminates both geometry and volumes.\n"
+                   "This overrides any EnvironLight connected to the scn input.");
+        Double_knob(f, &_hdriIntensity, "hdri_intensity", "HDRI intensity"); SetRange(f, 0, 20);
+        SetFlags(f, Knob::LOG_SLIDER);
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Brightness multiplier for the HDRI dome light.\n"
+                   "1 = as-authored. 5 = boosted. 10+ = very bright.");
+        Double_knob(f, &_hdriRotate, "hdri_rotate", "HDRI rotate");
+        SetRange(f, 0, 360);
+        Tooltip(f, "Rotate HDRI horizontally in degrees.\n"
+                   "Repositions the sun/sky without re-rendering the map.");
+        Divider(f, "");
         Double_knob(f, &_vdbEnvIntensity, "vdb_env_intensity", "env intensity"); SetRange(f, 0, 10);
         SetFlags(f, Knob::LOG_SLIDER);
         Tooltip(f, "Environment map brightness multiplier.\n"
@@ -1241,12 +1254,22 @@ int SpectralRenderIop::knob_changed(Knob* k)
 
     // Update DAG node label with CPU/GPU indicator
     if (k->is("device_mode") || k->is("showPanel")) {
-        const char* labels[] = {
-            "<center><font size='-2' color='#999'><b>cpu</b>&nbsp;&nbsp;gpu</font></center>",
-            "<center><font size='-2' color='#999'>cpu&nbsp;&nbsp;<b>gpu</b></font></center>",
-            "<center><font size='-2' color='#999'>cpu&nbsp;&nbsp;<b>auto</b></font></center>"
-        };
+        // DAG node appearance — colored tile + label showing active device
         int idx = std::max(0, std::min(_deviceMode, 2));
+
+        // Tile color: CPU=blue tint, GPU=green tint, Auto=amber tint
+        unsigned int tileColors[] = { 0x1a3a5aFF, 0x1a4a2aFF, 0x3a3a1aFF };
+        std::string nm(node_name());
+        std::string cmd = "import nuke; n = nuke.toNode('" + nm + "')\n"
+                          "if n: n['tile_color'].setValue(" + std::to_string(tileColors[idx]) + ")";
+        script_command(cmd.c_str(), true, false);
+
+        // Label with colored device name
+        const char* labels[] = {
+            "<center><font color='#4499dd' size='2'><b>CPU</b></font></center>",
+            "<center><font color='#44dd88' size='2'><b>GPU</b></font></center>",
+            "<center><font color='#ddaa44' size='2'><b>AUTO</b></font></center>"
+        };
         if (Knob* lk = knob("label")) lk->set_text(labels[idx]);
         if (k->is("device_mode")) return 1;
     }
@@ -1575,6 +1598,7 @@ int SpectralRenderIop::knob_changed(Knob* k)
     if (k->is("vdb_phase_mode") || k->is("vdb_mie_droplet_d") || k->is("vdb_gradient_mix")) return 1;
     if (k->is("vdb_env_intensity") || k->is("vdb_env_rotate") ||
         k->is("vdb_env_mode") || k->is("vdb_env_virtual_lights") || k->is("vdb_use_restir")) return 1;
+    if (k->is("hdri_file") || k->is("hdri_intensity") || k->is("hdri_rotate")) return 1;
     if (k->is("vdb_noise_enable") || k->is("vdb_noise_scale") || k->is("vdb_noise_strength") ||
         k->is("vdb_noise_octaves") || k->is("vdb_noise_roughness") || k->is("vdb_noise_normalize")) return 1;
 
@@ -2177,26 +2201,102 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                 light.height = h;
             } else if (prim.IsA<UsdLuxDomeLight>()) {
                 light.type = SpectralLight::Type::Dome;
-                // Try to load HDRI texture
+                // Try to load HDRI texture — multiple fallback paths
                 UsdLuxDomeLight dome(prim);
-                SdfAssetPath texPath;
-                if (dome.GetTextureFileAttr().Get(&texPath, timeCode)) {
-                    std::string filePath = texPath.GetResolvedPath();
-                    if (filePath.empty()) filePath = texPath.GetAssetPath();
-                    if (!filePath.empty()) {
-                        int texId = _scene->LoadTexture(filePath);
-                        if (texId >= 0) {
-                            const auto* tex = _scene->GetTexture(texId);
-                            if (tex && tex->IsValid()) {
-                                light.envTexId = texId;
-                                light.envWidth = tex->GetWidth();
-                                light.envHeight = tex->GetHeight();
-                                light.envPixels = tex->_pixels.data();
-                                light.ComputeEnvAverage();
-                                fprintf(stderr, "SpectralRender: HDRI env map '%s' (%dx%d) avg=(%.2f,%.2f,%.2f)\n",
-                                        filePath.c_str(), light.envWidth, light.envHeight,
-                                        light.envAvgColor[0], light.envAvgColor[1], light.envAvgColor[2]);
+                std::string hdriPath;
+
+                // Method 1: Standard UsdLux texture:file attribute
+                {
+                    SdfAssetPath texPath;
+                    if (dome.GetTextureFileAttr().Get(&texPath, timeCode)) {
+                        hdriPath = texPath.GetResolvedPath();
+                        if (hdriPath.empty()) hdriPath = texPath.GetAssetPath();
+                        if (!hdriPath.empty())
+                            fprintf(stderr, "SpectralRender: dome HDRI via GetTextureFileAttr: '%s'\n", hdriPath.c_str());
+                    }
+                }
+
+                // Method 2: Search ALL attributes for any SdfAssetPath
+                if (hdriPath.empty()) {
+                    for (const auto& attr : prim.GetAttributes()) {
+                        VtValue val;
+                        if (attr.Get(&val, timeCode)) {
+                            if (val.IsHolding<SdfAssetPath>()) {
+                                SdfAssetPath ap = val.UncheckedGet<SdfAssetPath>();
+                                std::string p = ap.GetResolvedPath();
+                                if (p.empty()) p = ap.GetAssetPath();
+                                fprintf(stderr, "SpectralRender: dome attr '%s' = asset '%s'\n",
+                                        attr.GetName().GetText(), p.c_str());
+                                if (!p.empty() && hdriPath.empty()) hdriPath = p;
+                            } else if (val.IsHolding<std::string>()) {
+                                std::string s = val.UncheckedGet<std::string>();
+                                // Check if it looks like a file path
+                                if (s.find(".hdr") != std::string::npos ||
+                                    s.find(".exr") != std::string::npos ||
+                                    s.find(".hdri") != std::string::npos ||
+                                    s.find(".tx") != std::string::npos) {
+                                    fprintf(stderr, "SpectralRender: dome attr '%s' = string path '%s'\n",
+                                            attr.GetName().GetText(), s.c_str());
+                                    if (hdriPath.empty()) hdriPath = s;
+                                }
                             }
+                        }
+                    }
+                }
+
+                // Method 3: Check connected shader inputs (Nuke may use shader networks)
+                if (hdriPath.empty()) {
+                    for (const auto& rel : prim.GetRelationships()) {
+                        SdfPathVector targets;
+                        rel.GetTargets(&targets);
+                        for (const auto& target : targets) {
+                            UsdPrim targetPrim = prim.GetStage()->GetPrimAtPath(target);
+                            if (targetPrim) {
+                                for (const auto& attr : targetPrim.GetAttributes()) {
+                                    VtValue val;
+                                    if (attr.Get(&val, timeCode) && val.IsHolding<SdfAssetPath>()) {
+                                        SdfAssetPath ap = val.UncheckedGet<SdfAssetPath>();
+                                        std::string p = ap.GetResolvedPath();
+                                        if (p.empty()) p = ap.GetAssetPath();
+                                        if (!p.empty()) {
+                                            fprintf(stderr, "SpectralRender: dome shader '%s'.%s = '%s'\n",
+                                                    target.GetText(), attr.GetName().GetText(), p.c_str());
+                                            if (hdriPath.empty()) hdriPath = p;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Debug: dump all attributes if nothing found
+                if (hdriPath.empty()) {
+                    fprintf(stderr, "SpectralRender: dome '%s' — no HDRI found. Attributes:\n",
+                            prim.GetPath().GetText());
+                    for (const auto& attr : prim.GetAttributes()) {
+                        VtValue val;
+                        if (attr.Get(&val, timeCode))
+                            fprintf(stderr, "  %s = %s\n", attr.GetName().GetText(), val.GetTypeName().c_str());
+                        else
+                            fprintf(stderr, "  %s (no value)\n", attr.GetName().GetText());
+                    }
+                }
+
+                // Load the HDRI if we found a path
+                if (!hdriPath.empty()) {
+                    int texId = _scene->LoadTexture(hdriPath);
+                    if (texId >= 0) {
+                        const auto* tex = _scene->GetTexture(texId);
+                        if (tex && tex->IsValid()) {
+                            light.envTexId = texId;
+                            light.envWidth = tex->GetWidth();
+                            light.envHeight = tex->GetHeight();
+                            light.envPixels = tex->_pixels.data();
+                            light.ComputeEnvAverage();
+                            fprintf(stderr, "SpectralRender: HDRI loaded '%s' (%dx%d) avg=(%.2f,%.2f,%.2f)\n",
+                                    hdriPath.c_str(), light.envWidth, light.envHeight,
+                                    light.envAvgColor[0], light.envAvgColor[1], light.envAvgColor[2]);
                         }
                     }
                 }
@@ -3616,7 +3716,16 @@ void SpectralRenderIop::append(Hash& hash)
 void SpectralRenderIop::build_handles(ViewerContext* ctx)
 {
     if (ctx->transform_mode() == VIEWER_2D) return;
-    // _volume loaded by _validate — draw if bbox is valid (even metadata-only)
+
+    // Propagate upstream 3D handles so GeoScene point cloud renders
+    // when viewing SpectralRender in the 3D viewer
+    Op* scn = (inputs() > 0) ? input(0) : nullptr;
+    if (scn) scn->build_handles(ctx);
+
+    Op* cam = (inputs() > 1) ? input(1) : nullptr;
+    if (cam) cam->build_handles(ctx);
+
+    // Draw our own volume preview on top
     if (_volume && _volume->HasBbox()) add_draw_handle(ctx);
 }
 
@@ -3776,7 +3885,7 @@ void SpectralRenderIop::_LoadVDB()
     }
 #endif
 
-    // Path 2: Vol input (input 3) — SpectralVDBRead
+    // Path 2: Vol input (input 3) — SpectralVDBRead direct
     if (inputs() > 3 && input(3)) {
         input(3)->validate(true);
         SpectralVDBRead* vdbRead = nullptr;
@@ -3789,6 +3898,48 @@ void SpectralRenderIop::_LoadVDB()
                 _applyVolumeShading(vol);
                 _volume = vol;
                 _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
+                return;
+            }
+        }
+    }
+
+    // Path 3: Scn input (input 0) — find SpectralVDBRead upstream through GeoScene
+    if (inputs() > 0 && input(0)) {
+        Op* scn = input(0);
+        scn->validate(true);
+
+        // Search scn and its inputs (up to 3 levels deep) for SpectralVDBRead
+        SpectralVDBRead* vdbRead = nullptr;
+        std::vector<Op*> searchOps;
+        searchOps.push_back(scn);
+        for (int depth = 0; depth < 3 && !vdbRead; ++depth) {
+            std::vector<Op*> nextLevel;
+            for (Op* op : searchOps) {
+                if (!op) continue;
+                if (strcmp(op->Class(), "SpectralVDBRead") == 0) {
+                    vdbRead = static_cast<SpectralVDBRead*>(op);
+                    break;
+                }
+                for (int i = 0; i < op->inputs(); ++i) {
+                    Op* up = op->input(i);
+                    if (up) {
+                        up->validate(true);
+                        nextLevel.push_back(up);
+                    }
+                }
+            }
+            searchOps = nextLevel;
+        }
+
+        if (vdbRead) {
+            int renderFrame = int(outputContext().frame());
+            auto vol = vdbRead->GetVolumeAtFrame(renderFrame);
+            if (vol && vol->IsValid()) {
+                _applyVolumeShading(vol);
+                _volume = vol;
+                _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
+                fprintf(stderr, "SpectralRender: loaded volume from scn input chain (%s)\n",
+                        vdbRead->node_name());
                 return;
             }
         }
@@ -4139,6 +4290,32 @@ void SpectralRenderIop::_BuildLightRig()
             rim.color = GfVec3f(float(ri));
             rim.intensity = 1.f;
             _scene->AddLight(rim);
+        }
+    }
+
+    // HDRI file dome light (from Lighting tab file knob)
+    if (_hdriFile && strlen(_hdriFile) > 0) {
+        int texId = _scene->LoadTexture(_hdriFile);
+        if (texId >= 0) {
+            const auto* tex = _scene->GetTexture(texId);
+            if (tex && tex->IsValid()) {
+                SpectralLight hdriDome;
+                hdriDome.type = SpectralLight::Type::Dome;
+                hdriDome.color = GfVec3f(1.f);
+                hdriDome.intensity = float(_hdriIntensity);
+                hdriDome.envTexId = texId;
+                hdriDome.envWidth = tex->GetWidth();
+                hdriDome.envHeight = tex->GetHeight();
+                hdriDome.envPixels = tex->_pixels.data();
+                hdriDome.ComputeEnvAverage();
+                _scene->AddLight(hdriDome);
+                fprintf(stderr, "SpectralRender: HDRI dome from file '%s' (%dx%d) avg=(%.2f,%.2f,%.2f) intensity=%.1f\n",
+                        _hdriFile, hdriDome.envWidth, hdriDome.envHeight,
+                        hdriDome.envAvgColor[0], hdriDome.envAvgColor[1], hdriDome.envAvgColor[2],
+                        _hdriIntensity);
+            }
+        } else {
+            fprintf(stderr, "SpectralRender: failed to load HDRI '%s'\n", _hdriFile);
         }
     }
 

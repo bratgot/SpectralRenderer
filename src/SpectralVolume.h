@@ -29,7 +29,8 @@ struct SpectralVolume {
     bool    hasTransform = false;
 
     // Cached transformed bbox (computed by BuildTransform)
-    GfVec3f xfBboxMin, xfBboxMax;
+    GfVec3f xfBboxMin = GfVec3f(0.f);
+    GfVec3f xfBboxMax = GfVec3f(1.f);
 
     // Build transform from translate/rotate/scale. Call after setting those.
     void BuildTransform() {

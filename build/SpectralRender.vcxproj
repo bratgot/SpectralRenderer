@@ -102,12 +102,12 @@
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
       <UseFullPaths>false</UseFullPaths>
       <WarningLevel>Level3</WarningLevel>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NOMINMAX;_USE_MATH_DEFINES;WIN32_LEAN_AND_MEAN;HDSPECTRAL_EXPORTS;SPECTRAL_HAS_EMBREE=1;SPECTRAL_HAS_OSD=1;SPECTRAL_HAS_OPTIX=1;SPECTRAL_HAS_VDB=1;IMATH_DLL=1;OPENVDB_DLL=1;CMAKE_INTDIR="Debug";SpectralRender_EXPORTS</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NOMINMAX;_USE_MATH_DEFINES;WIN32_LEAN_AND_MEAN;HDSPECTRAL_EXPORTS;SPECTRAL_HAS_EMBREE=1;SPECTRAL_HAS_OSD=1;SPECTRAL_HAS_OPTIX=1;SPECTRAL_HAS_VDB=1;IMATH_DLL=1;OPENVDB_DLL=1;OPENEXR_DLL=1;CMAKE_INTDIR="Debug";SpectralRender_EXPORTS</PreprocessorDefinitions>
       <ObjectFileName>$(IntDir)</ObjectFileName>
       <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_DEBUG;_WINDOWS;NOMINMAX;_USE_MATH_DEFINES;WIN32_LEAN_AND_MEAN;HDSPECTRAL_EXPORTS;SPECTRAL_HAS_EMBREE=1;SPECTRAL_HAS_OSD=1;SPECTRAL_HAS_OPTIX=1;SPECTRAL_HAS_VDB=1;IMATH_DLL=1;OPENVDB_DLL=1;CMAKE_INTDIR=\"Debug\";SpectralRender_EXPORTS</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_DEBUG;_WINDOWS;NOMINMAX;_USE_MATH_DEFINES;WIN32_LEAN_AND_MEAN;HDSPECTRAL_EXPORTS;SPECTRAL_HAS_EMBREE=1;SPECTRAL_HAS_OSD=1;SPECTRAL_HAS_OPTIX=1;SPECTRAL_HAS_VDB=1;IMATH_DLL=1;OPENVDB_DLL=1;OPENEXR_DLL=1;CMAKE_INTDIR=\"Debug\";SpectralRender_EXPORTS</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>C:\Program Files\Nuke17.0v1\FnUSD\include;C:\Program Files\Nuke17.0v1\include;C:\Program Files\Nuke17.0v1\include\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src;C:\dev\embree-4\include;C:\dev\opensubdiv-3.6.0;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.1.0\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build;C:\vcpkg\installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
@@ -147,14 +147,14 @@
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <UseFullPaths>false</UseFullPaths>
       <WarningLevel>Level3</WarningLevel>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;NOMINMAX;_USE_MATH_DEFINES;WIN32_LEAN_AND_MEAN;HDSPECTRAL_EXPORTS;SPECTRAL_HAS_EMBREE=1;SPECTRAL_HAS_OSD=1;SPECTRAL_HAS_OPTIX=1;SPECTRAL_HAS_VDB=1;IMATH_DLL=1;OPENVDB_DLL=1;CMAKE_INTDIR="Release";SpectralRender_EXPORTS</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;NOMINMAX;_USE_MATH_DEFINES;WIN32_LEAN_AND_MEAN;HDSPECTRAL_EXPORTS;SPECTRAL_HAS_EMBREE=1;SPECTRAL_HAS_OSD=1;SPECTRAL_HAS_OPTIX=1;SPECTRAL_HAS_VDB=1;IMATH_DLL=1;OPENVDB_DLL=1;OPENEXR_DLL=1;CMAKE_INTDIR="Release";SpectralRender_EXPORTS</PreprocessorDefinitions>
       <ObjectFileName>$(IntDir)</ObjectFileName>
       <DebugInformationFormat>
       </DebugInformationFormat>
       <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;NOMINMAX;_USE_MATH_DEFINES;WIN32_LEAN_AND_MEAN;HDSPECTRAL_EXPORTS;SPECTRAL_HAS_EMBREE=1;SPECTRAL_HAS_OSD=1;SPECTRAL_HAS_OPTIX=1;SPECTRAL_HAS_VDB=1;IMATH_DLL=1;OPENVDB_DLL=1;CMAKE_INTDIR=\"Release\";SpectralRender_EXPORTS</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;NOMINMAX;_USE_MATH_DEFINES;WIN32_LEAN_AND_MEAN;HDSPECTRAL_EXPORTS;SPECTRAL_HAS_EMBREE=1;SPECTRAL_HAS_OSD=1;SPECTRAL_HAS_OPTIX=1;SPECTRAL_HAS_VDB=1;IMATH_DLL=1;OPENVDB_DLL=1;OPENEXR_DLL=1;CMAKE_INTDIR=\"Release\";SpectralRender_EXPORTS</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>C:\Program Files\Nuke17.0v1\FnUSD\include;C:\Program Files\Nuke17.0v1\include;C:\Program Files\Nuke17.0v1\include\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src;C:\dev\embree-4\include;C:\dev\opensubdiv-3.6.0;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.1.0\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build;C:\vcpkg\installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
@@ -194,14 +194,14 @@
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <UseFullPaths>false</UseFullPaths>
       <WarningLevel>Level3</WarningLevel>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;NOMINMAX;_USE_MATH_DEFINES;WIN32_LEAN_AND_MEAN;HDSPECTRAL_EXPORTS;SPECTRAL_HAS_EMBREE=1;SPECTRAL_HAS_OSD=1;SPECTRAL_HAS_OPTIX=1;SPECTRAL_HAS_VDB=1;IMATH_DLL=1;OPENVDB_DLL=1;CMAKE_INTDIR="MinSizeRel";SpectralRender_EXPORTS</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;NOMINMAX;_USE_MATH_DEFINES;WIN32_LEAN_AND_MEAN;HDSPECTRAL_EXPORTS;SPECTRAL_HAS_EMBREE=1;SPECTRAL_HAS_OSD=1;SPECTRAL_HAS_OPTIX=1;SPECTRAL_HAS_VDB=1;IMATH_DLL=1;OPENVDB_DLL=1;OPENEXR_DLL=1;CMAKE_INTDIR="MinSizeRel";SpectralRender_EXPORTS</PreprocessorDefinitions>
       <ObjectFileName>$(IntDir)</ObjectFileName>
       <DebugInformationFormat>
       </DebugInformationFormat>
       <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;NOMINMAX;_USE_MATH_DEFINES;WIN32_LEAN_AND_MEAN;HDSPECTRAL_EXPORTS;SPECTRAL_HAS_EMBREE=1;SPECTRAL_HAS_OSD=1;SPECTRAL_HAS_OPTIX=1;SPECTRAL_HAS_VDB=1;IMATH_DLL=1;OPENVDB_DLL=1;CMAKE_INTDIR=\"MinSizeRel\";SpectralRender_EXPORTS</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;NOMINMAX;_USE_MATH_DEFINES;WIN32_LEAN_AND_MEAN;HDSPECTRAL_EXPORTS;SPECTRAL_HAS_EMBREE=1;SPECTRAL_HAS_OSD=1;SPECTRAL_HAS_OPTIX=1;SPECTRAL_HAS_VDB=1;IMATH_DLL=1;OPENVDB_DLL=1;OPENEXR_DLL=1;CMAKE_INTDIR=\"MinSizeRel\";SpectralRender_EXPORTS</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>C:\Program Files\Nuke17.0v1\FnUSD\include;C:\Program Files\Nuke17.0v1\include;C:\Program Files\Nuke17.0v1\include\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src;C:\dev\embree-4\include;C:\dev\opensubdiv-3.6.0;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.1.0\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build;C:\vcpkg\installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
@@ -242,12 +242,12 @@
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <UseFullPaths>false</UseFullPaths>
       <WarningLevel>Level3</WarningLevel>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;NOMINMAX;_USE_MATH_DEFINES;WIN32_LEAN_AND_MEAN;HDSPECTRAL_EXPORTS;SPECTRAL_HAS_EMBREE=1;SPECTRAL_HAS_OSD=1;SPECTRAL_HAS_OPTIX=1;SPECTRAL_HAS_VDB=1;IMATH_DLL=1;OPENVDB_DLL=1;CMAKE_INTDIR="RelWithDebInfo";SpectralRender_EXPORTS</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;NOMINMAX;_USE_MATH_DEFINES;WIN32_LEAN_AND_MEAN;HDSPECTRAL_EXPORTS;SPECTRAL_HAS_EMBREE=1;SPECTRAL_HAS_OSD=1;SPECTRAL_HAS_OPTIX=1;SPECTRAL_HAS_VDB=1;IMATH_DLL=1;OPENVDB_DLL=1;OPENEXR_DLL=1;CMAKE_INTDIR="RelWithDebInfo";SpectralRender_EXPORTS</PreprocessorDefinitions>
       <ObjectFileName>$(IntDir)</ObjectFileName>
       <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;NOMINMAX;_USE_MATH_DEFINES;WIN32_LEAN_AND_MEAN;HDSPECTRAL_EXPORTS;SPECTRAL_HAS_EMBREE=1;SPECTRAL_HAS_OSD=1;SPECTRAL_HAS_OPTIX=1;SPECTRAL_HAS_VDB=1;IMATH_DLL=1;OPENVDB_DLL=1;CMAKE_INTDIR=\"RelWithDebInfo\";SpectralRender_EXPORTS</PreprocessorDefinitions>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;NOMINMAX;_USE_MATH_DEFINES;WIN32_LEAN_AND_MEAN;HDSPECTRAL_EXPORTS;SPECTRAL_HAS_EMBREE=1;SPECTRAL_HAS_OSD=1;SPECTRAL_HAS_OPTIX=1;SPECTRAL_HAS_VDB=1;IMATH_DLL=1;OPENVDB_DLL=1;OPENEXR_DLL=1;CMAKE_INTDIR=\"RelWithDebInfo\";SpectralRender_EXPORTS</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>C:\Program Files\Nuke17.0v1\FnUSD\include;C:\Program Files\Nuke17.0v1\include;C:\Program Files\Nuke17.0v1\include\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src;C:\dev\embree-4\include;C:\dev\opensubdiv-3.6.0;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.1.0\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build;C:\vcpkg\installed\x64-windows\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
