@@ -85,7 +85,7 @@ SpectralRenderIop::SpectralRenderIop(Node* node)
     : Iop(node)
     , _scene(std::make_unique<pxr::SpectralScene>())
 {
-    // 5 inputs: scene, cam, bg, vol, vol_mat (set by min/max_inputs)
+    // 3 inputs: scene, cam, bg (set by min/max_inputs)
     fprintf(stderr, "SpectralRender: DLL build %s %s\n", __DATE__, __TIME__);
 }
 
@@ -112,15 +112,13 @@ const char* SpectralRenderIop::node_help() const
 {
     return
         "SpectralRender — physically-based spectral path tracer.\n\n"
-        "Input 0 (Scene): Connect any USD GeomOp\n"
-        "(GeoCube, GeoSphere, GeoImport, etc.)\n\n"
+        "Input 0 (Scene): Connect GeoScene with geometry and/or SpectralVDBRead.\n"
+        "Volumes and materials are auto-detected from upstream nodes.\n\n"
         "Input 1 (Cam): Connect a Camera node.\n"
         "If not connected, uses first camera found in the USD stage,\n"
         "or a default 50mm perspective.\n\n"
         "Input 2 (BG): Connect any 2D image. Its format sets the\n"
         "output resolution. The BG image is rendered behind the scene.\n\n"
-        "Input 3 (Vol): Connect a SpectralVDBRead node.\n"
-        "Volume shading controls are on the Volumes tab.\n\n"
         "Created by Marten Blumen\n"
         "github.com/bratgot/SpectralRenderer";}
 
@@ -133,37 +131,18 @@ const char* SpectralRenderIop::input_label(int idx, char*) const
         case 0: return "scn";
         case 1: return "cam";
         case 2: return "bg";
-        case 3: return "vol";
-        case 4: return "mat";
         default: return nullptr;
     }
 }
 
 bool SpectralRenderIop::test_input(int idx, Op* op) const
 {
-    if (!op) return true;  // allow disconnection on any input
-
+    if (!op) return true;
     switch (idx) {
-        case 0: {
-            // Accept GeometryProviderI (GeoScene, USD scene nodes)
-            return dynamic_cast<GeometryProviderI*>(op) != nullptr;
-        }
-        case 1: {
-            return dynamic_cast<CameraOp*>(op) != nullptr;
-        }
-        case 2: {
-            return dynamic_cast<Iop*>(op) != nullptr;
-        }
-        case 3: {
-            // Vol: accept any Op (SpectralVDBRead is a SourceGeomOp)
-            return true;
-        }
-        case 4: {
-            // VolMat: accept SpectralVolumeMaterial (ShaderOp)
-            return true;
-        }
-        default:
-            return false;
+        case 0: return dynamic_cast<GeometryProviderI*>(op) != nullptr;
+        case 1: return dynamic_cast<CameraOp*>(op) != nullptr;
+        case 2: return dynamic_cast<Iop*>(op) != nullptr;
+        default: return false;
     }
 }
 
@@ -513,7 +492,7 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         File_knob(f, &_vdbFile, "vdb_file", "VDB file");
         Tooltip(f, "OpenVDB volume file (.vdb).\n"
                    "Supports #### frame padding for sequences.\n"
-                   "Or connect a SpectralVDBRead node to the vol input.");
+                   "Or use SpectralVDBRead -> GeoScene -> scn input.");
         Bool_knob(f, &_vdbAutoSequence, "vdb_auto_sequence", "auto sequence");
         ClearFlags(f, Knob::STARTLINE);
         Int_knob(f, &_vdbFrameOffset, "vdb_frame_offset", "frame offset");
@@ -523,7 +502,9 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         String_knob(f, &_vdbOrigFile, "vdb_orig_file", "");
         SetFlags(f, Knob::INVISIBLE);
 
-        // --- Axis Controls -----------------------------------------------
+        // --- Axis Controls (disabled — use GeoTransform upstream instead) ---
+        // TODO: remove once GeoTransform pipeline is fully validated
+        /*
         Divider(f, "Axis Controls");
         Text_knob(f,
             "<font color='#777' size='-1'>"
@@ -579,6 +560,7 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         Button(f, "vdb_reset_xform", " Reset ");
         ClearFlags(f, Knob::STARTLINE);
         Tooltip(f, "Reset translate, rotate, and scale to default.");
+        */
 
         // --- Render Mode -------------------------------------------------
         Divider(f, "Render Mode");
@@ -605,7 +587,12 @@ void SpectralRenderIop::knobs(Knob_Callback f)
 
         // ─── Viewport ───────────────────────────────────────────────────
         Divider(f, "3D Viewport");
+        Bool_knob(f, &_vdb3dPreview, "vdb_3d_preview", "3D preview");
+        Tooltip(f, "Draw volume bbox and point cloud in the 3D viewer.\n"
+                   "Uses the same render mode coloring as the final render.\n"
+                   "Transform follows GeoTransform from the scene graph.");
         Bool_knob(f, &_vdbShowBbox, "vdb_show_bbox", "bbox");
+        ClearFlags(f, Knob::STARTLINE);
         Tooltip(f, "Green wireframe bounding box in the 3D viewer.\n"
                    "Useful for camera placement before rendering.");
         Bool_knob(f, &_vdbShowPoints, "vdb_show_points", "points");
@@ -1312,7 +1299,7 @@ int SpectralRenderIop::knob_changed(Knob* k)
         }
         return 1;
     }
-    if (k->is("vdb_show_points") || k->is("vdb_point_density") || k->is("vdb_point_size") || k->is("vdb_show_bbox") || k->is("vdb_fast_scrub")) {
+    if (k->is("vdb_3d_preview") || k->is("vdb_show_points") || k->is("vdb_point_density") || k->is("vdb_point_size") || k->is("vdb_show_bbox") || k->is("vdb_fast_scrub")) {
         _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
         if (k->is("vdb_fast_scrub")) _vdbLoadedPath.clear();
         return 1;
@@ -1499,7 +1486,8 @@ int SpectralRenderIop::knob_changed(Knob* k)
         return 1;
     }
 
-    // Axis control buttons
+    // Axis control buttons (disabled — use GeoTransform upstream instead)
+    /*
     if (k->is("vdb_rot_x90")) { _vdbRotate[0] = std::fmod(_vdbRotate[0]+90.0, 360.0); if(knob("vdb_rotate_x")) knob("vdb_rotate_x")->set_value(_vdbRotate[0]); _vdbPreviewDirty=true; return 1; }
     if (k->is("vdb_rot_y90")) { _vdbRotate[1] = std::fmod(_vdbRotate[1]+90.0, 360.0); if(knob("vdb_rotate_y")) knob("vdb_rotate_y")->set_value(_vdbRotate[1]); _vdbPreviewDirty=true; return 1; }
     if (k->is("vdb_rot_z90")) { _vdbRotate[2] = std::fmod(_vdbRotate[2]+90.0, 360.0); if(knob("vdb_rotate_z")) knob("vdb_rotate_z")->set_value(_vdbRotate[2]); _vdbPreviewDirty=true; return 1; }
@@ -1522,7 +1510,6 @@ int SpectralRenderIop::knob_changed(Knob* k)
         if(knob("vdb_uniform_scale")) knob("vdb_uniform_scale")->set_value(1);
         _vdbPreviewDirty=true; return 1;
     }
-    // Any transform knob change
     if (k->is("vdb_translate_x") || k->is("vdb_translate_y") || k->is("vdb_translate_z") ||
         k->is("vdb_rotate_x") || k->is("vdb_rotate_y") || k->is("vdb_rotate_z") ||
         k->is("vdb_scale_x") || k->is("vdb_scale_y") || k->is("vdb_scale_z") ||
@@ -1530,6 +1517,7 @@ int SpectralRenderIop::knob_changed(Knob* k)
         _vdbPreviewDirty = true;
         return 1;
     }
+    */
 
     if (k->is("vdb_render_mode") || k->is("vdb_intensity") || k->is("vdb_spectral_volumes")) return 1;
     if (k->is("vdb_vol_res")) {
@@ -1804,7 +1792,24 @@ void SpectralRenderIop::_validate(bool forReal)
     }
     info_.black_outside(true);
 
-    if (forReal) {
+    // Check if scn input changed (GeoTransform, VDBRead knobs, etc.)
+    Op* scnOp = (inputs() > 0) ? input(0) : nullptr;
+    bool scnChanged = false;
+    if (scnOp) {
+        scnOp->validate(forReal);
+        Hash newHash;
+        newHash.append(scnOp->hash());
+        if (newHash != _scnInputHash) {
+            _scnInputHash = newHash;
+            _vdbLastLoadedFrame = -999;  // force VDB reload
+            _frameReady.store(false);    // force re-render
+            _vdbPreviewDirty = true;
+            _vdbPreviewPoints.clear();
+            scnChanged = true;
+        }
+    }
+
+    if (forReal || scnChanged) {
         _LoadStage();
         _BuildCameraFromInput();
         _frameReady.store(false);
@@ -1997,6 +2002,7 @@ void SpectralRenderIop::_LoadStage()
 {
     _scene = std::make_unique<pxr::SpectralScene>();
     _camera = SpectralCamera();
+    _vdbHasSceneXform = false;
 
     // ------------------------------------------------------------------
     // Path 1: GeomOp input connected — use Nuke's USD scene graph
@@ -2495,8 +2501,44 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
 
         // Skip SpectralVDBRead placeholder bbox (rendered as volume, not geometry)
         std::string primName = prim.GetPath().GetString();
-        if (primName.find("SpectralVDBRead") != std::string::npos) {
-            fprintf(stderr, "SpectralRender: skipping VDB placeholder mesh %s\n", primName.c_str());
+        if (primName.find("SpectralVDBRead") != std::string::npos ||
+            primName.find("volume_bbox") != std::string::npos) {
+            // Extract world transform for volume positioning (from GeoTransform etc.)
+            GfMatrix4d xf = xfCache.GetLocalToWorldTransform(prim);
+            if (xf != GfMatrix4d(1.0)) {
+                // Decompose matrix to translate/rotate/scale
+                _vdbHasSceneXform = true;
+                _vdbSceneTranslate = GfVec3f(float(xf[3][0]), float(xf[3][1]), float(xf[3][2]));
+                // Extract scale from column lengths
+                GfVec3d col0(xf[0][0], xf[0][1], xf[0][2]);
+                GfVec3d col1(xf[1][0], xf[1][1], xf[1][2]);
+                GfVec3d col2(xf[2][0], xf[2][1], xf[2][2]);
+                float sx = float(col0.GetLength());
+                float sy = float(col1.GetLength());
+                float sz = float(col2.GetLength());
+                _vdbSceneScale = GfVec3f(sx, sy, sz);
+                // Extract Euler angles from normalised rotation matrix
+                if (sx > 1e-6f) { col0 /= sx; }
+                if (sy > 1e-6f) { col1 /= sy; }
+                if (sz > 1e-6f) { col2 /= sz; }
+                float ry = float(std::asin(std::max(-1.0, std::min(1.0, -col2[0]))));
+                float rx, rz;
+                if (std::abs(col2[0]) < 0.9999) {
+                    rx = float(std::atan2(col2[1], col2[2]));
+                    rz = float(std::atan2(col1[0], col0[0]));
+                } else {
+                    rx = float(std::atan2(-col0[2], col1[1]));
+                    rz = 0.f;
+                }
+                _vdbSceneRotate = GfVec3f(rx * 180.f/3.14159265f,
+                                           ry * 180.f/3.14159265f,
+                                           rz * 180.f/3.14159265f);
+                fprintf(stderr, "SpectralRender: VDB world xform: T=(%.1f,%.1f,%.1f) R=(%.1f,%.1f,%.1f) S=(%.2f,%.2f,%.2f)\n",
+                        _vdbSceneTranslate[0], _vdbSceneTranslate[1], _vdbSceneTranslate[2],
+                        _vdbSceneRotate[0], _vdbSceneRotate[1], _vdbSceneRotate[2],
+                        _vdbSceneScale[0], _vdbSceneScale[1], _vdbSceneScale[2]);
+            }
+            fprintf(stderr, "SpectralRender: skipping VDB prim %s\n", primName.c_str());
             continue;
         }
 
@@ -3717,16 +3759,13 @@ void SpectralRenderIop::build_handles(ViewerContext* ctx)
 {
     if (ctx->transform_mode() == VIEWER_2D) return;
 
-    // Propagate upstream 3D handles so GeoScene point cloud renders
-    // when viewing SpectralRender in the 3D viewer
-    Op* scn = (inputs() > 0) ? input(0) : nullptr;
-    if (scn) scn->build_handles(ctx);
+    // Upstream Hydra/USD rendering doesn't propagate through Iop build_handles.
+    // SpectralRender draws its own GL preview instead (local 3D preview checkbox).
+    if (_vdb3dPreview && _volume && _volume->HasBbox()) add_draw_handle(ctx);
 
+    // Camera handles
     Op* cam = (inputs() > 1) ? input(1) : nullptr;
     if (cam) cam->build_handles(ctx);
-
-    // Draw our own volume preview on top
-    if (_volume && _volume->HasBbox()) add_draw_handle(ctx);
 }
 
 void SpectralRenderIop::draw_handle(ViewerContext* ctx)
@@ -3735,17 +3774,18 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
     glPushAttrib(GL_CURRENT_BIT | GL_LINE_BIT | GL_ENABLE_BIT | GL_POINT_BIT);
     glDisable(GL_LIGHTING);
 
-    // Apply volume transform via GL matrix stack
-    pxr::GfVec3f center = (_volume->bboxMin + _volume->bboxMax) * 0.5f;
-    float us = float(_vdbUniformScale);
-    glPushMatrix();
-    glTranslatef(float(_vdbTranslate[0]), float(_vdbTranslate[1]), float(_vdbTranslate[2]));
-    glTranslatef(center[0], center[1], center[2]);
-    glRotatef(float(_vdbRotate[0]), 1, 0, 0);
-    glRotatef(float(_vdbRotate[1]), 0, 1, 0);
-    glRotatef(float(_vdbRotate[2]), 0, 0, 1);
-    glScalef(float(_vdbScale[0])*us, float(_vdbScale[1])*us, float(_vdbScale[2])*us);
-    glTranslatef(-center[0], -center[1], -center[2]);
+    // Apply scene graph transform (from GeoTransform via USD stage)
+    if (_vdbHasSceneXform) {
+        pxr::GfVec3f center = (_volume->bboxMin + _volume->bboxMax) * 0.5f;
+        glPushMatrix();
+        glTranslatef(_vdbSceneTranslate[0], _vdbSceneTranslate[1], _vdbSceneTranslate[2]);
+        glTranslatef(center[0], center[1], center[2]);
+        glRotatef(_vdbSceneRotate[0], 1, 0, 0);
+        glRotatef(_vdbSceneRotate[1], 0, 1, 0);
+        glRotatef(_vdbSceneRotate[2], 0, 0, 1);
+        glScalef(_vdbSceneScale[0], _vdbSceneScale[1], _vdbSceneScale[2]);
+        glTranslatef(-center[0], -center[1], -center[2]);
+    }
 
     float co[8][3];
     for (int i = 0; i < 8; ++i) {
@@ -3820,7 +3860,7 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
             glEnd(); glDisable(GL_BLEND);
         }
     }
-    glPopMatrix();
+    if (_vdbHasSceneXform) glPopMatrix();
     glPopAttrib();
 }
 
@@ -3885,25 +3925,7 @@ void SpectralRenderIop::_LoadVDB()
     }
 #endif
 
-    // Path 2: Vol input (input 3) — SpectralVDBRead direct
-    if (inputs() > 3 && input(3)) {
-        input(3)->validate(true);
-        SpectralVDBRead* vdbRead = nullptr;
-        if (strcmp(input(3)->Class(), "SpectralVDBRead") == 0)
-            vdbRead = static_cast<SpectralVDBRead*>(static_cast<Op*>(input(3)));
-        if (vdbRead) {
-            int renderFrame = int(outputContext().frame());
-            auto vol = vdbRead->GetVolumeAtFrame(renderFrame);
-            if (vol && vol->IsValid()) {
-                _applyVolumeShading(vol);
-                _volume = vol;
-                _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
-                return;
-            }
-        }
-    }
-
-    // Path 3: Scn input (input 0) — find SpectralVDBRead upstream through GeoScene
+    // Path 2: Scn input (input 0) — find SpectralVDBRead upstream through GeoScene
     if (inputs() > 0 && input(0)) {
         Op* scn = input(0);
         scn->validate(true);
@@ -3936,10 +3958,18 @@ void SpectralRenderIop::_LoadVDB()
             auto vol = vdbRead->GetVolumeAtFrame(renderFrame);
             if (vol && vol->IsValid()) {
                 _applyVolumeShading(vol);
+                // Apply scene graph transform (from GeoTransform via USD stage)
+                if (_vdbHasSceneXform) {
+                    vol->translate = _vdbSceneTranslate;
+                    vol->rotate = _vdbSceneRotate;
+                    vol->scale = _vdbSceneScale;
+                    vol->BuildTransform();
+                }
                 _volume = vol;
                 _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
-                fprintf(stderr, "SpectralRender: loaded volume from scn input chain (%s)\n",
-                        vdbRead->node_name());
+                fprintf(stderr, "SpectralRender: loaded volume from scn input chain (%s)%s\n",
+                        vdbRead->node_name(),
+                        _vdbHasSceneXform ? " +xform" : "");
                 return;
             }
         }
@@ -4022,12 +4052,36 @@ void SpectralRenderIop::_LoadVDBForRender()
 // ---------------------------------------------------------------------------
 void SpectralRenderIop::_applyVolumeShading(std::shared_ptr<pxr::SpectralVolume>& vol)
 {
-    // Check VolMat input (input 4) for SpectralVolumeMaterial
-    // Use Class() string match — dynamic_cast fails across MSVC dllexport TUs
+    // Find SpectralVolumeMaterial by walking scn input chain
+    // (VDBRead may have mat connected, or GeoBind assignment)
     SpectralVolumeMaterial* mat = nullptr;
-    if (inputs() > 4 && input(4)) {
-        if (strcmp(input(4)->Class(), "SpectralVolumeMaterial") == 0) {
-            mat = static_cast<SpectralVolumeMaterial*>(static_cast<Op*>(input(4)));
+
+    if (inputs() > 0 && input(0)) {
+        Op* scn = input(0);
+        std::vector<Op*> searchOps;
+        searchOps.push_back(scn);
+        for (int depth = 0; depth < 4 && !mat; ++depth) {
+            std::vector<Op*> nextLevel;
+            for (Op* op : searchOps) {
+                if (!op) continue;
+                // Check if this op IS a SpectralVolumeMaterial
+                if (strcmp(op->Class(), "SpectralVolumeMaterial") == 0) {
+                    mat = static_cast<SpectralVolumeMaterial*>(op);
+                    break;
+                }
+                // Check all inputs of this op for SpectralVolumeMaterial
+                for (int i = 0; i < op->inputs(); ++i) {
+                    Op* up = op->input(i);
+                    if (!up) continue;
+                    if (strcmp(up->Class(), "SpectralVolumeMaterial") == 0) {
+                        mat = static_cast<SpectralVolumeMaterial*>(up);
+                        break;
+                    }
+                    nextLevel.push_back(up);
+                }
+                if (mat) break;
+            }
+            searchOps = nextLevel;
         }
     }
 
@@ -4093,12 +4147,15 @@ void SpectralRenderIop::_applyVolumeShading(std::shared_ptr<pxr::SpectralVolume>
     vol->mieDropletD = float(_vdbMieDropletD);
     vol->spectralVolumes = _vdbSpectralVolumes;
 
-    // Volume transform
+    // Volume transform (disabled — use GeoTransform upstream instead)
+    // TODO: remove once GeoTransform pipeline is fully validated
+    /*
     float us = float(_vdbUniformScale);
     vol->translate = pxr::GfVec3f(float(_vdbTranslate[0]), float(_vdbTranslate[1]), float(_vdbTranslate[2]));
     vol->rotate = pxr::GfVec3f(float(_vdbRotate[0]), float(_vdbRotate[1]), float(_vdbRotate[2]));
     vol->scale = pxr::GfVec3f(float(_vdbScale[0])*us, float(_vdbScale[1])*us, float(_vdbScale[2])*us);
     vol->BuildTransform();
+    */
 }
 
 // ---------------------------------------------------------------------------

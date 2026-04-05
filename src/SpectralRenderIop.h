@@ -60,8 +60,8 @@ public:
     // Input 0: Scene  (GeometryProviderI) — optional
     // Input 1: Camera (CameraOp)          — optional
     // Input 2: BG     (any Iop)           — optional, sets output resolution
-    int  minimum_inputs()               const override { return 5; }
-    int  maximum_inputs()               const override { return 5; }
+    int  minimum_inputs()               const override { return 3; }
+    int  maximum_inputs()               const override { return 3; }
     const char* input_label(int idx, char*) const override;
     bool test_input(int idx, Op* op)    const override;
     Op*  default_input(int idx)         const override;
@@ -235,6 +235,7 @@ private:
     double _vdbUniformScale = 1.0;
 
     // VDB viewport preview
+    bool   _vdb3dPreview = true;   // true = SpectralRender draws its own GL preview
     bool   _vdbShowBbox = true;
     bool   _vdbShowPoints = true;
     bool   _vdbFastScrub = false;  // metadata-only during scrub
@@ -247,6 +248,13 @@ private:
     float _vdbMaxDensity = 1.f;
     bool  _vdbPreviewDirty = true;
     std::string _vdbLoadedPath;
+
+    // Scene graph transform (from GeoTransform via USD stage)
+    bool  _vdbHasSceneXform = false;
+    pxr::GfVec3f _vdbSceneTranslate = pxr::GfVec3f(0.f);
+    pxr::GfVec3f _vdbSceneRotate = pxr::GfVec3f(0.f);
+    pxr::GfVec3f _vdbSceneScale = pxr::GfVec3f(1.f);
+    DD::Image::Hash _scnInputHash;  // detect upstream changes (GeoTransform etc.)
     bool   _vdbIsPreviewRes = false;
     bool   _vdbIsMetadataOnly = false;  // true when only bbox loaded (fast scrub)
     int    _vdbLastLoadedFrame = -999;  // cached to avoid reload
