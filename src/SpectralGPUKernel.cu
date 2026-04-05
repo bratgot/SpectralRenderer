@@ -587,6 +587,7 @@ static __forceinline__ __device__ float shadeHit(
 // ---------------------------------------------------------------------------
 static __forceinline__ __device__ float sampleVolumeDensity(float u, float v, float w)
 {
+    if (u < 0.f || u > 1.f || v < 0.f || v > 1.f || w < 0.f || w > 1.f) return 0.f;
     float fx = u * (params.volResX - 1), fy = v * (params.volResY - 1), fz = w * (params.volResZ - 1);
     int x0 = max(0, min(int(fx), params.volResX - 2));
     int y0 = max(0, min(int(fy), params.volResY - 2));
@@ -606,6 +607,7 @@ static __forceinline__ __device__ float sampleVolumeDensity(float u, float v, fl
 static __forceinline__ __device__ float sampleVolumeTemp(float u, float v, float w)
 {
     if (!params.volumeTemperature) return 0.f;
+    if (u < 0.f || u > 1.f || v < 0.f || v > 1.f || w < 0.f || w > 1.f) return 0.f;
     float fx = u * (params.volResX - 1), fy = v * (params.volResY - 1), fz = w * (params.volResZ - 1);
     int x0 = max(0, min(int(fx), params.volResX - 2));
     int y0 = max(0, min(int(fy), params.volResY - 2));
@@ -624,6 +626,7 @@ static __forceinline__ __device__ float sampleVolumeTemp(float u, float v, float
 static __forceinline__ __device__ float sampleVolumeFlame(float u, float v, float w)
 {
     if (!params.volumeFlame) return 0.f;
+    if (u < 0.f || u > 1.f || v < 0.f || v > 1.f || w < 0.f || w > 1.f) return 0.f;
     float fx = u * (params.volResX - 1), fy = v * (params.volResY - 1), fz = w * (params.volResZ - 1);
     int x0 = max(0, min(int(fx), params.volResX - 2));
     int y0 = max(0, min(int(fy), params.volResY - 2));

@@ -179,6 +179,8 @@ struct SpectralVolume {
     // Trilinear interpolation helper
     float _SampleTrilinear(const std::vector<float>& grid, float u, float v, float w) const {
         if (grid.empty()) return 0.f;
+        // Out-of-bounds = outside actual volume (expanded AABB from rotation)
+        if (u < 0.f || u > 1.f || v < 0.f || v > 1.f || w < 0.f || w > 1.f) return 0.f;
         float fx = u * (resX - 1), fy = v * (resY - 1), fz = w * (resZ - 1);
         int x0 = std::max(0, std::min(int(fx), resX - 2));
         int y0 = std::max(0, std::min(int(fy), resY - 2));
@@ -221,6 +223,7 @@ struct SpectralVolume {
     // Sample colour at normalised coordinates — trilinear
     GfVec3f SampleColor(float u, float v, float w) const {
         if (color.empty()) return GfVec3f(1.f);
+        if (u < 0.f || u > 1.f || v < 0.f || v > 1.f || w < 0.f || w > 1.f) return GfVec3f(0.f);
         float fx = u * (resX - 1), fy = v * (resY - 1), fz = w * (resZ - 1);
         int x0 = std::max(0, std::min(int(fx), resX - 2));
         int y0 = std::max(0, std::min(int(fy), resY - 2));
