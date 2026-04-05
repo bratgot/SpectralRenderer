@@ -18,9 +18,14 @@ m.addCommand("SpectralSurface",        "nuke.createNode('SpectralSurface')",    
 m.addCommand("SpectralVolumeMaterial", "nuke.createNode('SpectralVolumeMaterial')", icon="SpectralVolumeMaterial.png")
 m.addCommand("-", "", "")  # separator
 m.addCommand("SpectralVDBRead", "nuke.createNode('SpectralVDBRead')", icon="SpectralVDBRead.png")
+m.addCommand("-", "", "")  # separator
+m.addCommand("SpectralEnvLight",    "nuke.createNode('SpectralEnvLight')",    icon="SpectralEnvLight.png")
+m.addCommand("SpectralStudioLight", "nuke.createNode('SpectralStudioLight')", icon="SpectralStudioLight.png")
 
 # Top-level Tab access
 toolbar.addCommand("Spectral/SpectralRender",         "nuke.createNode('SpectralRender')")
 toolbar.addCommand("Spectral/SpectralSurface",        "nuke.createNode('SpectralSurface')")
 toolbar.addCommand("Spectral/SpectralVolumeMaterial", "nuke.createNode('SpectralVolumeMaterial')")
 toolbar.addCommand("Spectral/SpectralVDBRead",        "nuke.createNode('SpectralVDBRead')")
+toolbar.addCommand("Spectral/SpectralEnvLight",       "nuke.createNode('SpectralEnvLight')")
+toolbar.addCommand("Spectral/SpectralStudioLight",    "nuke.createNode('SpectralStudioLight')")

@@ -9,6 +9,8 @@
 #include "SpectralVDBLoader.h"
 #include "SpectralVDBRead.h"
 #include "SpectralVolumeMaterial.h"
+#include "SpectralEnvLight.h"
+#include "SpectralStudioLight.h"
 #endif
 
 // PXR — USD stage traversal
@@ -579,10 +581,12 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         SetRange(f, 0, 10);
         Tooltip(f, "Master brightness. Does not affect alpha.");
         Bool_knob(f, &_vdbSpectralVolumes, "vdb_spectral_volumes", "spectral volumes");
+        Text_knob(f, "<font color='#557' size='-2'>cpu</font>");
+        ClearFlags(f, Knob::STARTLINE);
         Tooltip(f, "ON: each ray samples one wavelength (physically correct but slow,\n"
                    "needs 20+ spp for proper colour convergence).\n"
                    "OFF: direct RGB rendering (fast, full colour at 1 spp).\n"
-                   "Keep OFF unless you need chromatic extinction or spectral emission.\n"
+                   "CPU only -- GPU always uses RGB mode.\n"
                    "Surfaces always use full spectral regardless of this setting.");
 
         // ─── Viewport ───────────────────────────────────────────────────
@@ -4086,26 +4090,41 @@ void SpectralRenderIop::_applyVolumeShading(std::shared_ptr<pxr::SpectralVolume>
     }
 
     if (mat) {
-        // Use connected SpectralVolumeMaterial parameters
+        // Use SpectralVolumeMaterial parameters (shader/look)
         vol->extinction = float(mat->extinction);
         vol->scattering = float(mat->scattering);
         vol->densityMult = float(mat->densityMult);
-        vol->emissionIntensity = float(mat->emissionIntensity);
-        vol->tempMin = float(mat->tempMin);
-        vol->tempMax = float(mat->tempMax);
-        vol->flameIntensity = float(mat->flameIntensity);
-        vol->stepSize = float(mat->stepSize);
+        vol->scatterColor = pxr::GfVec3f(mat->scatterColor[0], mat->scatterColor[1], mat->scatterColor[2]);
+        // Phase function
+        vol->phaseMode = mat->phaseMode;
+        vol->mieDropletD = float(mat->mieDropletD);
         vol->gForward = float(mat->gForward);
         vol->gBackward = float(mat->gBackward);
         vol->lobeMix = float(mat->lobeMix);
         vol->powderStrength = float(mat->powder);
+        vol->gradientMix = float(mat->gradientMix);
         vol->jitter = mat->jitter;
-        vol->scatterColor = pxr::GfVec3f(mat->scatterColor[0], mat->scatterColor[1], mat->scatterColor[2]);
+        // Emission
+        vol->emissionIntensity = float(mat->emissionIntensity);
+        vol->tempMin = float(mat->tempMin);
+        vol->tempMax = float(mat->tempMax);
+        vol->flameIntensity = float(mat->flameIntensity);
         vol->useBlackbody = mat->useBlackbody;
+        // Chromatic extinction
         vol->chromaticExtinction = mat->chromaticExtinction;
         vol->sigmaR = float(mat->sigmaR);
         vol->sigmaG = float(mat->sigmaG);
         vol->sigmaB = float(mat->sigmaB);
+        // Noise
+        vol->noiseEnable = mat->noiseEnable;
+        vol->noiseNormalize = mat->noiseNormalize;
+        vol->noiseScale = float(mat->noiseScale);
+        vol->noiseStrength = float(mat->noiseStrength);
+        vol->noiseOctaves = mat->noiseOctaves;
+        vol->noiseRoughness = float(mat->noiseRoughness);
+        // Multiple scattering
+        vol->msApprox = mat->msApprox;
+        vol->msTint = pxr::GfVec3f(mat->msTint[0], mat->msTint[1], mat->msTint[2]);
     } else {
         // Fall back to SpectralRender's own Volumes tab knobs
         vol->extinction = float(_vdbExtinction);
@@ -4116,7 +4135,6 @@ void SpectralRenderIop::_applyVolumeShading(std::shared_ptr<pxr::SpectralVolume>
         vol->tempMin = float(_vdbTempMin);
         vol->tempMax = float(_vdbTempMax);
         vol->flameIntensity = float(_vdbFlameIntensity);
-        vol->stepSize = float(_vdbStepSize);
         vol->gForward = float(_vdbGForward);
         vol->gBackward = float(_vdbGBackward);
         vol->lobeMix = float(_vdbLobeMix);
@@ -4125,26 +4143,27 @@ void SpectralRenderIop::_applyVolumeShading(std::shared_ptr<pxr::SpectralVolume>
         vol->scatterColor = pxr::GfVec3f(_vdbScatterColor[0], _vdbScatterColor[1], _vdbScatterColor[2]);
         vol->useBlackbody = false;
         vol->chromaticExtinction = false;
+        vol->phaseMode = _vdbPhaseMode;
+        vol->mieDropletD = float(_vdbMieDropletD);
+        vol->noiseEnable = _vdbNoiseEnable;
+        vol->noiseNormalize = _vdbNoiseNormalize;
+        vol->noiseScale = float(_vdbNoiseScale);
+        vol->noiseStrength = float(_vdbNoiseStrength);
+        vol->noiseOctaves = _vdbNoiseOctaves;
+        vol->noiseRoughness = float(_vdbNoiseRoughness);
+        vol->msApprox = _vdbMsApprox;
+        vol->msTint = pxr::GfVec3f(_vdbMsTint[0], _vdbMsTint[1], _vdbMsTint[2]);
     }
-    // Always apply from SpectralRender (these aren't on VolumeMaterial yet)
+    // Always from SpectralRender (rendering quality, not look)
+    vol->stepSize = float(_vdbStepSize);
     vol->shadowSteps = _vdbShadowSteps;
     vol->shadowDensity = float(_vdbShadowDensity);
     vol->quality = float(_vdbQuality);
     vol->adaptiveStep = _vdbAdaptiveStep;
-    vol->msApprox = _vdbMsApprox;
-    vol->msTint = pxr::GfVec3f(_vdbMsTint[0], _vdbMsTint[1], _vdbMsTint[2]);
-    vol->noiseEnable = _vdbNoiseEnable;
-    vol->noiseNormalize = _vdbNoiseNormalize;
-    vol->noiseScale = float(_vdbNoiseScale);
-    vol->noiseStrength = float(_vdbNoiseStrength);
-    vol->noiseOctaves = _vdbNoiseOctaves;
-    vol->noiseRoughness = float(_vdbNoiseRoughness);
     vol->renderMode = _vdbRenderMode;
     vol->intensity = float(_vdbIntensity);
     vol->envIntensity = float(_vdbEnvIntensity);
     vol->envDiffuse = float(_vdbEnvDiffuse);
-    vol->phaseMode = _vdbPhaseMode;
-    vol->mieDropletD = float(_vdbMieDropletD);
     vol->spectralVolumes = _vdbSpectralVolumes;
 
     // Volume transform (disabled — use GeoTransform upstream instead)
@@ -4238,6 +4257,56 @@ static GfVec3f dirFromElevAzim(double elevDeg, double azimDeg) {
 void SpectralRenderIop::_BuildLightRig()
 {
     if (!_scene) return;
+
+    // Search scn input chain for SpectralEnvLight and SpectralStudioLight
+    SpectralEnvLight* envLight = nullptr;
+    SpectralStudioLight* studioLight = nullptr;
+    if (inputs() > 0 && input(0)) {
+        std::vector<Op*> searchOps;
+        searchOps.push_back(input(0));
+        for (int depth = 0; depth < 4 && (!envLight || !studioLight); ++depth) {
+            std::vector<Op*> nextLevel;
+            for (Op* op : searchOps) {
+                if (!op) continue;
+                if (!envLight && strcmp(op->Class(), "SpectralEnvLight") == 0)
+                    envLight = static_cast<SpectralEnvLight*>(op);
+                if (!studioLight && strcmp(op->Class(), "SpectralStudioLight") == 0)
+                    studioLight = static_cast<SpectralStudioLight*>(op);
+                for (int i = 0; i < op->inputs(); ++i) {
+                    Op* up = op->input(i);
+                    if (up) nextLevel.push_back(up);
+                }
+            }
+            searchOps = nextLevel;
+        }
+    }
+
+    // Override local lighting params from scene-graph nodes
+    if (envLight) {
+        _skyPreset = envLight->skyPreset;
+        _sunElevation = envLight->sunElevation;
+        _sunAzimuth = envLight->sunAzimuth;
+        _sunIntensity = envLight->sunIntensity;
+        _skyIntensity = envLight->skyIntensity;
+        _hdriFile = envLight->hdriFile;
+        _hdriIntensity = envLight->hdriIntensity;
+        _hdriRotate = envLight->hdriRotate;
+        _vdbEnvIntensity = envLight->envIntensity;
+        _vdbEnvDiffuse = envLight->envDiffuse;
+        _vdbEnvMode = envLight->envMode;
+        _vdbEnvVirtualLights = envLight->envVirtualLights;
+        _vdbUseReSTIR = envLight->useReSTIR;
+    }
+    if (studioLight) {
+        _studioPreset = studioLight->studioPreset;
+        _studioMix = studioLight->mix;
+        _studioKeyAzimuth = studioLight->keyAzimuth;
+        _studioKeyElevation = studioLight->keyElevation;
+        _studioKeyIntensity = studioLight->keyIntensity;
+        _studioFillRatio = studioLight->fillRatio;
+        _studioRimIntensity = studioLight->rimIntensity;
+        _shadowSoftness = studioLight->shadowSoftness;
+    }
 
     // Remove previous rig lights but preserve scene input lights.
     // Scene input lights have names from USD. Rig lights have empty names.

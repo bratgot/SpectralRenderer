@@ -118,6 +118,7 @@ struct SpectralVolume {
     float stepSize        = 0.f;       // 0 = auto
     float shadowStepMult  = 2.f;       // shadow steps are coarser
     float powderStrength  = 2.f;
+    float gradientMix    = 0.f;    // blend HG phase with density-gradient Lambertian
     bool  jitter          = true;
 
     // Dual-lobe HG

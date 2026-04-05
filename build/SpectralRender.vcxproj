@@ -334,6 +334,8 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClCompile Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralSurfaceOp.cpp" />
     <ClCompile Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralVDBRead.cpp" />
     <ClCompile Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralVolumeMaterial.cpp" />
+    <ClCompile Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralEnvLight.cpp" />
+    <ClCompile Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralStudioLight.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\ZERO_CHECK.vcxproj">
