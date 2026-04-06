@@ -124,10 +124,10 @@ const char* SpectralRenderIop::node_help() const
 {
     return
         "SpectralRender — physically-based spectral path tracer.\n\n"
-        "Input 0 (Scene): Connect GeoScene with geometry and/or SpectralVDBRead.\n"
+        "Input 0 (Cam): Connect a Camera node (optional, defaults to 24mm).\n"
         "Volumes and materials are auto-detected from upstream nodes.\n\n"
-        "Input 1 (Cam): Connect a Camera node.\n"
-        "If not connected, uses first camera found in the USD stage,\n"
+        "Input 1 (Scene): Connect GeoScene with geometry and/or SpectralVDBRead.\n"
+        "Volumes and materials are auto-detected from upstream nodes.\n"
         "or a default 50mm perspective.\n\n"
         "Input 2 (BG): Connect any 2D image. Its format sets the\n"
         "output resolution. The BG image is rendered behind the scene.\n\n"
@@ -140,8 +140,8 @@ const char* SpectralRenderIop::node_help() const
 const char* SpectralRenderIop::input_label(int idx, char*) const
 {
     switch (idx) {
-        case 0: return "scn";
-        case 1: return "cam";
+        case 0: return "cam";
+        case 1: return "scn";
         case 2: return "bg";
         default: return nullptr;
     }
@@ -151,8 +151,8 @@ bool SpectralRenderIop::test_input(int idx, Op* op) const
 {
     if (!op) return true;
     switch (idx) {
-        case 0: return dynamic_cast<GeometryProviderI*>(op) != nullptr;
-        case 1: return dynamic_cast<CameraOp*>(op) != nullptr;
+        case 0: return dynamic_cast<CameraOp*>(op) != nullptr;
+        case 1: return dynamic_cast<GeometryProviderI*>(op) != nullptr;
         case 2: return dynamic_cast<Iop*>(op) != nullptr;
         default: return false;
     }
@@ -942,10 +942,11 @@ void SpectralRenderIop::knobs(Knob_Callback f)
     );
     Newline(f);
     Int_knob(f, &_deepSamples, "deep_samples", "deep samples"); SetRange(f, 0, 128);
-    Tooltip(f, "Depth slabs per pixel. 0 = disabled.\n"
-               "16 = fast preview. 64 = smooth gradients.\n"
-               "128 = final quality for deep compositing.\n"
-               "Each slab stores RGBA + front/back depth.");
+    Tooltip(f, "Deep quality. 0 = disabled (shell only).\n"
+               "16 = fast preview. 32 = 1:1 voxel stepping. 64+ = sub-voxel.\n"
+               "Samples placed at density, not uniform slabs.\n"
+               "More samples cluster where volume is dense,\n"
+               "empty space is skipped entirely.");
 
     // ─── Motion Blur ────────────────────────────────────────────────
     Divider(f, "Motion blur");
@@ -1485,7 +1486,7 @@ void SpectralRenderIop::_validate(bool forReal)
     info_.black_outside(true);
 
     // Check if scn input changed (GeoTransform, VDBRead knobs, etc.)
-    Op* scnOp = (inputs() > 0) ? input(0) : nullptr;
+    Op* scnOp = (inputs() > 1) ? input(1) : nullptr;
     bool scnChanged = false;
     if (scnOp) {
         scnOp->validate(forReal);
@@ -1700,7 +1701,7 @@ void SpectralRenderIop::_LoadStage()
     // ------------------------------------------------------------------
     // Path 1: GeomOp input connected — use Nuke's USD scene graph
     // ------------------------------------------------------------------
-    Op* in0 = (maximum_inputs() > 0 && inputs() > 0) ? input(0) : nullptr;
+    Op* in0 = (maximum_inputs() > 1 && inputs() > 1) ? input(1) : nullptr;
     GeometryProviderI* geoProvider = in0 ? dynamic_cast<GeometryProviderI*>(in0) : nullptr;
 
     if (geoProvider) {
@@ -3335,13 +3336,13 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
 }
 
 // ---------------------------------------------------------------------------
-// _BuildCameraFromInput — override camera from input 1 (CameraOp) if connected
+// _BuildCameraFromInput — override camera from input 0 (CameraOp) if connected
 // ---------------------------------------------------------------------------
 void SpectralRenderIop::_BuildCameraFromInput()
 {
     _cameraFromInput = false;
 
-    Op* camOp = (inputs() > 1) ? input(1) : nullptr;
+    Op* camOp = (inputs() > 0) ? input(0) : nullptr;
     if (!camOp) return;
 
     CameraOp* cam = dynamic_cast<CameraOp*>(camOp);
@@ -3484,7 +3485,7 @@ void SpectralRenderIop::build_handles(ViewerContext* ctx)
     }
 
     // Camera handles
-    Op* cam = (inputs() > 1) ? input(1) : nullptr;
+    Op* cam = (inputs() > 0) ? input(0) : nullptr;
     if (cam) cam->build_handles(ctx);
 }
 
@@ -3794,9 +3795,9 @@ void SpectralRenderIop::_LoadVDB()
     }
 #endif
 
-    // Path 2: Scn input (input 0) — find ALL SpectralVDBRead upstream through GeoScene
-    if (inputs() > 0 && input(0)) {
-        Op* scn = input(0);
+    // Path 2: Scn input (input 1) — find ALL SpectralVDBRead upstream through GeoScene
+    if (inputs() > 1 && input(1)) {
+        Op* scn = input(1);
         scn->validate(true);
 
         // Search scn and its inputs for SpectralVolMerge, VDBRead, and light nodes
@@ -3898,8 +3899,8 @@ void SpectralRenderIop::_LoadVDB()
             // (same approach as VolMerge — reads transform knobs directly)
             struct VDBWithXform { SpectralVDBRead* vdb; Op* chainTop; };
             std::vector<VDBWithXform> vdbEntries;
-            for (int inp = 0; inp < (input(0) ? input(0)->inputs() : 0); ++inp) {
-                Op* up = input(0)->input(inp);
+            for (int inp = 0; inp < (input(1) ? input(1)->inputs() : 0); ++inp) {
+                Op* up = input(1)->input(inp);
                 if (!up) continue;
                 Op* cur = up;
                 SpectralVDBRead* vdb = nullptr;
@@ -4103,7 +4104,7 @@ void SpectralRenderIop::_applyVolumeShading(std::shared_ptr<pxr::SpectralVolume>
     // Find SpectralVolumeMaterial by walking input chain
     SpectralVolumeMaterial* mat = nullptr;
 
-    Op* startOp = searchFrom ? searchFrom : (inputs() > 0 ? input(0) : nullptr);
+    Op* startOp = searchFrom ? searchFrom : (inputs() > 1 ? input(1) : nullptr);
     if (startOp) {
         std::vector<Op*> searchOps;
         searchOps.push_back(startOp);
@@ -4308,9 +4309,9 @@ void SpectralRenderIop::_BuildLightRig()
     SpectralStudioLight* studioLight = !_allStudioLights.empty() ? _allStudioLights[0] : nullptr;
 
     // Also try direct discovery if vectors are empty (legacy path)
-    if (!envLight && !studioLight && inputs() > 0 && input(0)) {
+    if (!envLight && !studioLight && inputs() > 1 && input(1)) {
         std::vector<Op*> searchOps;
-        searchOps.push_back(input(0));
+        searchOps.push_back(input(1));
         for (int depth = 0; depth < 4 && (!envLight || !studioLight); ++depth) {
             std::vector<Op*> nextLevel;
             for (Op* op : searchOps) {
@@ -4794,45 +4795,183 @@ bool SpectralRenderIop::doDeepEngine(DD::Image::Box box,
     const int H = static_cast<int>(_fbHeight);
 
     if (_frameBuffer.empty() || _depthBuffer.empty() || W == 0 || H == 0)
-        return true;  // empty plane
+        return true;
 
-    // Create the output plane with requested channels
+    // Proxy scaling
+    const Format* fmt = &(info_.format());
+    const int fmtW = fmt ? fmt->width() : W;
+    const int fmtH = fmt ? fmt->height() : H;
+    const float scaleX = float(W) / float(std::max(1, fmtW));
+    const float scaleY = float(H) / float(std::max(1, fmtH));
+
     DD::Image::ChannelSet outChans = channels;
     outChans += Chan_DeepFront;
     outChans += Chan_DeepBack;
-
     plane = DeepOutputPlane(outChans, box, DeepPixel::eZAscending);
-
     const int nChans = outChans.size();
+
+    // Deep samples per pixel (0 = disabled, use shell fallback)
+    const int deepN = std::max(0, _deepSamples);
+    const bool hasVolumes = !_volumes.empty();
+
+    // Camera matrices for ray generation and depth conversion
+    const pxr::GfMatrix4d& v2w = _camera.viewToWorld;
+    const pxr::GfMatrix4d& pInv = _camera.projInverse;
+    const pxr::GfMatrix4d w2v = v2w.GetInverse();
+    const double imgW = double(_camera.imageWidth);
+    const double imgH = double(_camera.imageHeight);
+    const double pxAspect = _camera.pixelAspect;
 
     for (DD::Image::Box::iterator it = box.begin(); it != box.end(); ++it) {
         const int px = it.x;
         const int py = it.y;
+        const int bufX = int(px * scaleX);
+        const int bufY = H - 1 - int(py * scaleY);
 
-        // Flip Y: Nuke bottom-up, our buffer top-down
-        const int bufY = H - 1 - py;
-
-        if (px < 0 || px >= W || bufY < 0 || bufY >= H) {
-            plane.addHole();
-            continue;
+        if (bufX < 0 || bufX >= W || bufY < 0 || bufY >= H) {
+            plane.addHole(); continue;
         }
 
-        const size_t pixIdx = static_cast<size_t>(bufY) * W + px;
-        const float depth = _depthBuffer[pixIdx];
-
-        // No hit = no deep sample (sky pixels)
-        if (depth >= 1e29f) {
-            plane.addHole();
-            continue;
-        }
-
+        const size_t pixIdx = static_cast<size_t>(bufY) * W + bufX;
         const float* rgba = _frameBuffer.data() + pixIdx * 4;
+        const float surfDepth = _depthBuffer[pixIdx];
 
-        // One deep sample per pixel
+        // ---- Volumetric deep: march volumes and output per-slab samples ----
+        if (hasVolumes && deepN > 0) {
+            // Generate camera ray for this pixel
+            double ndcX = (2.0 * (bufX + 0.5) / imgW - 1.0) / pxAspect;
+            double ndcY = 1.0 - 2.0 * (bufY + 0.5) / imgH;
+            pxr::GfVec3d viewNear = pInv.Transform(pxr::GfVec3d(ndcX, ndcY, -1.0));
+            pxr::GfVec3d viewFar  = pInv.Transform(pxr::GfVec3d(ndcX, ndcY,  1.0));
+            pxr::GfVec3d worldNear = v2w.Transform(viewNear);
+            pxr::GfVec3d worldFar  = v2w.Transform(viewFar);
+            pxr::GfVec3f ro(worldNear);
+            pxr::GfVec3f rd(pxr::GfVec3f(worldFar - worldNear).GetNormalized());
+
+            // Collect all slab samples across all volumes
+            struct DeepSlab { float front; float back; float r,g,b,a; };
+            std::vector<DeepSlab> slabs;
+
+            for (auto& vol : _volumes) {
+                if (!vol || !vol->IsValid()) continue;
+
+                // Ray-AABB
+                pxr::GfVec3f invDir(
+                    1.f/(std::abs(rd[0])>1e-8f?rd[0]:1e-8f),
+                    1.f/(std::abs(rd[1])>1e-8f?rd[1]:1e-8f),
+                    1.f/(std::abs(rd[2])>1e-8f?rd[2]:1e-8f));
+                pxr::GfVec3f t0v(
+                    (vol->GetBboxMin()[0]-ro[0])*invDir[0],
+                    (vol->GetBboxMin()[1]-ro[1])*invDir[1],
+                    (vol->GetBboxMin()[2]-ro[2])*invDir[2]);
+                pxr::GfVec3f t1v(
+                    (vol->GetBboxMax()[0]-ro[0])*invDir[0],
+                    (vol->GetBboxMax()[1]-ro[1])*invDir[1],
+                    (vol->GetBboxMax()[2]-ro[2])*invDir[2]);
+                float tNear = std::max({std::min(t0v[0],t1v[0]),std::min(t0v[1],t1v[1]),std::min(t0v[2],t1v[2])});
+                float tFar  = std::min({std::max(t0v[0],t1v[0]),std::max(t0v[1],t1v[1]),std::max(t0v[2],t1v[2])});
+                tNear = std::max(tNear, 0.f);
+                if (tNear >= tFar) continue;
+
+                // Adaptive march: step at voxel scale, emit sample at each dense step
+                // deep_samples controls quality: higher = finer steps = more samples
+                pxr::GfVec3f bboxSize = vol->GetBboxMax() - vol->GetBboxMin();
+                float voxelSize = std::max({bboxSize[0]/std::max(1.f,float(vol->resX)),
+                                            bboxSize[1]/std::max(1.f,float(vol->resY)),
+                                            bboxSize[2]/std::max(1.f,float(vol->resZ))});
+                float quality = std::max(0.25f, float(deepN) / 32.f);  // deep_samples=32 → 1x voxel step
+                float dt = voxelSize / quality;
+                float transmittance = 1.f;
+                int maxSteps = std::min(512, int((tFar - tNear) / dt) + 1);
+
+                float t = tNear;
+                for (int step = 0; step < maxSteps && t < tFar; ++step) {
+                    float tFront = t;
+                    float tBack  = std::min(t + dt, tFar);
+                    float tMid   = (tFront + tBack) * 0.5f;
+
+                    pxr::GfVec3f p = ro + rd * tMid;
+                    pxr::GfVec3f uv = vol->WorldToNorm(p);
+                    float density = 0.f;
+                    if (uv[0]>=0&&uv[0]<=1&&uv[1]>=0&&uv[1]<=1&&uv[2]>=0&&uv[2]<=1)
+                        density = vol->SampleDensity(uv[0], uv[1], uv[2]) * vol->densityMult;
+
+                    if (density < 1e-5f) {
+                        t += dt * 4.f;  // skip 4x in empty regions
+                        continue;
+                    }
+
+                    float stepDt = tBack - tFront;
+                    float sigma_t = density * vol->extinction;
+                    float slabTrans = std::exp(-sigma_t * stepDt);
+                    float slabAlpha = 1.f - slabTrans;
+
+                    // Premultiplied RGB from scatter color + density
+                    float weight = transmittance * slabAlpha;
+                    float cr = vol->scatterColor[0] * vol->intensity * density;
+                    float cg = vol->scatterColor[1] * vol->intensity * density;
+                    float cb = vol->scatterColor[2] * vol->intensity * density;
+                    float cMax = std::max({cr, cg, cb, 0.001f});
+                    cr = rgba[0] * weight * (cr/cMax);
+                    cg = rgba[1] * weight * (cg/cMax);
+                    cb = rgba[2] * weight * (cb/cMax);
+
+                    // Convert to camera-Z depth
+                    pxr::GfVec3d wFront = pxr::GfVec3d(ro) + pxr::GfVec3d(rd) * double(tFront);
+                    pxr::GfVec3d wBack  = pxr::GfVec3d(ro) + pxr::GfVec3d(rd) * double(tBack);
+                    float zFront = float(-w2v.Transform(wFront)[2]);
+                    float zBack  = float(-w2v.Transform(wBack)[2]);
+
+                    if (zFront > 0.f && zBack > 0.f) {
+                        slabs.push_back({zFront, zBack, cr, cg, cb, weight});
+                    }
+
+                    transmittance *= slabTrans;
+                    if (transmittance < 0.001f) break;
+                    t += dt;
+                }
+            }
+
+            // Note: surface geometry deep should use deep_samples=0 (shell mode)
+            // or be rendered separately for DeepMerge. Volume slabs carry the
+            // full volumetric contribution — no shell needed.
+
+            if (slabs.empty()) {
+                plane.addHole();
+                continue;
+            }
+
+            // Sort by front depth
+            std::sort(slabs.begin(), slabs.end(),
+                [](const DeepSlab& a, const DeepSlab& b) { return a.front < b.front; });
+
+            // Output all slabs
+            DeepOutPixel op(nChans * slabs.size());
+            for (auto& slab : slabs) {
+                foreach(z, outChans) {
+                    if      (z == Chan_DeepFront) op.push_back(slab.front);
+                    else if (z == Chan_DeepBack)  op.push_back(slab.back);
+                    else if (z == Chan_Red)       op.push_back(slab.r);
+                    else if (z == Chan_Green)     op.push_back(slab.g);
+                    else if (z == Chan_Blue)      op.push_back(slab.b);
+                    else if (z == Chan_Alpha)     op.push_back(slab.a);
+                    else                          op.push_back(0.f);
+                }
+            }
+            plane.addPixel(op);
+            continue;
+        }
+
+        // ---- Fallback: single shell sample (no volumes or deepSamples=0) ----
+        if (surfDepth >= 1e29f) {
+            plane.addHole();
+            continue;
+        }
+
         DeepOutPixel op(nChans);
         foreach(z, outChans) {
-            if      (z == Chan_DeepFront) op.push_back(depth);
-            else if (z == Chan_DeepBack)  op.push_back(depth + 0.001f);
+            if      (z == Chan_DeepFront) op.push_back(surfDepth);
+            else if (z == Chan_DeepBack)  op.push_back(surfDepth + 0.001f);
             else if (z == Chan_Red)       op.push_back(rgba[0]);
             else if (z == Chan_Green)     op.push_back(rgba[1]);
             else if (z == Chan_Blue)      op.push_back(rgba[2]);

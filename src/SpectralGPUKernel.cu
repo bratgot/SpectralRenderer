@@ -975,6 +975,52 @@ static __forceinline__ __device__ void marchVolume(
     }
 }
 
+// Distance to first dense voxel (for depth/deep output)
+// Lightweight march — no shading, just finds where density > threshold
+static __forceinline__ __device__ float volumeFirstDenseT(float3 ro, float3 rdRaw)
+{
+    float nearest = 1e30f;
+    float rdLen = sqrtf(rdRaw.x*rdRaw.x + rdRaw.y*rdRaw.y + rdRaw.z*rdRaw.z);
+    if (rdLen < 1e-8f) return nearest;
+    float3 rd = make_float3(rdRaw.x/rdLen, rdRaw.y/rdLen, rdRaw.z/rdLen);
+
+    for (int vi = 0; vi < params.numGpuVolumes; ++vi) {
+        const spectral_gpu::GPUVolume& vol = params.gpuVolumes[vi];
+        if (!vol.density) continue;
+        float3 invDir = make_float3(
+            1.f/(fabsf(rd.x)>1e-8f?rd.x:1e-8f),
+            1.f/(fabsf(rd.y)>1e-8f?rd.y:1e-8f),
+            1.f/(fabsf(rd.z)>1e-8f?rd.z:1e-8f));
+        float3 t0=make_float3((vol.bboxMin.x-ro.x)*invDir.x,(vol.bboxMin.y-ro.y)*invDir.y,(vol.bboxMin.z-ro.z)*invDir.z);
+        float3 t1=make_float3((vol.bboxMax.x-ro.x)*invDir.x,(vol.bboxMax.y-ro.y)*invDir.y,(vol.bboxMax.z-ro.z)*invDir.z);
+        float tNear=fmaxf(fmaxf(fminf(t0.x,t1.x),fminf(t0.y,t1.y)),fminf(t0.z,t1.z));
+        float tFar=fminf(fminf(fmaxf(t0.x,t1.x),fmaxf(t0.y,t1.y)),fmaxf(t0.z,t1.z));
+        tNear=fmaxf(tNear,0.f);
+        if (tNear >= tFar) continue;
+
+        // March with coarse steps to find first dense voxel
+        float3 bSize=make_float3(vol.bboxMax.x-vol.bboxMin.x,vol.bboxMax.y-vol.bboxMin.y,vol.bboxMax.z-vol.bboxMin.z);
+        float voxelSize=fmaxf(fmaxf(bSize.x/vol.resX,bSize.y/vol.resY),bSize.z/vol.resZ);
+        float dt = voxelSize * 2.f;  // coarse steps for speed
+        int maxSteps = min(128, int((tFar-tNear)/dt)+1);
+        for (int step=0; step<maxSteps; ++step) {
+            float t = tNear + step * dt;
+            if (t >= tFar) break;
+            float px=ro.x+rd.x*t, py=ro.y+rd.y*t, pz=ro.z+rd.z*t;
+            float u,v,w;
+            worldToVolUV(vol, px, py, pz, u, v, w);
+            float d = sampleDensity(vol, u, v, w);
+            if (d > 0.01f) {
+                // Found dense voxel — refine with one half-step back
+                float tRefined = (step > 0) ? t - dt*0.5f : t;
+                if (tRefined < nearest) nearest = tRefined;
+                break;
+            }
+        }
+    }
+    return nearest;
+}
+
 // ---------------------------------------------------------------------------
 // __raygen__spectral
 // ---------------------------------------------------------------------------
@@ -1029,7 +1075,14 @@ extern "C" __global__ void __raygen__spectral()
         }
 
         params.framebuffer[pixIdx] = make_float4(r, g, b, spp1Alpha);
-        if (params.depthbuffer) params.depthbuffer[pixIdx] = __uint_as_float(p3);
+        if (params.depthbuffer) {
+            float d = __uint_as_float(p3);
+            // Volume depth fallback: if no surface hit but volume had contribution
+            if (d >= 1e29f && params.numGpuVolumes > 0 && spp1Alpha > 0.001f) {
+                d = volumeFirstDenseT(origin, dir);
+            }
+            params.depthbuffer[pixIdx] = d;
+        }
     } else {
         // Spectral with BSDF + lights + bounces
         float X=0.f, Y=0.f, Z=0.f;
@@ -1262,7 +1315,15 @@ extern "C" __global__ void __raygen__spectral()
         }
         params.framebuffer[pixIdx] = make_float4(fmaxf(0.f,r),fmaxf(0.f,g),fmaxf(0.f,b),
                                                     alphaAccum / float(spp));
-        if (params.depthbuffer) params.depthbuffer[pixIdx] = minDepth;
+        if (params.depthbuffer) {
+            // Volume depth fallback for volume-only pixels
+            if (minDepth >= 1e29f && params.numGpuVolumes > 0 && alphaAccum > 0.001f) {
+                float3 dOrigin, dDir;
+                makeRay(float(px)+0.5f, float(py)+0.5f, W, H, dOrigin, dDir, pixIdx);
+                minDepth = volumeFirstDenseT(dOrigin, dDir);
+            }
+            params.depthbuffer[pixIdx] = minDepth;
+        }
     }
 }
 

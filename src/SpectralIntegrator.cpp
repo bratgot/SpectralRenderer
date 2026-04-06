@@ -328,6 +328,7 @@ void SpectralIntegrator::RenderFrame(
                             float finalVolTrans = 1.f;
                             GfVec3f totalVolRGB(0.f);
                             float vx = 0.f, vy = 0.f, vz = 0.f;
+                            float volFirstDenseT = 1e30f;  // distance to first dense voxel
                             for (int vi = 0; vi < numVolumes; ++vi) {
                                 const SpectralVolume* volume = volumes[vi];
                                 if (!volume || !volume->IsValid()) continue;
@@ -411,6 +412,9 @@ void SpectralIntegrator::RenderFrame(
                                             if (volume->adaptiveStep) t += dt * 3.f; // 4x step in empty
                                             continue;
                                         }
+
+                                        // Track distance to first dense voxel (for depth AOV)
+                                        if (t < volFirstDenseT) volFirstDenseT = t;
 
                                         // Beer-Lambert extinction
                                         float sigma_t = density * volume->extinction;
@@ -555,6 +559,15 @@ void SpectralIntegrator::RenderFrame(
                                 accAlpha[pixIdx] += sampleAlpha;
                             }
 
+                            // Volume depth: if no surface hit but volume had dense voxels,
+                            // write distance to first dense voxel as depth (smooth, follows volume shape)
+                            if (!hit.valid() && finalVolTrans < 0.999f && volFirstDenseT < 1e29f) {
+                                GfVec3d volHitWorld = ray.GetStartPoint() + volFirstDenseT * ray.GetDirection();
+                                GfVec3d volHitView = worldToView.Transform(volHitWorld);
+                                float volZ = static_cast<float>(-volHitView[2]);
+                                if (volZ < depthBuf[pixIdx]) depthBuf[pixIdx] = volZ;
+                            }
+
                             // Firefly clamp: limit extreme spectral outliers
                             // Rough glass + dispersion can produce very bright
                             // single-wavelength pixels. Clamping at 100x average
@@ -572,6 +585,12 @@ void SpectralIntegrator::RenderFrame(
                             accY[pixIdx] += xyz[1] + vy;
                             accZ[pixIdx] += xyz[2] + vz;
                             accCount[pixIdx]++;
+
+                            // Volume AOV contribution — volumes are directly lit
+                            if (vx > 0.f || vy > 0.f || vz > 0.f) {
+                                if (trackDirect)   { accDirectX[pixIdx]   += vx; accDirectY[pixIdx]   += vy; accDirectZ[pixIdx]   += vz; }
+                                if (trackEmission) { accEmissionX[pixIdx] += vx; accEmissionY[pixIdx] += vy; accEmissionZ[pixIdx] += vz; }
+                            }
 
                             // Accumulate shading components
                             if (trackDirect) {

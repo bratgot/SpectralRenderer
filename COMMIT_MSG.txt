@@ -1,0 +1,46 @@
+Deep volumetric output + volume AOVs + input reorder + fixes
+
+Deep output — true volumetric deep:
+- Rewrote doDeepEngine for multi-sample volumetric deep compositing
+- Each pixel outputs N depth-sorted RGBA slabs (controlled by deep_samples knob)
+- Per-slab: Beer-Lambert opacity, premultiplied RGBA, front/back camera-Z depth
+- Empty slabs skipped, early termination at transmittance < 0.001
+- Surface hits added as shell sample, sorted with volume slabs
+- Falls back to single shell when deep_samples=0 or no volumes
+- Proxy coordinate scaling fixed (format coords → buffer coords)
+
+Volume depth — smooth, not facetted:
+- CPU: tracks volFirstDenseT (ray distance to first voxel with density > threshold)
+- GPU: volumeFirstDenseT() lightweight coarse march (2x voxel steps, max 128)
+  with half-step refinement — replaces bbox tNear which gave flat cube faces
+- Depth now follows actual volume shape
+
+Volume AOVs:
+- CPU direct AOV: volume scatter XYZ accumulated per sample
+- CPU emission AOV: volume emission XYZ accumulated per sample
+- Volume-only pixels now have valid depth, direct, and emission passes
+
+Input reorder — SpectralRender:
+- cam=0, scn=1, bg=2 (was scn=0, cam=1, bg=2)
+- Updated: input_label, test_input, default_input, _BuildCameraFromInput,
+  build_handles, _LoadStage, scene walks, _applyVolumeShading, _BuildLightRig
+- Header comments updated
+
+VDBRead material input:
+- minimum_inputs=1 (mat arrow always visible)
+- test_input accepts any Op (ShaderOp compat for SpectralVolumeMaterial)
+- Per-volume shading works via VolMerge chain walk
+
+Default camera:
+- 24mm on 36mm sensor at (0,2,8) when no Camera connected
+
+Estimate Memory fix:
+- Uses meta->resX/resY/resZ (actual native dims, not cbrt approximation)
+
+UI:
+- Technical twirly (SIGGRAPH-style) on first tab with citations
+- Credits + version on first tab below lighting
+- Volume tab tech reference removed (now on shader nodes)
+
+Files: SpectralRenderIop.h/.cpp, SpectralVDBRead.h/.cpp, SpectralIntegrator.cpp,
+       SpectralGPUKernel.cu
