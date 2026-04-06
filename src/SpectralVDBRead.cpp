@@ -297,12 +297,28 @@ SpectralVDBRead::SpectralVDBRead(Node* node)
 
 const char* SpectralVDBRead::node_help() const
 {
-    return "SpectralVDBRead — OpenVDB Volume Reader\n\n"
+    return "SpectralVDBRead -- OpenVDB Volume Reader\n\n"
            "Reads OpenVDB (.vdb) files for volume rendering.\n"
            "Displays density point cloud in the 3D viewer.\n\n"
+           "Connect a SpectralVolumeMaterial to the mat input\n"
+           "for per-volume shading control.\n\n"
            "SpectralVDBRead -> GeoScene -> SpectralRender\n\n"
            "Created by Marten Blumen";
 }
+
+bool SpectralVDBRead::test_input(int input, Op* op) const
+{
+    // Accept any Op on mat input — ShaderOp (SpectralVolumeMaterial) doesn't extend GeomOp
+    if (input == 0) return op != nullptr;
+    return SourceGeomOp::test_input(input, op);
+}
+
+const char* SpectralVDBRead::input_label(int input, char* buf) const
+{
+    if (input == 0) { strcpy(buf, "mat"); return buf; }
+    return SourceGeomOp::input_label(input, buf);
+}
+
 
 const char* SpectralVDBRead::_GetDensityName() const
 {
@@ -564,27 +580,35 @@ int SpectralVDBRead::knob_changed(Knob* k)
             std::string resolved = _autoSequence ? _resolveFramePath(frame) : std::string(_filePath);
             if (!resolved.empty()) {
                 auto grids = pxr::SpectralVDBLoader::DiscoverGrids(resolved.c_str());
-                int nativeMax = 0, gridCount = 0;
-                int nativeX = 0, nativeY = 0, nativeZ = 0;
-                for (const auto& g : grids) {
-                    if (g.voxelCount > 0) {
-                        int d = int(std::cbrt(double(g.voxelCount)));
-                        if (d > nativeMax) nativeMax = d;
-                        gridCount++;
-                    }
-                }
-                auto meta = pxr::SpectralVDBLoader::LoadMetadataOnly(resolved.c_str(), _GetDensityName());
-                if (meta && meta->HasBbox()) {
-                    pxr::GfVec3f bs = meta->bboxMax - meta->bboxMin;
-                    float maxS = std::max({bs[0], bs[1], bs[2]});
-                    if (maxS > 0) {
-                        nativeX = int(nativeMax * bs[0] / maxS);
-                        nativeY = int(nativeMax * bs[1] / maxS);
-                        nativeZ = int(nativeMax * bs[2] / maxS);
-                    }
-                }
-                if (nativeMax == 0) nativeMax = nativeX = nativeY = nativeZ = 128;
+                int gridCount = 0;
+                for (const auto& g : grids) if (g.voxelCount > 0) gridCount++;
 
+                // Get actual native resolution from metadata
+                int nativeX = 0, nativeY = 0, nativeZ = 0;
+                auto meta = pxr::SpectralVDBLoader::LoadMetadataOnly(resolved.c_str(), _GetDensityName());
+                if (meta) {
+                    nativeX = meta->resX;
+                    nativeY = meta->resY;
+                    nativeZ = meta->resZ;
+                }
+                if (nativeX == 0 || nativeY == 0 || nativeZ == 0) {
+                    // Fallback: estimate from voxel count + bbox aspect
+                    int nativeMax = 128;
+                    for (const auto& g : grids)
+                        if (g.voxelCount > 0) nativeMax = std::max(nativeMax, int(std::cbrt(double(g.voxelCount))));
+                    if (meta && meta->HasBbox()) {
+                        pxr::GfVec3f bs = meta->bboxMax - meta->bboxMin;
+                        float maxS = std::max({bs[0], bs[1], bs[2]});
+                        if (maxS > 0) {
+                            nativeX = int(nativeMax * bs[0] / maxS);
+                            nativeY = int(nativeMax * bs[1] / maxS);
+                            nativeZ = int(nativeMax * bs[2] / maxS);
+                        }
+                    }
+                    if (nativeX == 0) nativeX = nativeY = nativeZ = nativeMax;
+                }
+
+                int nativeMax = std::max({nativeX, nativeY, nativeZ});
                 int renderMax;
                 if (_voxelRes == 4) renderMax = std::min(1024, nativeMax);
                 else if (_voxelRes == 3) renderMax = std::min(512, nativeMax);
@@ -789,6 +813,9 @@ void SpectralVDBRead::_LoadVDB()
     if (resolved.empty()) return;
     if (_volume && _volume->IsValid() && _loadedPath == resolved) return;
     _volume = pxr::SpectralVDBLoader::Load(resolved.c_str(), _GetDensityName(), _GetTempName());
-    if (_volume) _loadedPath = resolved;
+    if (_volume) {
+        _loadedPath = resolved;
+        _loadedMaxRes = -1;  // mark as preview/default — render path will reload at requested res
+    }
 #endif
 }

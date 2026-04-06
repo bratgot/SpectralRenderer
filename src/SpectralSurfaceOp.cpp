@@ -205,7 +205,7 @@ void SpectralSurfaceOp::knobs(Knob_Callback f)
     }
     EndGroup(f);
 
-    BeginClosedGroup(f, "diffraction_grp", "Diffraction (CPU)");
+    BeginClosedGroup(f, "diffraction_grp", "Diffraction");
     {
         Float_knob(f, &_gratingSpacing, "grating_spacing", "grating spacing");
         SetRange(f, 0.f, 5.f);
@@ -216,7 +216,7 @@ void SpectralSurfaceOp::knobs(Knob_Callback f)
     }
     EndGroup(f);
 
-    BeginClosedGroup(f, "fluor_grp", "Fluorescence (CPU)");
+    BeginClosedGroup(f, "fluor_grp", "Fluorescence");
     {
         Float_knob(f, &_fluorAbsorb, "fluor_absorb", "absorb (nm)");
         SetRange(f, 300.f, 500.f);
@@ -293,18 +293,18 @@ void SpectralSurfaceOp::knobs(Knob_Callback f)
             "Per-vertex: P&prime; = P + N &middot; (sample &minus; midpoint) &times; scale.<br>"
             "Normals recomputed from displaced geometry.<br>"
             "<br>"
-            "<b>Diffraction gratings</b><br>"
+            "<b>Diffraction gratings (GPU + CPU)</b><br>"
             "Grating equation: d(sin&theta;<sub>i</sub> + sin&theta;<sub>m</sub>) = m&lambda;<br>"
             "Periodic surface structure diffracts each wavelength at a different angle.<br>"
             "First 3 orders summed. CD=1.6&mu;m spacing, butterfly=0.5&mu;m.<br>"
             "<br>"
-            "<b>Fluorescence</b><br>"
+            "<b>Fluorescence (GPU + CPU)</b><br>"
             "Material absorbs UV/blue photons and re-emits at longer visible wavelengths.<br>"
             "Stokes shift: emission wavelength &gt; absorption wavelength (energy loss).<br>"
             "Gaussian absorption (30nm) and emission (40nm) bands.<br>"
-            "Impossible in RGB renderers &mdash; requires spectral wavelength tracking.<br>"
+            "Impossible in RGB renderers -- requires spectral wavelength tracking.<br>"
             "<br>"
-            "<b>Subsurface scattering (random walk)</b><br>"
+            "<b>Subsurface scattering (CPU, GPU planned)</b><br>"
             "Light enters the surface and scatters inside before exiting nearby.<br>"
             "Spectral MFP: each wavelength scatters a different distance.<br>"
             "Red penetrates further in skin, blue is absorbed quickly.<br>"
@@ -316,7 +316,8 @@ void SpectralSurfaceOp::knobs(Knob_Callback f)
     Divider(f);
     Text_knob(f,
         "<font color='#666' size='-1'>"
-        "SpectralSurface v1.0 \xc2\xb7 Physically-based spectral material<br>"
+        "SpectralSurface v1.1 \xc2\xb7 Physically-based spectral material<br>"
+        "Diffraction + Fluorescence on GPU + CPU \xc2\xb7 SSS on CPU<br>"
         "Created by Marten Blumen"
         "</font>"
     );

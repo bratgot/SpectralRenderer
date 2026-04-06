@@ -491,6 +491,53 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                    "Currently stubbed -- full implementation in Phase 13.");
     }
 
+
+    BeginClosedGroup(f, "spectral_engine", "Technical");
+    {
+        Text_knob(f,
+            "<font size='-1' color='#999'>"
+            "<b>Rendering</b><br>"
+            "Hero-wavelength spectral path tracer. Each ray samples one wavelength<br>"
+            "(380-780nm), accumulates CIE XYZ tristimulus values via Monte Carlo.<br>"
+            "Disney Principled BSDF [Burley 2012] with GGX microfacet specular.<br>"
+            "Embree 4 (CPU) + OptiX 8.1 RTX (GPU). Blue noise R2 sampling.<br>"
+            "<br>"
+            "<b>Spectral effects (GPU + CPU)</b><br>"
+            "Cauchy dispersion via Abbe number. Thin-film interference (Fabry-Perot).<br>"
+            "Diffraction gratings (3 orders). Fluorescence (Stokes shift).<br>"
+            "Conductor Fresnel from measured (n,k) data [Palik].<br>"
+            "Kulla-Conty multi-scatter GGX energy compensation.<br>"
+            "Beer-Lambert volumetric absorption per wavelength.<br>"
+            "Subsurface scattering: spectral random walk (CPU).<br>"
+            "<br>"
+            "<b>Volumes (GPU + CPU)</b><br>"
+            "OpenVDB. Up to 8 volumes composited on GPU. Per-volume materials.<br>"
+            "Cornette-Shanks Mie phase [Jendersie, d'Eon 2023].<br>"
+            "Multiple scattering [Wrenninge 2015]. Chromatic extinction.<br>"
+            "Powder effect [Schneider, Vos 2015]. fBm procedural noise.<br>"
+            "<br>"
+            "<b>Lighting</b><br>"
+            "18 sky presets (Preetham atmospheric model) incl. Mars, Titan, Pandora.<br>"
+            "47 studio light presets. HDRI environment maps.<br>"
+            "CIE standard illuminants (D65, D50, A, F2, F11).<br>"
+            "<br>"
+            "<b>Pipeline</b><br>"
+            "sRGB / ACEScg / ACES 2065-1 output. 14 AOV passes.<br>"
+            "OpenSubdiv 3.6 Catmull-Clark displacement. Motion blur.<br>"
+            "Adaptive sampling. OptiX AI denoiser. Thin-lens DOF."
+            "</font>"
+        );
+    }
+    EndGroup(f);
+
+    Divider(f);
+    Text_knob(f,
+        "<font color='#555' size='-1'>"
+        "SpectralRenderer v1.1 \xc2\xb7 Nuke 17 \xc2\xb7 Embree 4 \xc2\xb7 OptiX 8.1 \xc2\xb7 CUDA 12.6<br>"
+        "Created by Marten Blumen \xc2\xb7 github.com/bratgot/SpectralRenderer"
+        "</font>"
+    );
+
     Tab_knob(f, "Volumes");
     {
         // ─── File ───────────────────────────────────────────────────────
@@ -723,28 +770,6 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         }
         EndGroup(f);
 
-        // ─── Technical Reference ────────────────────────────────────────
-        Divider(f, "");
-        Text_knob(f,
-            "<font size='-1' color='#666'>"
-            "<b>Volume renderer</b> -- Beer-Lambert ray march, adaptive stepping,<br>"
-            "trilinear BoxSampler, transmittance shadow rays, GPU + CPU.<br>"
-            "<b>Phase</b> -- Dual-lobe HG + Cornette-Shanks Mie.<br>"
-            "<b>MS</b> -- Analytical infinite-bounce (Wrenninge 2015). GPU + CPU.<br>"
-            "<b>Chromatic</b> -- Wavelength-dependent extinction (per-channel sigma). GPU + CPU.<br>"
-            "<b>Powder</b> -- Schneider &amp; Vos (Horizon Zero Dawn 2015).<br>"
-            "<b>Blackbody</b> -- Tanner Helland RGB approximation.<br>"
-            "<b>Noise</b> -- Hash-based fBm, deterministic, world-space.<br>"
-            "<b>Multi-volume</b> -- Up to 8 volumes composited on GPU natively."
-            "</font>"
-        );
-        Newline(f);
-        Text_knob(f,
-            "<font size='-1' color='#555'>"
-            "<b>Created by Marten Blumen</b> \xc2\xb7 "
-            "github.com/bratgot/SpectralRenderer"
-            "</font>"
-        );
     }
 
     Tab_knob(f, "AOV");
@@ -956,62 +981,6 @@ void SpectralRenderIop::knobs(Knob_Callback f)
     ClearFlags(f, Knob::STARTLINE);
     Tooltip(f, "Time samples across shutter. 2 = fast. 3 = good. 5 = smooth.");
 
-    BeginClosedGroup(f, "spectral_engine", "Spectral rendering engine");
-    {
-        Text_knob(f,
-            "<b>What makes this renderer different</b><br>"
-            "Most production renderers work in RGB -- every ray carries 3 colour channels.<br>"
-            "SpectralRenderer traces one wavelength per ray (380-780nm), like real photons.<br>"
-            "Dispersion, thin-film interference, fluorescence, diffraction and spectral absorption<br>"
-            "all happen physically -- no faking, no post-process tricks. GPU and CPU.<br>"
-            "<br>"
-            "<b>Spectral sampling</b><br>"
-            "Each sample picks a random wavelength in [380, 780] nm.<br>"
-            "Spectral radiance converts to CIE XYZ tristimulus, then to sRGB/ACEScg/ACES.<br>"
-            "RGB colours map to spectral reflectance via Gaussian basis functions.<br>"
-            "<br>"
-            "<b>Materials and shading (GPU + CPU)</b><br>"
-            "Disney BSDF with spectral evaluation. GGX microfacet model.<br>"
-            "Metals use spectral (n,k) optical constants -- gold, copper, silver, etc.<br>"
-            "Fresnel conductor with complex refractive index. Kulla-Conty energy compensation.<br>"
-            "Diffraction grating: wavelength-dependent scattering from surface microstructure.<br>"
-            "Fluorescence: UV/blue absorption, visible re-emission (Stokes shift).<br>"
-            "Subsurface scattering: spectral random walk with wavelength-dependent MFP (CPU).<br>"
-            "<br>"
-            "<b>Glass and dispersion (GPU + CPU)</b><br>"
-            "Snell's law refraction with Cauchy dispersion (Abbe number).<br>"
-            "Thin-film interference for soap bubbles and oil slicks.<br>"
-            "Beer-Lambert volumetric absorption per wavelength.<br>"
-            "<br>"
-            "<b>Volumes (GPU + CPU)</b><br>"
-            "OpenVDB reader with multi-volume compositing (up to 8 on GPU).<br>"
-            "Per-volume materials via SpectralVolumeMaterial.<br>"
-            "Chromatic extinction: wavelength-dependent volume absorption.<br>"
-            "Multiple scattering: Wrenninge 2015 analytical approximation.<br>"
-            "Cornette-Shanks Mie phase function. Procedural fBm noise.<br>"
-            "<br>"
-            "<b>Noise reduction</b><br>"
-            "MIS, adaptive sampling, blue noise (R2), OptiX AI denoiser.<br>"
-            "<br>"
-            "<b>Depth of field</b><br>"
-            "Thin lens model: f-stop aperture, focus distance. f/0 = pinhole.<br>"
-            "<br>"
-            "<b>Environment and lighting</b><br>"
-            "HDRI environment maps. CIE illuminants (D65, D50, A, F2, F11).<br>"
-            "47 studio light presets. 18 sky presets including planetary atmospheres.<br>"
-            "Shadow rays with Fresnel-weighted glass transmittance."
-        );
-    }
-    EndGroup(f);
-
-    Divider(f);
-    Text_knob(f,
-        "<font color='#666' size='-1'>"
-        "SpectralRenderer v1.1 \xc2\xb7 NDK + Hydra \xc2\xb7 Nuke 17 \xc2\xb7 Embree 4 \xc2\xb7 OptiX 8.1 \xc2\xb7 CUDA 12.6 \xc2\xb7 OpenSubdiv 3.6<br>"
-        "GPU multi-volume \xc2\xb7 Spectral volumes \xc2\xb7 Diffraction \xc2\xb7 Fluorescence<br>"
-        "Created by Marten Blumen"
-        "</font>"
-    );
 }
 
 int SpectralRenderIop::knob_changed(Knob* k)
@@ -3334,14 +3303,30 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
     }
 
     if (!foundCamera) {
-        fprintf(stderr, "SpectralRender: using default 50mm camera at origin\n");
-        _camera.viewToWorld = GfMatrix4d(1.0);
-        const double fov   = 50.0 * M_PI / 180.0;
-        const double near_ = 0.1, far_ = 10000.0;
-        const double f     = 1.0 / std::tan(fov * 0.5);
+        // Default 24mm camera positioned to see a typical volume scene
+        fprintf(stderr, "SpectralRender: using default 24mm camera\n");
+        // Position camera at (0, 2, 8) looking at origin
+        GfMatrix4d lookAt(1.0);
+        GfVec3d eye(0.0, 2.0, 8.0);
+        GfVec3d target(0.0, 0.5, 0.0);
+        GfVec3d up(0.0, 1.0, 0.0);
+        GfVec3d fwd = (target - eye).GetNormalized();
+        GfVec3d right = GfCross(fwd, up).GetNormalized();
+        GfVec3d camUp = GfCross(right, fwd);
+        lookAt[0][0]=right[0]; lookAt[0][1]=right[1]; lookAt[0][2]=right[2];
+        lookAt[1][0]=camUp[0]; lookAt[1][1]=camUp[1]; lookAt[1][2]=camUp[2];
+        lookAt[2][0]=-fwd[0];  lookAt[2][1]=-fwd[1];  lookAt[2][2]=-fwd[2];
+        lookAt[3][0]=eye[0];   lookAt[3][1]=eye[1];   lookAt[3][2]=eye[2];
+        _camera.viewToWorld = lookAt;
+        _camera.focalLength = 24.f;
+
+        // 24mm on 36mm sensor: hfov = 2*atan(18/24) = 73.7 deg
+        const double hfov   = 2.0 * std::atan(18.0 / 24.0);
+        const double near_  = 0.1, far_ = 10000.0;
+        const double f      = 1.0 / std::tan(hfov * 0.5);
         GfMatrix4d proj(0.0);
-        proj[0][0] = f / aspect;
-        proj[1][1] = f;
+        proj[0][0] = f;
+        proj[1][1] = f * aspect;
         proj[2][2] = (far_ + near_) / (near_ - far_);
         proj[2][3] = -1.0;
         proj[3][2] = (2.0 * far_ * near_) / (near_ - far_);
@@ -3908,18 +3893,66 @@ void SpectralRenderIop::_LoadVDB()
             _volumes.clear();
             int renderFrame = int(outputContext().frame());
             int masterMaxRes = _GetMasterMaxRes();
-            for (size_t vi = 0; vi < vdbReads.size(); ++vi) {
-                int nodeRes = vdbReads[vi]->GetMaxRes();
-                int effectiveRes = std::min(masterMaxRes, nodeRes);
-                auto vol = vdbReads[vi]->GetVolumeAtFrame(renderFrame, effectiveRes);
-                if (vol && vol->IsValid()) {
-                    _applyVolumeShading(vol, vdbReads[vi]);
-                    if (vi < _volumeXforms.size() && _volumeXforms[vi].hasXform) {
-                        vol->translate = _volumeXforms[vi].translate;
-                        vol->rotate = _volumeXforms[vi].rotate;
-                        vol->scale = _volumeXforms[vi].scale;
-                        vol->BuildTransform();
+
+            // For each VDBRead, find its GeoTransform by walking from GeoScene inputs
+            // (same approach as VolMerge — reads transform knobs directly)
+            struct VDBWithXform { SpectralVDBRead* vdb; Op* chainTop; };
+            std::vector<VDBWithXform> vdbEntries;
+            for (int inp = 0; inp < (input(0) ? input(0)->inputs() : 0); ++inp) {
+                Op* up = input(0)->input(inp);
+                if (!up) continue;
+                Op* cur = up;
+                SpectralVDBRead* vdb = nullptr;
+                for (int d = 0; d < 4 && cur; ++d) {
+                    if (strcmp(cur->Class(), "SpectralVDBRead") == 0 && !cur->node_disabled()) {
+                        vdb = static_cast<SpectralVDBRead*>(cur);
+                        break;
                     }
+                    cur = (cur->inputs() > 0) ? cur->input(0) : nullptr;
+                }
+                if (vdb) vdbEntries.push_back({vdb, up});
+            }
+            // Fallback: use discovered vdbReads if GeoScene walk found nothing
+            if (vdbEntries.empty()) {
+                for (auto* vdb : vdbReads) vdbEntries.push_back({vdb, nullptr});
+            }
+
+            for (size_t vi = 0; vi < vdbEntries.size(); ++vi) {
+                auto& entry = vdbEntries[vi];
+                int nodeRes = entry.vdb->GetMaxRes();
+                int effectiveRes = std::min(masterMaxRes, nodeRes);
+                auto vol = entry.vdb->GetVolumeAtFrame(renderFrame, effectiveRes);
+                if (vol && vol->IsValid()) {
+                    _applyVolumeShading(vol, entry.vdb);
+
+                    // Read GeoTransform from the chain (walk from chainTop to VDBRead)
+                    if (entry.chainTop) {
+                        Op* cur = entry.chainTop;
+                        for (int d = 0; d < 4 && cur; ++d) {
+                            if (strcmp(cur->Class(), "GeoTransform") == 0 ||
+                                strcmp(cur->Class(), "TransformGeo") == 0) {
+                                pxr::GfVec3f t(0), r(0), s(1);
+                                const char* tNames[] = {"translate","xform_translate","trans","position",nullptr};
+                                for (const char** tn = tNames; *tn; ++tn)
+                                    if (Knob* k = cur->knob(*tn)) { t = pxr::GfVec3f(float(k->get_value(0)),float(k->get_value(1)),float(k->get_value(2))); break; }
+                                const char* rNames[] = {"rotate","xform_rotate","rot",nullptr};
+                                for (const char** rn = rNames; *rn; ++rn)
+                                    if (Knob* k = cur->knob(*rn)) { r = pxr::GfVec3f(float(k->get_value(0)),float(k->get_value(1)),float(k->get_value(2))); break; }
+                                const char* sNames[] = {"scaling","xform_scale","scale",nullptr};
+                                for (const char** sn = sNames; *sn; ++sn)
+                                    if (Knob* k = cur->knob(*sn)) { s = pxr::GfVec3f(float(k->get_value(0)),float(k->get_value(1)),float(k->get_value(2))); break; }
+                                if (Knob* us = cur->knob("uniform_scale")) {
+                                    float u = float(us->get_value(0));
+                                    s = pxr::GfVec3f(s[0]*u, s[1]*u, s[2]*u);
+                                }
+                                vol->translate = t; vol->rotate = r; vol->scale = s;
+                                vol->BuildTransform();
+                                break;
+                            }
+                            cur = (cur->inputs() > 0) ? cur->input(0) : nullptr;
+                        }
+                    }
+
                     _volumes.push_back(vol);
                     fprintf(stderr, "SpectralRender: vol[%d] %dx%dx%d bbox(%.1f,%.1f,%.1f)-(%.1f,%.1f,%.1f)\n",
                             (int)vi, vol->resX, vol->resY, vol->resZ,

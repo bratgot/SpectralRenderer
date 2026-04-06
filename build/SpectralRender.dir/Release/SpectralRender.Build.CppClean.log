@@ -1,9 +1,9 @@
+c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\spectralrender.dir\release\spectralsurfaceop.obj
+c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\spectralrender.dir\release\spectralrenderiop.obj
 c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\spectralrender.dir\release\spectralstudiolight.obj
-c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\spectralrender.dir\release\spectralvdbread.obj
 c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\spectralrender.dir\release\spectralvolmerge.obj
 c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\spectralrender.dir\release\spectralvolumematerial.obj
-c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\spectralrender.dir\release\spectralrenderiop.obj
-c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\spectralrender.dir\release\spectralsurfaceop.obj
+c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\spectralrender.dir\release\spectralvdbread.obj
 c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\spectralrender.dir\release\spectralenvlight.obj
 c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\cmakefiles\generate.stamp
 c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\spectralrender\spectralrender.dll
@@ -16,7 +16,7 @@ c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\spectralrender\zstd.d
 c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\spectralrender\lz4.dll
 c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\release\spectralrender.lib
 c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\release\spectralrender.exp
-c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\spectralrender.dir\release\spectralrender.tlog\cl.15056.write.1.tlog
+c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\spectralrender.dir\release\spectralrender.tlog\cl.19732.write.1.tlog
 c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\spectralrender.dir\release\spectralrender.tlog\cl.command.1.tlog
 c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\spectralrender.dir\release\spectralrender.tlog\cl.items.tlog
 c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\spectralrender.dir\release\spectralrender.tlog\cl.read.1.tlog

@@ -41,6 +41,12 @@ public:
     const char* node_help() const override;
     unsigned    node_color() const override { return 0x4CAF50FF; }
 
+    // Material input (input 0) for SpectralVolumeMaterial connection
+    int  minimum_inputs() const override { return 1; }
+    int  maximum_inputs() const override { return 1; }
+    bool test_input(int input, Op* op) const override;
+    const char* input_label(int input, char* buf) const override;
+
     void knobs(DD::Image::Knob_Callback f) override;
     int  knob_changed(DD::Image::Knob* k) override;
 
