@@ -410,12 +410,24 @@ int SpectralEnvLight::knob_changed(Knob* k)
     if (k->is("sky_preset") && skyPreset > 1) {
         struct SP { double elev,az,sunI,skyI; };
         static const SP presets[] = {
-            {},{}, {55,180,5,1}, {5,250,4,0.6}, {-2,90,3,0.4},
-            {2,95,3.5,0.5}, {40,180,0.5,2}, {-5,270,0.1,0.3},
-            {-15,180,0.01,0.08}, {-20,180,0,0.01},
-            {50,180,6,1.5}, {75,180,8,0.8}, {3,180,0.3,0.2},
-            {30,180,3,0.5}, {15,180,1,0.3}, {35,180,2,0.4},
-            {25,200,4,0.6}, {40,180,2,0.7},
+            {},{},
+            //        elev  az   sunI  skyI
+            {55, 180, 5,    0.3},    // Clear Day
+            {5,  250, 4,    0.1},    // Golden Hour
+            {-2, 90,  3,    0.08},   // Red Sky Dawn
+            {2,  95,  3.5,  0.12},   // Sunrise
+            {40, 180, 0.5,  0.8},    // Overcast (sky dominant)
+            {-5, 270, 0.1,  0.15},   // Blue Hour
+            {-15,180, 0.01, 0.04},   // Moonlit
+            {-20,180, 0,    0.005},  // Starlight
+            {50, 180, 6,    0.4},    // Alpine
+            {75, 180, 8,    0.2},    // Desert Noon
+            {3,  180, 0.3,  0.1},    // Arctic Twilight
+            {30, 180, 3,    0.15},   // Mars
+            {15, 180, 1,    0.1},    // Titan
+            {35, 180, 2,    0.12},   // Krypton
+            {25, 200, 4,    0.15},   // Tatooine
+            {40, 180, 2,    0.25},   // Pandora
         };
         int n = sizeof(presets)/sizeof(presets[0]);
         if (skyPreset < n) {

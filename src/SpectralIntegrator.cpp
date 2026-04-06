@@ -326,11 +326,12 @@ void SpectralIntegrator::RenderFrame(
                             // Volumes render in RGB for proper color at any spp.
                             // Surface radiance still uses spectral wavelength sampling.
                             float finalVolTrans = 1.f;
-                            GfVec3f volRGB(0.f);  // RGB volume radiance
-                            float vx = 0.f, vy = 0.f, vz = 0.f;  // volume XYZ
+                            GfVec3f totalVolRGB(0.f);
+                            float vx = 0.f, vy = 0.f, vz = 0.f;
                             for (int vi = 0; vi < numVolumes; ++vi) {
                                 const SpectralVolume* volume = volumes[vi];
                                 if (!volume || !volume->IsValid()) continue;
+                                GfVec3f volRGB(0.f);  // per-volume scatter — reset each volume
                                 // Ray-AABB intersection
                                 GfVec3f ro(ray.GetStartPoint());
                                 GfVec3f rd(ray.GetDirection());
@@ -533,19 +534,17 @@ void SpectralIntegrator::RenderFrame(
 
                                     // Composite volume over surface
                                     if (volume->spectralVolumes) {
-                                        // Spectral mode: convert RGB to single-wavelength radiance
-                                        // Use CIE-weighted channel for current wavelength
                                         int sc = (lambda < 500.f) ? 2 : (lambda < 580.f) ? 1 : 0;
                                         float volSpec = volRGB[sc];
                                         radiance = volSpec + volTransmittance * radiance;
                                     } else {
-                                        // RGB mode: inject directly into XYZ (default, fast)
-                                        vx = 0.4124f*volRGB[0] + 0.3576f*volRGB[1] + 0.1805f*volRGB[2];
-                                        vy = 0.2126f*volRGB[0] + 0.7152f*volRGB[1] + 0.0722f*volRGB[2];
-                                        vz = 0.0193f*volRGB[0] + 0.1192f*volRGB[1] + 0.9505f*volRGB[2];
+                                        // Accumulate this volume's XYZ contribution
+                                        vx += (0.4124f*volRGB[0] + 0.3576f*volRGB[1] + 0.1805f*volRGB[2]) * finalVolTrans;
+                                        vy += (0.2126f*volRGB[0] + 0.7152f*volRGB[1] + 0.0722f*volRGB[2]) * finalVolTrans;
+                                        vz += (0.0193f*volRGB[0] + 0.1192f*volRGB[1] + 0.9505f*volRGB[2]) * finalVolTrans;
                                         radiance *= volTransmittance;
                                     }
-                                    finalVolTrans = volTransmittance;
+                                    finalVolTrans *= volTransmittance;  // multiply, don't overwrite
                                 }
                             }
 

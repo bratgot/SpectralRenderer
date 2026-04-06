@@ -45,7 +45,7 @@ public:
     int  knob_changed(DD::Image::Knob* k) override;
 
     std::shared_ptr<pxr::SpectralVolume> GetVolume();
-    std::shared_ptr<pxr::SpectralVolume> GetVolumeAtFrame(int frame);
+    std::shared_ptr<pxr::SpectralVolume> GetVolumeAtFrame(int frame, int maxRes = 128);
     bool HasVolume();
     std::string ResolvePathAtFrame(int frame) const { return _resolveFramePath(frame); }
 
@@ -56,7 +56,7 @@ private:
     static const char* const CLASS;
 
     void _LoadVDB();
-    void _LoadVDBAtFrame(int frame);
+    void _LoadVDBAtFrame(int frame, int maxRes = 128);
     void _DiscoverGrids();
     void _DetectFrameRange();
     void _UpdateVDBInfo();

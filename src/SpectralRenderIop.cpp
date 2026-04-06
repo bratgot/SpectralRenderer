@@ -1356,23 +1356,23 @@ int SpectralRenderIop::knob_changed(Knob* k)
         switch (_skyPreset) {
             case 0: _skyMix = 0; break;  // Off
             // Earth
-            case 2:  _sunElevation=60; _sunAzimuth=180; _sunIntensity=8;   _skyIntensity=3;   _turbidity=2.5; _skyMix=1; break; // Clear Day
-            case 3:  _sunElevation=8;  _sunAzimuth=240; _sunIntensity=6;   _skyIntensity=2.5; _turbidity=4;   _skyMix=1; break; // Golden Hour
-            case 4:  _sunElevation=1;  _sunAzimuth=90;  _sunIntensity=5;   _skyIntensity=2;   _turbidity=7;   _skyMix=1; break; // Red Sky Dawn
-            case 5:  _sunElevation=5;  _sunAzimuth=100; _sunIntensity=5.5; _skyIntensity=2.5; _turbidity=5;   _skyMix=1; break; // Sunrise
-            case 6:  _sunElevation=50; _sunAzimuth=180; _sunIntensity=3;   _skyIntensity=5;   _turbidity=8;   _skyMix=1; break; // Overcast
-            case 7:  _sunElevation=2;  _sunAzimuth=270; _sunIntensity=2;   _skyIntensity=1.5; _turbidity=3;   _skyMix=1; break; // Blue Hour
-            case 8:  _sunElevation=30; _sunAzimuth=180; _sunIntensity=0.8; _skyIntensity=0.4; _turbidity=2;   _skyMix=0.4; break; // Moonlit
-            case 9:  _sunElevation=30; _sunAzimuth=180; _sunIntensity=0.1; _skyIntensity=0.05;_turbidity=2;   _skyMix=0.1; break; // Starlight
-            case 10: _sunElevation=55; _sunAzimuth=180; _sunIntensity=9;   _skyIntensity=4;   _turbidity=1.8; _skyMix=1; break; // Alpine Light
-            case 11: _sunElevation=80; _sunAzimuth=180; _sunIntensity=10;  _skyIntensity=3;   _turbidity=6;   _skyMix=1; break; // Desert Noon
-            case 12: _sunElevation=3;  _sunAzimuth=180; _sunIntensity=3;   _skyIntensity=2;   _turbidity=2;   _skyMix=1; break; // Arctic Twilight
+            case 2:  _sunElevation=60; _sunAzimuth=180; _sunIntensity=8;   _skyIntensity=0.5;  _turbidity=2.5; _skyMix=1; break; // Clear Day
+            case 3:  _sunElevation=8;  _sunAzimuth=240; _sunIntensity=6;   _skyIntensity=0.2;  _turbidity=4;   _skyMix=1; break; // Golden Hour
+            case 4:  _sunElevation=1;  _sunAzimuth=90;  _sunIntensity=5;   _skyIntensity=0.15; _turbidity=7;   _skyMix=1; break; // Red Sky Dawn
+            case 5:  _sunElevation=5;  _sunAzimuth=100; _sunIntensity=5.5; _skyIntensity=0.2;  _turbidity=5;   _skyMix=1; break; // Sunrise
+            case 6:  _sunElevation=50; _sunAzimuth=180; _sunIntensity=3;   _skyIntensity=1.2;  _turbidity=8;   _skyMix=1; break; // Overcast
+            case 7:  _sunElevation=2;  _sunAzimuth=270; _sunIntensity=2;   _skyIntensity=0.3;  _turbidity=3;   _skyMix=1; break; // Blue Hour
+            case 8:  _sunElevation=30; _sunAzimuth=180; _sunIntensity=0.8; _skyIntensity=0.08; _turbidity=2;   _skyMix=0.4; break; // Moonlit
+            case 9:  _sunElevation=30; _sunAzimuth=180; _sunIntensity=0.1; _skyIntensity=0.01; _turbidity=2;   _skyMix=0.1; break; // Starlight
+            case 10: _sunElevation=55; _sunAzimuth=180; _sunIntensity=9;   _skyIntensity=0.6;  _turbidity=1.8; _skyMix=1; break; // Alpine Light
+            case 11: _sunElevation=80; _sunAzimuth=180; _sunIntensity=10;  _skyIntensity=0.3;  _turbidity=6;   _skyMix=1; break; // Desert Noon
+            case 12: _sunElevation=3;  _sunAzimuth=180; _sunIntensity=3;   _skyIntensity=0.2;  _turbidity=2;   _skyMix=1; break; // Arctic Twilight
             // Planets
-            case 13: _sunElevation=35; _sunAzimuth=200; _sunIntensity=4;   _skyIntensity=1.5; _turbidity=9;   _skyMix=1; break; // Mars
-            case 14: _sunElevation=25; _sunAzimuth=180; _sunIntensity=1;   _skyIntensity=0.8; _turbidity=10;  _skyMix=1; break; // Titan
-            case 15: _sunElevation=20; _sunAzimuth=160; _sunIntensity=3;   _skyIntensity=1.5; _turbidity=4;   _skyMix=1; break; // Krypton
-            case 16: _sunElevation=15; _sunAzimuth=240; _sunIntensity=5;   _skyIntensity=2;   _turbidity=4;   _skyMix=1; break; // Tatooine
-            case 17: _sunElevation=40; _sunAzimuth=180; _sunIntensity=3;   _skyIntensity=3;   _turbidity=3;   _skyMix=1; break; // Pandora
+            case 13: _sunElevation=35; _sunAzimuth=200; _sunIntensity=4;   _skyIntensity=0.2;  _turbidity=9;   _skyMix=1; break; // Mars
+            case 14: _sunElevation=25; _sunAzimuth=180; _sunIntensity=1;   _skyIntensity=0.15; _turbidity=10;  _skyMix=1; break; // Titan
+            case 15: _sunElevation=20; _sunAzimuth=160; _sunIntensity=3;   _skyIntensity=0.2;  _turbidity=4;   _skyMix=1; break; // Krypton
+            case 16: _sunElevation=15; _sunAzimuth=240; _sunIntensity=5;   _skyIntensity=0.25; _turbidity=4;   _skyMix=1; break; // Tatooine
+            case 17: _sunElevation=40; _sunAzimuth=180; _sunIntensity=3;   _skyIntensity=0.4;  _turbidity=3;   _skyMix=1; break; // Pandora
             default: break;
         }
         if (Knob* mk = knob("sky_mix")) mk->set_value(_skyMix);
@@ -2502,13 +2502,11 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
         }
 
         // Process meshes
-        if (!prim.IsA<UsdGeomMesh>()) continue;
-
-        // Skip SpectralVDBRead placeholder bbox (rendered as volume, not geometry)
+        // First: check for SpectralVDBRead prims (PointsPrim, not Mesh)
+        // Extract their world transform for volume positioning
         std::string primName = prim.GetPath().GetString();
         if (primName.find("SpectralVDBRead") != std::string::npos ||
             primName.find("volume_bbox") != std::string::npos) {
-            // Extract world transform for volume positioning (from GeoTransform etc.)
             VolumeXform vxf;
             GfMatrix4d xf = xfCache.GetLocalToWorldTransform(prim);
             if (xf != GfMatrix4d(1.0)) {
@@ -2536,7 +2534,6 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                 vxf.rotate = GfVec3f(rx * 180.f/3.14159265f,
                                      ry * 180.f/3.14159265f,
                                      rz * 180.f/3.14159265f);
-                // Keep first xform for backward compat (preview etc.)
                 if (!_vdbHasSceneXform) {
                     _vdbHasSceneXform = true;
                     _vdbSceneTranslate = vxf.translate;
@@ -2550,9 +2547,11 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                         vxf.scale[0], vxf.scale[1], vxf.scale[2]);
             }
             _volumeXforms.push_back(vxf);
-            fprintf(stderr, "SpectralRender: skipping VDB prim %s\n", primName.c_str());
             continue;
         }
+
+        // Skip non-mesh prims (lights, cameras, etc.)
+        if (!prim.IsA<UsdGeomMesh>()) continue;
 
         UsdGeomMesh mesh(prim);
         if (!mesh) continue;
@@ -3873,6 +3872,118 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
         }
     }
     if (_vdbHasSceneXform) glPopMatrix();
+
+    // ─── Light rig drawing (from connected light nodes) ─────────────
+    float kPi = 3.14159265f;
+
+    // Environment light: dome + sun arrow
+    if (_cachedEnvLight && _cachedEnvLight->skyPreset > 0) {
+        float R = float(_cachedEnvLight->domeRadius);
+        float skyBright = std::min(1.f, float(_cachedEnvLight->skyIntensity) * 2.f);
+        if (_cachedEnvLight->showDome) {
+            // Sky fill color intensity scales with skyIntensity
+            glColor4f(0.2f+0.15f*skyBright, 0.35f+0.2f*skyBright, 0.6f+0.2f*skyBright, 0.1f+0.2f*skyBright);
+            glLineWidth(1.f);
+            for (int lat = 15; lat <= 75; lat += 15) {
+                float elR = float(lat)*kPi/180.f;
+                float rr = R*std::cos(elR), y = R*std::sin(elR);
+                glBegin(GL_LINE_LOOP);
+                for (int i=0;i<48;++i){float a=float(i)/48.f*2.f*kPi;glVertex3f(rr*std::cos(a),y,rr*std::sin(a));}
+                glEnd();
+            }
+            for (int lon=0;lon<360;lon+=30) {
+                float azR=float(lon)*kPi/180.f;
+                glBegin(GL_LINE_STRIP);
+                for(int i=0;i<=24;++i){float elR=float(i)/24.f*kPi*0.5f;float rr=R*std::cos(elR);
+                    glVertex3f(rr*std::sin(azR),R*std::sin(elR),rr*std::cos(azR));}
+                glEnd();
+            }
+            glColor4f(0.4f,0.4f,0.45f,0.25f);
+            glBegin(GL_LINE_LOOP);
+            for (int i=0;i<64;++i){float a=float(i)/64.f*2.f*kPi;glVertex3f(R*std::cos(a),0,R*std::sin(a));}
+            glEnd();
+        }
+        if (_cachedEnvLight->showSunArrow) {
+            float sunI = std::min(1.f, float(_cachedEnvLight->sunIntensity) / 5.f);
+            float elR = float(_cachedEnvLight->sunElevation)*kPi/180.f;
+            float azR = float(_cachedEnvLight->sunAzimuth)*kPi/180.f;
+            float sx=R*std::cos(elR)*std::sin(azR), sy=R*std::sin(elR), sz=R*std::cos(elR)*std::cos(azR);
+            // Arrow shaft
+            glColor4f(1.f,0.85f,0.3f,0.4f+sunI*0.5f); glLineWidth(2.f+sunI*2.f);
+            glBegin(GL_LINES);glVertex3f(0,0,0);glVertex3f(sx,sy,sz);glEnd();
+            // Sun disc — size scales with intensity
+            float sunPtSize = 8.f + sunI * 16.f;
+            glColor4f(1.f,0.9f,0.4f,0.7f+sunI*0.3f); glPointSize(sunPtSize);
+            glBegin(GL_POINTS);glVertex3f(sx,sy,sz);glEnd();
+            glColor4f(1.f,0.8f,0.2f,0.15f+sunI*0.2f); glPointSize(sunPtSize*1.6f);
+            glBegin(GL_POINTS);glVertex3f(sx,sy,sz);glEnd();
+        }
+        if (_cachedEnvLight->showCompass) {
+            float cr = R * 1.08f, ci = R * 0.92f;
+            glColor4f(1.f,0.3f,0.3f,0.6f); glLineWidth(2.f);
+            glBegin(GL_LINES);glVertex3f(0,0,ci);glVertex3f(0,0,cr);glEnd();
+            glColor4f(0.5f,0.5f,0.5f,0.4f);
+            glBegin(GL_LINES);glVertex3f(0,0,-ci);glVertex3f(0,0,-cr);glEnd();
+            glBegin(GL_LINES);glVertex3f(ci,0,0);glVertex3f(cr,0,0);glEnd();
+            glBegin(GL_LINES);glVertex3f(-ci,0,0);glVertex3f(-cr,0,0);glEnd();
+        }
+    }
+
+    // Studio light: key/fill/rim markers + cones (respects showLights/showCones)
+    if (_cachedStudioLight && _cachedStudioLight->mix > 0.01) {
+        float R = float(_cachedStudioLight->rigRadius);
+        float elR = float(_cachedStudioLight->keyElevation)*kPi/180.f;
+        float azR = float(_cachedStudioLight->keyAzimuth)*kPi/180.f;
+        float kx=R*std::cos(elR)*std::sin(azR), ky=R*std::sin(elR), kz=R*std::cos(elR)*std::cos(azR);
+        float fAz=azR+kPi, fEl=elR*0.3f;
+        float fx=R*0.8f*std::cos(fEl)*std::sin(fAz), fy=R*0.8f*std::sin(fEl), fz=R*0.8f*std::cos(fEl)*std::cos(fAz);
+        float rAz=azR+kPi, rEl=elR*0.8f;
+        float rx=R*std::cos(rEl)*std::sin(rAz), ry=R*std::sin(rEl), rz=R*std::cos(rEl)*std::cos(rAz);
+        float b = float(_cachedStudioLight->mix);
+
+        if (_cachedStudioLight->showLights) {
+            // Key
+            glColor4f(_cachedStudioLight->keyColor[0],_cachedStudioLight->keyColor[1],_cachedStudioLight->keyColor[2],0.8f*b);
+            glPointSize(14.f); glBegin(GL_POINTS);glVertex3f(kx,ky,kz);glEnd();
+            glColor4f(_cachedStudioLight->keyColor[0],_cachedStudioLight->keyColor[1],_cachedStudioLight->keyColor[2],0.3f*b);
+            glLineWidth(2.f); glBegin(GL_LINES);glVertex3f(kx,ky,kz);glVertex3f(0,0,0);glEnd();
+            // Fill
+            glColor4f(_cachedStudioLight->fillColor[0],_cachedStudioLight->fillColor[1],_cachedStudioLight->fillColor[2],0.5f*b);
+            glPointSize(10.f); glBegin(GL_POINTS);glVertex3f(fx,fy,fz);glEnd();
+            glColor4f(_cachedStudioLight->fillColor[0],_cachedStudioLight->fillColor[1],_cachedStudioLight->fillColor[2],0.15f*b);
+            glLineWidth(1.f); glBegin(GL_LINES);glVertex3f(fx,fy,fz);glVertex3f(0,0,0);glEnd();
+            // Rim
+            glColor4f(_cachedStudioLight->rimColor[0],_cachedStudioLight->rimColor[1],_cachedStudioLight->rimColor[2],0.6f*b);
+            glPointSize(10.f); glBegin(GL_POINTS);glVertex3f(rx,ry,rz);glEnd();
+            glColor4f(_cachedStudioLight->rimColor[0],_cachedStudioLight->rimColor[1],_cachedStudioLight->rimColor[2],0.12f*b);
+            glLineWidth(1.f); glBegin(GL_LINES);glVertex3f(rx,ry,rz);glVertex3f(0,0,0);glEnd();
+        }
+
+        if (_cachedStudioLight->showCones) {
+            float ca=(15.f+float(_cachedStudioLight->shadowSoftness)*20.f)*kPi/180.f;
+            auto cone=[&](float ox,float oy,float oz,float cr,float cg,float cb,float al){
+                float dx=-ox,dy=-oy,dz=-oz;
+                float len=std::sqrt(dx*dx+dy*dy+dz*dz); if(len<1e-4f)return;
+                dx/=len;dy/=len;dz/=len;
+                float cl=len*0.35f,br=cl*std::tan(ca);
+                float bx2=ox+dx*cl,by2=oy+dy*cl,bz2=oz+dz*cl;
+                float px,py,pz;
+                if(std::abs(dy)<0.9f){px=-dz;py=0;pz=dx;}else{px=1;py=0;pz=0;}
+                float pl=std::sqrt(px*px+py*py+pz*pz);if(pl>1e-6f){px/=pl;py/=pl;pz/=pl;}
+                float qx=dy*pz-dz*py,qy=dz*px-dx*pz,qz=dx*py-dy*px;
+                glColor4f(cr,cg,cb,al); glLineWidth(1.f);
+                for(int i=0;i<8;++i){float a=float(i)/8.f*2.f*kPi;
+                    glBegin(GL_LINES);glVertex3f(ox,oy,oz);
+                    glVertex3f(bx2+br*(px*std::cos(a)+qx*std::sin(a)),
+                               by2+br*(py*std::cos(a)+qy*std::sin(a)),
+                               bz2+br*(pz*std::cos(a)+qz*std::sin(a)));glEnd();}
+            };
+            cone(kx,ky,kz,_cachedStudioLight->keyColor[0],_cachedStudioLight->keyColor[1],_cachedStudioLight->keyColor[2],0.12f*b);
+            cone(fx,fy,fz,_cachedStudioLight->fillColor[0],_cachedStudioLight->fillColor[1],_cachedStudioLight->fillColor[2],0.06f*b);
+            cone(rx,ry,rz,_cachedStudioLight->rimColor[0],_cachedStudioLight->rimColor[1],_cachedStudioLight->rimColor[2],0.06f*b);
+        }
+    }
+
     glPopAttrib();
 }
 
@@ -3942,17 +4053,22 @@ void SpectralRenderIop::_LoadVDB()
         Op* scn = input(0);
         scn->validate(true);
 
-        // Search scn and its inputs (up to 3 levels deep) for all SpectralVDBRead nodes
+        // Search scn and its inputs (up to 3 levels deep) for all SpectralVDBRead + light nodes
         std::vector<SpectralVDBRead*> vdbReads;
+        _cachedEnvLight = nullptr;
+        _cachedStudioLight = nullptr;
         std::vector<Op*> searchOps;
         searchOps.push_back(scn);
         for (int depth = 0; depth < 3; ++depth) {
             std::vector<Op*> nextLevel;
             for (Op* op : searchOps) {
                 if (!op) continue;
-                if (strcmp(op->Class(), "SpectralVDBRead") == 0) {
+                if (strcmp(op->Class(), "SpectralVDBRead") == 0 && !op->node_disabled())
                     vdbReads.push_back(static_cast<SpectralVDBRead*>(op));
-                }
+                if (!_cachedEnvLight && strcmp(op->Class(), "SpectralEnvLight") == 0 && !op->node_disabled())
+                    _cachedEnvLight = static_cast<SpectralEnvLight*>(op);
+                if (!_cachedStudioLight && strcmp(op->Class(), "SpectralStudioLight") == 0 && !op->node_disabled())
+                    _cachedStudioLight = static_cast<SpectralStudioLight*>(op);
                 for (int i = 0; i < op->inputs(); ++i) {
                     Op* up = op->input(i);
                     if (up) {
@@ -3967,11 +4083,16 @@ void SpectralRenderIop::_LoadVDB()
         if (!vdbReads.empty()) {
             _volumes.clear();
             int renderFrame = int(outputContext().frame());
+            int renderMaxRes = 128;
+            if (_vdbVolRes == 4) renderMaxRes = 1024;
+            else if (_vdbVolRes == 3) renderMaxRes = 512;
+            else if (_vdbVolRes == 2) renderMaxRes = 256;
+            else if (_vdbVolRes == 1) renderMaxRes = 128;
+            else renderMaxRes = 64;
             for (size_t vi = 0; vi < vdbReads.size(); ++vi) {
-                auto vol = vdbReads[vi]->GetVolumeAtFrame(renderFrame);
+                auto vol = vdbReads[vi]->GetVolumeAtFrame(renderFrame, renderMaxRes);
                 if (vol && vol->IsValid()) {
                     _applyVolumeShading(vol);
-                    // Apply per-volume transform from USD stage
                     if (vi < _volumeXforms.size() && _volumeXforms[vi].hasXform) {
                         vol->translate = _volumeXforms[vi].translate;
                         vol->rotate = _volumeXforms[vi].rotate;
@@ -3979,6 +4100,10 @@ void SpectralRenderIop::_LoadVDB()
                         vol->BuildTransform();
                     }
                     _volumes.push_back(vol);
+                    fprintf(stderr, "SpectralRender: vol[%d] %dx%dx%d bbox(%.1f,%.1f,%.1f)-(%.1f,%.1f,%.1f)\n",
+                            (int)vi, vol->resX, vol->resY, vol->resZ,
+                            vol->GetBboxMin()[0], vol->GetBboxMin()[1], vol->GetBboxMin()[2],
+                            vol->GetBboxMax()[0], vol->GetBboxMax()[1], vol->GetBboxMax()[2]);
                 }
             }
             // Primary volume for preview/backward compat
@@ -4293,6 +4418,8 @@ void SpectralRenderIop::_BuildLightRig()
     }
 
     // Override local lighting params from scene-graph nodes
+    _cachedEnvLight = envLight;
+    _cachedStudioLight = studioLight;
     if (envLight) {
         _skyPreset = envLight->skyPreset;
         _sunElevation = envLight->sunElevation;

@@ -48,6 +48,9 @@ PXR_NAMESPACE_USING_DIRECTIVE
 // ---------------------------------------------------------------------------
 using namespace DD::Image;
 
+class SpectralEnvLight;
+class SpectralStudioLight;
+
 class HDSPECTRAL_API SpectralRenderIop : public Iop, public DeepOp
 {
 public:
@@ -344,6 +347,10 @@ private:
         pxr::GfVec3f scale = pxr::GfVec3f(1.f);
     };
     std::vector<VolumeXform> _volumeXforms;
+
+    // Cached light node pointers for 3D viewport drawing
+    SpectralEnvLight*    _cachedEnvLight = nullptr;
+    SpectralStudioLight* _cachedStudioLight = nullptr;
     SpectralCamera                      _camera;
     bool                                _cameraFromInput = false;
 

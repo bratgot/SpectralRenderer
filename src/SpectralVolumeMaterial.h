@@ -39,8 +39,8 @@ public:
     int    preset = 0;
 
     // --- Density ---
-    double extinction    = 5.0;
-    double scattering    = 3.0;
+    double extinction    = 2.0;
+    double scattering    = 1.5;
     double densityMult   = 1.0;
     float  scatterColor[3] = {1.f, 1.f, 1.f};
 

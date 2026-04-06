@@ -318,8 +318,8 @@ const char* SpectralVDBRead::_GetTempName() const
     return nullptr;
 }
 
-std::shared_ptr<pxr::SpectralVolume> SpectralVDBRead::GetVolume()             { _LoadVDB(); return _volume; }
-std::shared_ptr<pxr::SpectralVolume> SpectralVDBRead::GetVolumeAtFrame(int f) { _requestFrame=f; _LoadVDBAtFrame(f); return _volume; }
+std::shared_ptr<pxr::SpectralVolume> SpectralVDBRead::GetVolume()                        { _LoadVDB(); return _volume; }
+std::shared_ptr<pxr::SpectralVolume> SpectralVDBRead::GetVolumeAtFrame(int f, int res)  { _requestFrame=f; _LoadVDBAtFrame(f, res); return _volume; }
 bool SpectralVDBRead::HasVolume()                                              { _LoadVDB(); return _volume && _volume->IsValid(); }
 
 // ---------------------------------------------------------------------------
@@ -647,7 +647,7 @@ void SpectralVDBRead::_DetectFrameRange()
 }
 
 // ---------------------------------------------------------------------------
-void SpectralVDBRead::_LoadVDBAtFrame(int frame)
+void SpectralVDBRead::_LoadVDBAtFrame(int frame, int maxRes)
 {
 #ifdef SPECTRAL_HAS_VDB
     if (!_filePath || strlen(_filePath) == 0) { _volume.reset(); return; }
@@ -666,9 +666,14 @@ void SpectralVDBRead::_LoadVDBAtFrame(int frame)
     }
     std::string resolved = _autoSequence ? _resolveFramePath(frame) : std::string(_filePath);
     if (resolved.empty()) return;
-    if (_volume && _volume->IsValid() && _loadedPath == resolved) return;
-    _volume = pxr::SpectralVDBLoader::Load(resolved.c_str(), _GetDensityName(), _GetTempName());
-    if (_volume) _loadedPath = resolved;
+    int curRes = (_volume && _volume->IsValid()) ? std::max({_volume->resX, _volume->resY, _volume->resZ}) : 0;
+    if (_volume && _volume->IsValid() && _loadedPath == resolved && curRes >= maxRes) return;
+    _volume = pxr::SpectralVDBLoader::Load(resolved.c_str(), _GetDensityName(), _GetTempName(), maxRes);
+    if (_volume) {
+        _loadedPath = resolved;
+        fprintf(stderr, "SpectralVDBRead: loaded %dx%dx%d (maxRes=%d)\n",
+                _volume->resX, _volume->resY, _volume->resZ, maxRes);
+    }
 #endif
 }
 
