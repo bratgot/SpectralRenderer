@@ -4838,6 +4838,12 @@ bool SpectralRenderIop::doDeepEngine(DD::Image::Box box,
 
         // ---- Volumetric deep: march volumes and output per-slab samples ----
         if (hasVolumes && deepN > 0) {
+            // Skip pixels with no content
+            if (rgba[3] < 0.0001f) {
+                plane.addHole();
+                continue;
+            }
+
             // Generate camera ray for this pixel
             double ndcX = (2.0 * (bufX + 0.5) / imgW - 1.0) / pxAspect;
             double ndcY = 1.0 - 2.0 * (bufY + 0.5) / imgH;
@@ -4848,14 +4854,14 @@ bool SpectralRenderIop::doDeepEngine(DD::Image::Box box,
             pxr::GfVec3f ro(worldNear);
             pxr::GfVec3f rd(pxr::GfVec3f(worldFar - worldNear).GetNormalized());
 
-            // Collect all slab samples across all volumes
-            struct DeepSlab { float front; float back; float r,g,b,a; };
+            // ---- Pass 1: march volumes, collect slab weights ----
+            struct DeepSlab { float front; float back; float weight; float alpha; };
             std::vector<DeepSlab> slabs;
+            float totalWeight = 0.f;
 
             for (auto& vol : _volumes) {
                 if (!vol || !vol->IsValid()) continue;
 
-                // Ray-AABB
                 pxr::GfVec3f invDir(
                     1.f/(std::abs(rd[0])>1e-8f?rd[0]:1e-8f),
                     1.f/(std::abs(rd[1])>1e-8f?rd[1]:1e-8f),
@@ -4873,13 +4879,12 @@ bool SpectralRenderIop::doDeepEngine(DD::Image::Box box,
                 tNear = std::max(tNear, 0.f);
                 if (tNear >= tFar) continue;
 
-                // Adaptive march: step at voxel scale, emit sample at each dense step
-                // deep_samples controls quality: higher = finer steps = more samples
+                // Adaptive step at voxel resolution
                 pxr::GfVec3f bboxSize = vol->GetBboxMax() - vol->GetBboxMin();
                 float voxelSize = std::max({bboxSize[0]/std::max(1.f,float(vol->resX)),
                                             bboxSize[1]/std::max(1.f,float(vol->resY)),
                                             bboxSize[2]/std::max(1.f,float(vol->resZ))});
-                float quality = std::max(0.25f, float(deepN) / 32.f);  // deep_samples=32 → 1x voxel step
+                float quality = std::max(0.25f, float(deepN) / 32.f);
                 float dt = voxelSize / quality;
                 float transmittance = 1.f;
                 int maxSteps = std::min(512, int((tFar - tNear) / dt) + 1);
@@ -4897,7 +4902,7 @@ bool SpectralRenderIop::doDeepEngine(DD::Image::Box box,
                         density = vol->SampleDensity(uv[0], uv[1], uv[2]) * vol->densityMult;
 
                     if (density < 1e-5f) {
-                        t += dt * 4.f;  // skip 4x in empty regions
+                        t += dt * 4.f;
                         continue;
                     }
 
@@ -4906,24 +4911,20 @@ bool SpectralRenderIop::doDeepEngine(DD::Image::Box box,
                     float slabTrans = std::exp(-sigma_t * stepDt);
                     float slabAlpha = 1.f - slabTrans;
 
-                    // Premultiplied RGB from scatter color + density
-                    float weight = transmittance * slabAlpha;
-                    float cr = vol->scatterColor[0] * vol->intensity * density;
-                    float cg = vol->scatterColor[1] * vol->intensity * density;
-                    float cb = vol->scatterColor[2] * vol->intensity * density;
-                    float cMax = std::max({cr, cg, cb, 0.001f});
-                    cr = rgba[0] * weight * (cr/cMax);
-                    cg = rgba[1] * weight * (cg/cMax);
-                    cb = rgba[2] * weight * (cb/cMax);
+                    if (slabAlpha < 0.0001f) { t += dt; continue; }
 
-                    // Convert to camera-Z depth
+                    // Weight = contribution of this slab to final pixel
+                    float w = transmittance * slabAlpha;
+
+                    // Convert to camera-Z
                     pxr::GfVec3d wFront = pxr::GfVec3d(ro) + pxr::GfVec3d(rd) * double(tFront);
                     pxr::GfVec3d wBack  = pxr::GfVec3d(ro) + pxr::GfVec3d(rd) * double(tBack);
                     float zFront = float(-w2v.Transform(wFront)[2]);
                     float zBack  = float(-w2v.Transform(wBack)[2]);
 
                     if (zFront > 0.f && zBack > 0.f) {
-                        slabs.push_back({zFront, zBack, cr, cg, cb, weight});
+                        slabs.push_back({zFront, zBack, w, slabAlpha});
+                        totalWeight += w;
                     }
 
                     transmittance *= slabTrans;
@@ -4932,29 +4933,34 @@ bool SpectralRenderIop::doDeepEngine(DD::Image::Box box,
                 }
             }
 
-            // Note: surface geometry deep should use deep_samples=0 (shell mode)
-            // or be rendered separately for DeepMerge. Volume slabs carry the
-            // full volumetric contribution — no shell needed.
-
             if (slabs.empty()) {
                 plane.addHole();
                 continue;
             }
 
-            // Sort by front depth
+            // ---- Pass 2: distribute beauty RGBA across slabs by weight ----
+            // This guarantees DeepToImage reconstructs the beauty exactly.
             std::sort(slabs.begin(), slabs.end(),
                 [](const DeepSlab& a, const DeepSlab& b) { return a.front < b.front; });
 
-            // Output all slabs
+            float invTotal = (totalWeight > 1e-6f) ? 1.f / totalWeight : 0.f;
+
             DeepOutPixel op(nChans * slabs.size());
             for (auto& slab : slabs) {
+                float frac = slab.weight * invTotal;
+                // Premultiplied: RGB scaled by fraction of beauty, alpha = slab opacity
+                float sr = rgba[0] * frac;
+                float sg = rgba[1] * frac;
+                float sb = rgba[2] * frac;
+                float sa = rgba[3] * frac;
+
                 foreach(z, outChans) {
                     if      (z == Chan_DeepFront) op.push_back(slab.front);
                     else if (z == Chan_DeepBack)  op.push_back(slab.back);
-                    else if (z == Chan_Red)       op.push_back(slab.r);
-                    else if (z == Chan_Green)     op.push_back(slab.g);
-                    else if (z == Chan_Blue)      op.push_back(slab.b);
-                    else if (z == Chan_Alpha)     op.push_back(slab.a);
+                    else if (z == Chan_Red)       op.push_back(sr);
+                    else if (z == Chan_Green)     op.push_back(sg);
+                    else if (z == Chan_Blue)      op.push_back(sb);
+                    else if (z == Chan_Alpha)     op.push_back(sa);
                     else                          op.push_back(0.f);
                 }
             }

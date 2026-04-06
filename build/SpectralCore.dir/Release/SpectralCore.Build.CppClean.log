@@ -1,9 +1,9 @@
 c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\spectralcore.dir\release\spectralvdbloader.obj
-c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\spectralcore.dir\release\spectralintegrator.obj
-c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\spectralcore.dir\release\spectralgpu.obj
 c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\spectralcore.dir\release\spectralbvh.obj
+c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\spectralcore.dir\release\spectralgpu.obj
 c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\spectralcore.dir\release\spectraltexture.obj
 c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\spectralcore.dir\release\spectralsubdiv.obj
+c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\spectralcore.dir\release\spectralintegrator.obj
 c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\cmakefiles\generate.stamp
 c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\release\spectralcore.lib
 c:\dev\spectralrenderer\hdspectral_phase1\hdspectral\build\spectralcore.dir\release\spectralcore.tlog\cl.command.1.tlog
