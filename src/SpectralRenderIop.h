@@ -333,7 +333,17 @@ private:
 
     // Scene + camera built together during _LoadStage
     std::unique_ptr<pxr::SpectralScene> _scene;
-    std::shared_ptr<pxr::SpectralVolume> _volume;  // active volume (from VDB)
+    std::shared_ptr<pxr::SpectralVolume> _volume;  // active volume (from VDB file knob)
+    std::vector<std::shared_ptr<pxr::SpectralVolume>> _volumes;  // all volumes from scn chain
+
+    // Per-volume transforms extracted from USD stage
+    struct VolumeXform {
+        bool hasXform = false;
+        pxr::GfVec3f translate = pxr::GfVec3f(0.f);
+        pxr::GfVec3f rotate = pxr::GfVec3f(0.f);
+        pxr::GfVec3f scale = pxr::GfVec3f(1.f);
+    };
+    std::vector<VolumeXform> _volumeXforms;
     SpectralCamera                      _camera;
     bool                                _cameraFromInput = false;
 

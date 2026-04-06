@@ -132,7 +132,8 @@ public:
         const SpectralPhotonMap* photonMap = nullptr,
         float gatherRadius = 0.5f,
         int colorSpace = 0,
-        const SpectralVolume* volume = nullptr);
+        const SpectralVolume* const* volumes = nullptr,
+        int numVolumes = 0);
 
 #ifdef SPECTRAL_HAS_OPTIX
     /// GPU render path using OptiX.

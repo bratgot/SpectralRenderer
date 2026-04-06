@@ -28,18 +28,10 @@ public:
 
     void knobs(Knob_Callback f) override;
     int  knob_changed(Knob* k) override;
-    void build_handles(ViewerContext* ctx) override;
-    void draw_handle(ViewerContext* ctx) override;
 
     static Op* Build(Node* node) { return new SpectralEnvLight(node); }
     static const char* const CLASS;
     static const GeomOp::Description description;
-
-    // --- Display ---
-    bool   showDome = true;
-    bool   showSunArrow = true;
-    bool   showCompass = true;
-    double domeRadius = 100.0;
 
     // --- Sky Model ---
     int    skyPreset = 1;

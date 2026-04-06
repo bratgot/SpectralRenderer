@@ -72,18 +72,16 @@ void SpectralIntegrator::RenderFrame(
     const SpectralPhotonMap* photonMap,
     float                 gatherRadius,
     int                   colorSpace,
-    const SpectralVolume* volume)
+    const SpectralVolume* const* volumes,
+    int                   numVolumes)
 {
 #ifdef SPECTRAL_HAS_EMBREE
     SpectralBVH bvh;
     bvh.Build(scene);
 
     // Volume debug
-    if (volume && volume->IsValid())
-        fprintf(stderr, "SpectralRender: volume active — %dx%dx%d, ext=%.1f, bbox (%.2f,%.2f,%.2f)→(%.2f,%.2f,%.2f)\n",
-                volume->resX, volume->resY, volume->resZ, volume->extinction,
-                volume->GetBboxMin()[0], volume->GetBboxMin()[1], volume->GetBboxMin()[2],
-                volume->GetBboxMax()[0], volume->GetBboxMax()[1], volume->GetBboxMax()[2]);
+    if (numVolumes > 0 && volumes)
+        fprintf(stderr, "SpectralRender: %d volume(s) active\n", numVolumes);
     else
         fprintf(stderr, "SpectralRender: no volume\n");
 
@@ -308,7 +306,11 @@ void SpectralIntegrator::RenderFrame(
                                 radiance = 0.f;
                                 // Show dome light environment on miss only when no volume
                                 // (volume scenes: background should be transparent for comp)
-                                if (!volume || !volume->IsValid()) {
+                                bool hasAnyVolume = false;
+                                for (int vv = 0; vv < numVolumes; ++vv) {
+                                    if (volumes[vv] && volumes[vv]->IsValid()) { hasAnyVolume = true; break; }
+                                }
+                                if (!hasAnyVolume) {
                                     GfVec3f missDir = GfVec3f(ray.GetDirection());
                                     float mLen = missDir.GetLength();
                                     if (mLen > 1e-6f) missDir /= mLen;
@@ -326,7 +328,9 @@ void SpectralIntegrator::RenderFrame(
                             float finalVolTrans = 1.f;
                             GfVec3f volRGB(0.f);  // RGB volume radiance
                             float vx = 0.f, vy = 0.f, vz = 0.f;  // volume XYZ
-                            if (volume && volume->IsValid()) {
+                            for (int vi = 0; vi < numVolumes; ++vi) {
+                                const SpectralVolume* volume = volumes[vi];
+                                if (!volume || !volume->IsValid()) continue;
                                 // Ray-AABB intersection
                                 GfVec3f ro(ray.GetStartPoint());
                                 GfVec3f rd(ray.GetDirection());
@@ -1988,17 +1992,21 @@ void SpectralIntegrator::RenderFrameGPU(
     const SpectralVolume* volume)
 {
     SpectralGPU* gpu = _GetGPU();
+    const SpectralVolume* vols[] = { volume };
+    int nv = (volume && volume->IsValid()) ? 1 : 0;
     if (!gpu) {
         fprintf(stderr, "SpectralIntegrator: GPU unavailable, using CPU\n");
         RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces,
-                    nullptr, nullptr, nullptr, nullptr, nullptr, 0.5f, colorSpace, volume);
+                    nullptr, nullptr, nullptr, nullptr, nullptr, 0.5f, colorSpace,
+                    nv ? vols : nullptr, nv);
         return;
     }
 
     if (!gpu->BuildAccel(scene)) {
         fprintf(stderr, "SpectralIntegrator: GPU accel build failed, using CPU\n");
         RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces,
-                    nullptr, nullptr, nullptr, nullptr, nullptr, 0.5f, colorSpace, volume);
+                    nullptr, nullptr, nullptr, nullptr, nullptr, 0.5f, colorSpace,
+                    nv ? vols : nullptr, nv);
         return;
     }
 
@@ -2006,7 +2014,8 @@ void SpectralIntegrator::RenderFrameGPU(
                      pixels, depthOut, spp, maxBounces, colorSpace, volume)) {
         fprintf(stderr, "SpectralIntegrator: GPU render failed, using CPU\n");
         RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces,
-                    nullptr, nullptr, nullptr, nullptr, nullptr, 0.5f, colorSpace, volume);
+                    nullptr, nullptr, nullptr, nullptr, nullptr, 0.5f, colorSpace,
+                    nv ? vols : nullptr, nv);
         return;
     }
 

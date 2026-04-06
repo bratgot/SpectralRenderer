@@ -2007,6 +2007,7 @@ void SpectralRenderIop::_LoadStage()
     _scene = std::make_unique<pxr::SpectralScene>();
     _camera = SpectralCamera();
     _vdbHasSceneXform = false;
+    _volumeXforms.clear();
 
     // ------------------------------------------------------------------
     // Path 1: GeomOp input connected — use Nuke's USD scene graph
@@ -2508,20 +2509,18 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
         if (primName.find("SpectralVDBRead") != std::string::npos ||
             primName.find("volume_bbox") != std::string::npos) {
             // Extract world transform for volume positioning (from GeoTransform etc.)
+            VolumeXform vxf;
             GfMatrix4d xf = xfCache.GetLocalToWorldTransform(prim);
             if (xf != GfMatrix4d(1.0)) {
-                // Decompose matrix to translate/rotate/scale
-                _vdbHasSceneXform = true;
-                _vdbSceneTranslate = GfVec3f(float(xf[3][0]), float(xf[3][1]), float(xf[3][2]));
-                // Extract scale from column lengths
+                vxf.hasXform = true;
+                vxf.translate = GfVec3f(float(xf[3][0]), float(xf[3][1]), float(xf[3][2]));
                 GfVec3d col0(xf[0][0], xf[0][1], xf[0][2]);
                 GfVec3d col1(xf[1][0], xf[1][1], xf[1][2]);
                 GfVec3d col2(xf[2][0], xf[2][1], xf[2][2]);
                 float sx = float(col0.GetLength());
                 float sy = float(col1.GetLength());
                 float sz = float(col2.GetLength());
-                _vdbSceneScale = GfVec3f(sx, sy, sz);
-                // Extract Euler angles from normalised rotation matrix
+                vxf.scale = GfVec3f(sx, sy, sz);
                 if (sx > 1e-6f) { col0 /= sx; }
                 if (sy > 1e-6f) { col1 /= sy; }
                 if (sz > 1e-6f) { col2 /= sz; }
@@ -2534,14 +2533,23 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                     rx = float(std::atan2(-col0[2], col1[1]));
                     rz = 0.f;
                 }
-                _vdbSceneRotate = GfVec3f(rx * 180.f/3.14159265f,
-                                           ry * 180.f/3.14159265f,
-                                           rz * 180.f/3.14159265f);
-                fprintf(stderr, "SpectralRender: VDB world xform: T=(%.1f,%.1f,%.1f) R=(%.1f,%.1f,%.1f) S=(%.2f,%.2f,%.2f)\n",
-                        _vdbSceneTranslate[0], _vdbSceneTranslate[1], _vdbSceneTranslate[2],
-                        _vdbSceneRotate[0], _vdbSceneRotate[1], _vdbSceneRotate[2],
-                        _vdbSceneScale[0], _vdbSceneScale[1], _vdbSceneScale[2]);
+                vxf.rotate = GfVec3f(rx * 180.f/3.14159265f,
+                                     ry * 180.f/3.14159265f,
+                                     rz * 180.f/3.14159265f);
+                // Keep first xform for backward compat (preview etc.)
+                if (!_vdbHasSceneXform) {
+                    _vdbHasSceneXform = true;
+                    _vdbSceneTranslate = vxf.translate;
+                    _vdbSceneRotate = vxf.rotate;
+                    _vdbSceneScale = vxf.scale;
+                }
+                fprintf(stderr, "SpectralRender: VDB[%d] xform: T=(%.1f,%.1f,%.1f) R=(%.1f,%.1f,%.1f) S=(%.2f,%.2f,%.2f)\n",
+                        (int)_volumeXforms.size(),
+                        vxf.translate[0], vxf.translate[1], vxf.translate[2],
+                        vxf.rotate[0], vxf.rotate[1], vxf.rotate[2],
+                        vxf.scale[0], vxf.scale[1], vxf.scale[2]);
             }
+            _volumeXforms.push_back(vxf);
             fprintf(stderr, "SpectralRender: skipping VDB prim %s\n", primName.c_str());
             continue;
         }
@@ -3929,22 +3937,21 @@ void SpectralRenderIop::_LoadVDB()
     }
 #endif
 
-    // Path 2: Scn input (input 0) — find SpectralVDBRead upstream through GeoScene
+    // Path 2: Scn input (input 0) — find ALL SpectralVDBRead upstream through GeoScene
     if (inputs() > 0 && input(0)) {
         Op* scn = input(0);
         scn->validate(true);
 
-        // Search scn and its inputs (up to 3 levels deep) for SpectralVDBRead
-        SpectralVDBRead* vdbRead = nullptr;
+        // Search scn and its inputs (up to 3 levels deep) for all SpectralVDBRead nodes
+        std::vector<SpectralVDBRead*> vdbReads;
         std::vector<Op*> searchOps;
         searchOps.push_back(scn);
-        for (int depth = 0; depth < 3 && !vdbRead; ++depth) {
+        for (int depth = 0; depth < 3; ++depth) {
             std::vector<Op*> nextLevel;
             for (Op* op : searchOps) {
                 if (!op) continue;
                 if (strcmp(op->Class(), "SpectralVDBRead") == 0) {
-                    vdbRead = static_cast<SpectralVDBRead*>(op);
-                    break;
+                    vdbReads.push_back(static_cast<SpectralVDBRead*>(op));
                 }
                 for (int i = 0; i < op->inputs(); ++i) {
                     Op* up = op->input(i);
@@ -3957,25 +3964,29 @@ void SpectralRenderIop::_LoadVDB()
             searchOps = nextLevel;
         }
 
-        if (vdbRead) {
+        if (!vdbReads.empty()) {
+            _volumes.clear();
             int renderFrame = int(outputContext().frame());
-            auto vol = vdbRead->GetVolumeAtFrame(renderFrame);
-            if (vol && vol->IsValid()) {
-                _applyVolumeShading(vol);
-                // Apply scene graph transform (from GeoTransform via USD stage)
-                if (_vdbHasSceneXform) {
-                    vol->translate = _vdbSceneTranslate;
-                    vol->rotate = _vdbSceneRotate;
-                    vol->scale = _vdbSceneScale;
-                    vol->BuildTransform();
+            for (size_t vi = 0; vi < vdbReads.size(); ++vi) {
+                auto vol = vdbReads[vi]->GetVolumeAtFrame(renderFrame);
+                if (vol && vol->IsValid()) {
+                    _applyVolumeShading(vol);
+                    // Apply per-volume transform from USD stage
+                    if (vi < _volumeXforms.size() && _volumeXforms[vi].hasXform) {
+                        vol->translate = _volumeXforms[vi].translate;
+                        vol->rotate = _volumeXforms[vi].rotate;
+                        vol->scale = _volumeXforms[vi].scale;
+                        vol->BuildTransform();
+                    }
+                    _volumes.push_back(vol);
                 }
-                _volume = vol;
-                _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
-                fprintf(stderr, "SpectralRender: loaded volume from scn input chain (%s)%s\n",
-                        vdbRead->node_name(),
-                        _vdbHasSceneXform ? " +xform" : "");
-                return;
             }
+            // Primary volume for preview/backward compat
+            _volume = _volumes.empty() ? nullptr : _volumes[0];
+            _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
+            fprintf(stderr, "SpectralRender: loaded %d volume(s) from scn input chain\n",
+                    (int)_volumes.size());
+            return;
         }
     }
 }
@@ -4298,7 +4309,7 @@ void SpectralRenderIop::_BuildLightRig()
         _vdbUseReSTIR = envLight->useReSTIR;
     }
     if (studioLight) {
-        _studioPreset = studioLight->studioPreset;
+        _studioPreset = 1;  // studio light node connected — activate rig
         _studioMix = studioLight->mix;
         _studioKeyAzimuth = studioLight->keyAzimuth;
         _studioKeyElevation = studioLight->keyElevation;
@@ -4590,11 +4601,17 @@ void SpectralRenderIop::_EnsureFrameRendered()
 
     // Volume already loaded at top of _EnsureFrameRendered
 
+    // Build volume pointer array for multi-volume rendering
+    std::vector<const pxr::SpectralVolume*> volPtrs;
+    for (auto& v : _volumes) if (v) volPtrs.push_back(v.get());
+    if (volPtrs.empty() && _volume) volPtrs.push_back(_volume.get());
+
 #ifdef SPECTRAL_HAS_OPTIX
     if (useGPU) {
         SpectralIntegrator::RenderFrameGPU(*_scene, cam, _frameBuffer.data(),
                                             renderSpp, _depthBuffer.data(), _maxBounces,
-                                            _colorSpace, _volume.get());
+                                            _colorSpace,
+                                            volPtrs.empty() ? nullptr : volPtrs[0]);
         // Note: GPU caustics use CPU gathering pass below
     } else
 #endif
@@ -4618,7 +4635,9 @@ void SpectralRenderIop::_EnsureFrameRendered()
                                          renderSpp, _depthBuffer.data(), _maxBounces,
                                          _objectIdBuffer.data(), _materialIdBuffer.data(),
                                          &aovBufs, nullptr, pmap, _causticRadius,
-                                         _colorSpace, _volume.get());
+                                         _colorSpace,
+                                         volPtrs.empty() ? nullptr : volPtrs.data(),
+                                         (int)volPtrs.size());
     }
 
     // Denoise — works for both GPU and CPU renders
@@ -4667,7 +4686,8 @@ void SpectralRenderIop::_EnsureFrameRendered()
                                              aovSpp, nullptr, _maxBounces,
                                              nullptr, nullptr, &aovBufs, nullptr,
                                              pmap, _causticRadius, _colorSpace,
-                                             _volume.get());
+                                             volPtrs.empty() ? nullptr : volPtrs.data(),
+                                             (int)volPtrs.size());
 
             fprintf(stderr, "SpectralRender: shading AOVs computed (%d spp CPU pass)\n", aovSpp);
         }

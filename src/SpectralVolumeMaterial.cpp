@@ -19,10 +19,15 @@ const char* SpectralVolumeMaterial::node_help() const
 {
     return "SpectralVolumeMaterial \xe2\x80\x94 Volume Shader\n\n"
            "Defines volume shading for SpectralRender.\n"
-           "Connect upstream of GeoScene alongside SpectralVDBRead.\n\n"
-           "CONNECTION\n"
-           "  SpectralVDBRead + SpectralVolumeMaterial -> GeoScene -> SpectralRender\n"
-           "  Without this node, SpectralRender uses its Volumes tab defaults.\n\n"
+           "Connect directly to GeoScene alongside SpectralVDBRead.\n\n"
+           "RECOMMENDED CONNECTION\n"
+           "  SpectralVDBRead -----+\n"
+           "  SpectralVolumeMaterial --+-- GeoScene -- SpectralRender\n"
+           "  SpectralEnvLight ----+\n\n"
+           "IMPORTANT: Do NOT use GeoBind to assign this material.\n"
+           "GeoBind breaks animated update propagation.\n"
+           "Connect directly to GeoScene as a separate input.\n\n"
+           "Without this node, SpectralRender uses its Volumes tab defaults.\n\n"
            "PRESETS (16)\n"
            "  Smoke: Light, Dense, Industrial\n"
            "  Fire: Campfire, Explosion, Pyroclastic\n"
@@ -194,13 +199,12 @@ void SpectralVolumeMaterial::knobs(Knob_Callback f)
     Tooltip(f, "Flame grid brightness. Additive on top of temperature.");
 
     // ─── Chromatic Extinction ───────────────────────────────────────
-    BeginClosedGroup(f, "vol_chrom_grp", "Chromatic Extinction");
+    BeginClosedGroup(f, "vol_chrom_grp", "Chromatic Extinction  <font color='#557' size='-1'>cpu</font>");
     {
         Text_knob(f,
             "<font color='#777' size='-1'>"
             "Wavelength-dependent absorption. Blue scatters more = blue haze edges."
             "</font>"
-            "&nbsp;<font color='#557' size='-2'>cpu</font>"
         );
         Newline(f);
         Bool_knob(f, &chromaticExtinction, "vol_chromatic", "enable");
@@ -266,13 +270,12 @@ void SpectralVolumeMaterial::knobs(Knob_Callback f)
     EndGroup(f);
 
     // ─── Multiple Scattering ────────────────────────────────────────
-    BeginClosedGroup(f, "vol_ms_grp", "Multiple Scattering");
+    BeginClosedGroup(f, "vol_ms_grp", "Multiple Scattering  <font color='#557' size='-1'>cpu</font>");
     {
         Text_knob(f,
             "<font color='#777' size='-1'>"
             "Wrenninge 2015: infinite-bounce approximation at near-zero cost."
             "</font>"
-            "&nbsp;<font color='#557' size='-2'>cpu</font>"
         );
         Newline(f);
         Bool_knob(f, &msApprox, "vol_ms_approx", "analytical MS");

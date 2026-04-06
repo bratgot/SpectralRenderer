@@ -1,21 +1,26 @@
 #pragma once
 // SpectralStudioLight — studio lighting node for SpectralRender
-// Three-point rig: key, fill, rim with shadow softness.
+// SourceGeomOp: connects to GeoScene (USD pipeline).
 // Created by Marten Blumen
 
-#include <DDImage/ShaderOp.h>
+#include <DDImage/SourceGeomOp.h>
 #include <DDImage/Knobs.h>
 #include "HdSpectralApi.h"
 
 using namespace DD::Image;
 
-class HDSPECTRAL_API SpectralStudioLight : public ShaderOp
+class HDSPECTRAL_API SpectralStudioLight : public SourceGeomOp
 {
 public:
-    explicit SpectralStudioLight(Node* node);
+    class Engine : public SourceEngine
+    {
+    public:
+        Engine(GeomOpNode* parent) : SourceEngine(parent) {}
+        void createPrims(usg::GeomSceneContext& context,
+                         const usg::Path& path) override;
+    };
 
-    int minimum_inputs() const override { return 0; }
-    int maximum_inputs() const override { return 0; }
+    explicit SpectralStudioLight(Node* node);
 
     const char* Class()     const override { return CLASS; }
     const char* node_help() const override;
@@ -23,16 +28,25 @@ public:
 
     void knobs(Knob_Callback f) override;
     int  knob_changed(Knob* k) override;
+    void build_handles(ViewerContext* ctx) override;
+    void draw_handle(ViewerContext* ctx) override;
 
-    const char* getOutputSchema() const override { return "SpectralStudioLight"; }
-    int32_t     getOutputType()   const override { return OUTPUT_TYPE_SURFACESHADER; }
-    MaterialOpI* asMaterialOp()   override { return this; }
-
+    static Op* Build(Node* node) { return new SpectralStudioLight(node); }
     static const char* const CLASS;
-    static const Op::Description description;
+    static const GeomOp::Description description;
+
+    // --- Display ---
+    bool   showLights = true;
+    bool   showCones = true;
+    double rigRadius = 80.0;
 
     // --- Preset ---
-    int    studioPreset = 0;     // 0=off, 1=portrait, 2=product, 3=dramatic, 4=softbox
+    int    presetCategory = 0;
+    int    presetPhotoStudio = 0;
+    int    presetPhotoField = 0;
+    int    presetEquipment = 0;
+    int    presetCinemaStyle = 0;
+    int    presetFamousDP = 0;
     double mix = 1.0;
 
     // --- Key Light ---
@@ -42,7 +56,7 @@ public:
     float  keyColor[3] = {1.f, 0.97f, 0.92f};
 
     // --- Fill Light ---
-    double fillRatio = 0.4;      // relative to key
+    double fillRatio = 0.4;
     float  fillColor[3] = {0.85f, 0.9f, 1.f};
 
     // --- Rim Light ---
