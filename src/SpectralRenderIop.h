@@ -243,7 +243,7 @@ private:
     bool   _vdbShowPoints = true;
     bool   _vdbFastScrub = false;  // metadata-only during scrub
     double _vdbPointDensity = 0.3;
-    double _vdbPointSize = 3.0;
+    double _vdbPointSize = 5.0;
 
     // Cached point cloud for viewport
     struct VDBPreviewPoint { float x, y, z, density; };
@@ -277,6 +277,7 @@ private:
 
     int   _tileSize   = 64;
     int   _deviceMode = 2;         // 0=cpu, 1=gpu, 2=auto
+    bool  _gpuFallbackToCPU = false; // true when multi-volume forces CPU
     int   _colorSpace = 0;         // 0=sRGB, 1=ACEScg, 2=ACES 2065-1
 
     // LPE-style AOV decomposition

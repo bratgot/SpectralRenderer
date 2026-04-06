@@ -145,7 +145,8 @@ public:
         float* depthOut = nullptr,
         int maxBounces = 4,
         int colorSpace = 0,
-        const SpectralVolume* volume = nullptr);
+        const SpectralVolume* const* volumes = nullptr,
+        int numVolumes = 0);
 
     static bool IsGPUAvailable();
     static void DenoiseGPU(unsigned int width, unsigned int height, float* pixels);

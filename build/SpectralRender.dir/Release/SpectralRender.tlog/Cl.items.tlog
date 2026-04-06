@@ -4,3 +4,4 @@ C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralVDBRead.cpp;C:\
 C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralVolumeMaterial.cpp;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralRender.dir\Release\SpectralVolumeMaterial.obj
 C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralEnvLight.cpp;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralRender.dir\Release\SpectralEnvLight.obj
 C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralStudioLight.cpp;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralRender.dir\Release\SpectralStudioLight.obj
+C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralVolMerge.cpp;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralRender.dir\Release\SpectralVolMerge.obj

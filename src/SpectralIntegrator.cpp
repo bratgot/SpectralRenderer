@@ -1988,11 +1988,22 @@ void SpectralIntegrator::RenderFrameGPU(
     float*                depthOut,
     int                   maxBounces,
     int                   colorSpace,
-    const SpectralVolume* volume)
+    const SpectralVolume* const* volumes,
+    int                   numVolumes)
 {
+    // Multi-volume: use CPU path (GPU kernel handles single volume only)
+    if (numVolumes > 1) {
+        fprintf(stderr, "SpectralIntegrator: %d volumes - using CPU for multi-volume compositing\n", numVolumes);
+        RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces,
+                    nullptr, nullptr, nullptr, nullptr, nullptr, 0.5f, colorSpace,
+                    volumes, numVolumes);
+        return;
+    }
+
+    const SpectralVolume* volume = (numVolumes > 0 && volumes) ? volumes[0] : nullptr;
     SpectralGPU* gpu = _GetGPU();
-    const SpectralVolume* vols[] = { volume };
     int nv = (volume && volume->IsValid()) ? 1 : 0;
+    const SpectralVolume* vols[] = { volume };
     if (!gpu) {
         fprintf(stderr, "SpectralIntegrator: GPU unavailable, using CPU\n");
         RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces,
