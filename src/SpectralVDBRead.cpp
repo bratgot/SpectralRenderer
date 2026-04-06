@@ -2,7 +2,6 @@
 // Created by Marten Blumen
 
 #include "SpectralVDBRead.h"
-#include "usg/geom/MeshPrim.h"
 #include "usg/geom/PointsPrim.h"
 #include "ndk/geo/utils/MeshUtils.h"
 
@@ -65,7 +64,6 @@ void SpectralVDBRead::Engine::createPrims(GeomSceneContext& context,
     int  firstFrame  = knob("first_frame").get<int>(firstTime);
     int  lastFrame   = knob("last_frame").get<int>(firstTime);
     int  frameOffset = knob("frame_offset").get<int>(firstTime);
-    bool showBbox    = knob("show_bbox").get<bool>(firstTime);
     int  previewRes  = knob("preview_res").get<int>(firstTime);
     int  maxPoints   = knob("max_points").get<int>(firstTime);
     float pointSize  = knob("point_size").get<float>(firstTime);
@@ -77,16 +75,9 @@ void SpectralVDBRead::Engine::createPrims(GeomSceneContext& context,
     pointSize  = std::max(0.01f, pointSize);
     float densityCap = 50.0f; // cull outlier points with extreme density
 
-    // Define PointsPrim for density cloud
+    // Define single PointsPrim (density points + bbox edges all in one)
     PointsPrim prim = PointsPrim::defineInLayer(defineLayer, path);
     _transformSubEngine.apply(context, prim);
-
-    // Define MeshPrim for bbox wireframe (visible in wireframe display mode)
-    // Bbox wireframe mesh (separate prim, visible in wireframe mode)
-    Path bboxPath("/volume_bbox");
-    MeshPrim bboxMesh = MeshPrim::defineInLayer(defineLayer, bboxPath);
-    _transformSubEngine.apply(context, bboxMesh);
-    bool bboxTopologyDone = false;
 
     // ---------------------------------------------------------------
     // Process each time sample
@@ -251,43 +242,16 @@ void SpectralVDBRead::Engine::createPrims(GeomSceneContext& context,
         }
 #endif
 
-        // --- Bbox wireframe mesh (visible in wireframe display mode) ---
-        if (showBbox && hasVDB) {
-            float x0=bboxMin[0], y0=bboxMin[1], z0=bboxMin[2];
-            float x1=bboxMax[0], y1=bboxMax[1], z1=bboxMax[2];
-            ndk::MeshSample bboxSample;
-            bboxSample.points = {
-                Vec3f(x0,y0,z0), Vec3f(x1,y0,z0),
-                Vec3f(x1,y1,z0), Vec3f(x0,y1,z0),
-                Vec3f(x0,y0,z1), Vec3f(x1,y0,z1),
-                Vec3f(x1,y1,z1), Vec3f(x0,y1,z1),
-            };
-            if (!bboxTopologyDone) {
-                bboxSample.faceVertexCounts.clear();
-                bboxSample.faceVertexIndices.clear();
-                bboxSample.all_quads = true; bboxSample.all_tris = false;
-                bboxSample.addQuad(0,3,2,1); bboxSample.addQuad(4,5,6,7);
-                bboxSample.addQuad(0,1,5,4); bboxSample.addQuad(2,3,7,6);
-                bboxSample.addQuad(0,4,7,3); bboxSample.addQuad(1,2,6,5);
-                bboxSample.facevert_normals.resize(1, Vec3f(0,1,0));
-                bboxSample.setMeshPrimFaceTopology(bboxMesh);
-                bboxTopologyDone = true;
-            }
-            bboxSample.setMeshPrimProperties(bboxMesh, false, true);
-            bboxMesh.setPoints(bboxSample.points, time);
-            bboxMesh.setBoundsAttr(bboxSample.points, time);
-            Vec3fArray bboxCols(8, Vec3f(0.0f, 0.8f, 0.2f));
-            bboxMesh.setDisplayColor(bboxCols, time);
-        }
-
-        // --- Build density point arrays ---
+        // --- Build combined point arrays ---
         size_t nDensity = samplePos.size();
-        size_t nTotal   = std::max(nDensity, size_t(1));
+        size_t nTotal   = nDensity;
+        if (nTotal == 0) nTotal = 1;
 
         Vec3fArray pts, cols, nrms;
         FloatArray wids;
         pts.resize(nTotal); cols.resize(nTotal); nrms.resize(nTotal); wids.resize(nTotal);
 
+        // Density points
         for (size_t i = 0; i < nDensity; ++i) {
             pts[i]  = samplePos[i];
             nrms[i] = sampleNrm[i];
@@ -295,6 +259,7 @@ void SpectralVDBRead::Engine::createPrims(GeomSceneContext& context,
             cols[i] = lit ? Vec3f(0.85f, 0.85f, 0.85f) : sampleCol[i];
         }
 
+        // Placeholder if totally empty
         if (nDensity == 0) {
             pts[0]  = Vec3f(0, 0, 0);
             cols[0] = Vec3f(0, 0, 0);
