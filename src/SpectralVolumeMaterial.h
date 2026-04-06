@@ -72,6 +72,7 @@ public:
     double noiseStrength  = 0.3;
     int    noiseOctaves   = 3;
     double noiseRoughness = 0.5;
+    int    noiseLodPreset = 0;  // 0=Custom,1=Subtle,2=Natural,3=Detailed,4=Extreme,5=Wispy
 
     // --- Multiple Scattering ---
     bool   msApprox = true;

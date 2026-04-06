@@ -233,11 +233,24 @@ void SpectralVolumeMaterial::knobs(Knob_Callback f)
     {
         Text_knob(f,
             "<font color='#777' size='-1'>"
-            "fBm noise adds detail beyond VDB resolution at render time."
+            "fBm noise adds detail beyond VDB resolution at render time.<br>"
+            "Use a LOD preset or tune manually. Enable 'normalize to bbox'<br>"
+            "for consistent look across different volume sizes."
             "</font>"
         );
         Newline(f);
+        static const char* const noiseLOD[] = {
+            "Custom", "Subtle", "Natural", "Detailed", "Extreme", "Wispy Edges", nullptr
+        };
+        Enumeration_knob(f, &noiseLodPreset, noiseLOD, "vol_noise_lod", "detail level");
+        Tooltip(f, "Quick-set noise parameters by detail level.\n\n"
+                   "Subtle -- light wisps at edges, barely visible.\n"
+                   "Natural -- realistic breakup, good default.\n"
+                   "Detailed -- strong visible noise, fine features.\n"
+                   "Extreme -- heavy noise, maximum breakup.\n"
+                   "Wispy Edges -- thin tendrils at volume boundary.");
         Bool_knob(f, &noiseEnable, "vol_noise_enable", "enable");
+        ClearFlags(f, Knob::STARTLINE);
         Tooltip(f, "Add fBm noise to density at render time.\n"
                    "Adds detail beyond VDB grid resolution.\n"
                    "World-space -- no UV unwrap needed.");
@@ -365,6 +378,35 @@ int SpectralVolumeMaterial::knob_changed(Knob* k)
         }
         return 1;
     }
+
+    // Noise LOD presets
+    if (k->is("vol_noise_lod") && noiseLodPreset > 0) {
+        //                    scale  strength octaves roughness normalize
+        struct NP { double s,st; int o; double r; bool n; };
+        static const NP np[] = {
+            {},
+            {2,   0.15, 2, 0.4, true},   // Subtle
+            {4,   0.3,  3, 0.5, true},   // Natural
+            {6,   0.45, 4, 0.6, true},   // Detailed
+            {10,  0.6,  6, 0.7, true},   // Extreme
+            {8,   0.5,  5, 0.8, false},  // Wispy Edges (world-space, high roughness)
+        };
+        if (noiseLodPreset < 6) {
+            const auto& p = np[noiseLodPreset];
+            noiseEnable = true;
+            noiseScale = p.s; noiseStrength = p.st;
+            noiseOctaves = p.o; noiseRoughness = p.r;
+            noiseNormalize = p.n;
+            if (Knob* kn = knob("vol_noise_enable"))    kn->set_value(1);
+            if (Knob* kn = knob("vol_noise_scale"))     kn->set_value(p.s);
+            if (Knob* kn = knob("vol_noise_strength"))  kn->set_value(p.st);
+            if (Knob* kn = knob("vol_noise_octaves"))   kn->set_value(p.o);
+            if (Knob* kn = knob("vol_noise_roughness")) kn->set_value(p.r);
+            if (Knob* kn = knob("vol_noise_normalize")) kn->set_value(p.n ? 1 : 0);
+        }
+        return 1;
+    }
+
     return ShaderOp::knob_changed(k);
 }
 
