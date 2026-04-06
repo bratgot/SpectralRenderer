@@ -1991,24 +1991,19 @@ void SpectralIntegrator::RenderFrameGPU(
     const SpectralVolume* const* volumes,
     int                   numVolumes)
 {
-    // Multi-volume: use CPU path (GPU kernel handles single volume only)
-    if (numVolumes > 1) {
-        fprintf(stderr, "SpectralIntegrator: %d volumes - using CPU for multi-volume compositing\n", numVolumes);
-        RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces,
-                    nullptr, nullptr, nullptr, nullptr, nullptr, 0.5f, colorSpace,
-                    volumes, numVolumes);
-        return;
+    // Phase 13: GPU handles multi-volume natively (up to 8)
+    if (numVolumes > SPECTRAL_MAX_GPU_VOLUMES) {
+        fprintf(stderr, "SpectralIntegrator: %d volumes exceeds GPU max (%d), capping\n",
+                numVolumes, SPECTRAL_MAX_GPU_VOLUMES);
+        numVolumes = SPECTRAL_MAX_GPU_VOLUMES;
     }
 
-    const SpectralVolume* volume = (numVolumes > 0 && volumes) ? volumes[0] : nullptr;
     SpectralGPU* gpu = _GetGPU();
-    int nv = (volume && volume->IsValid()) ? 1 : 0;
-    const SpectralVolume* vols[] = { volume };
     if (!gpu) {
         fprintf(stderr, "SpectralIntegrator: GPU unavailable, using CPU\n");
         RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces,
                     nullptr, nullptr, nullptr, nullptr, nullptr, 0.5f, colorSpace,
-                    nv ? vols : nullptr, nv);
+                    volumes, numVolumes);
         return;
     }
 
@@ -2016,22 +2011,22 @@ void SpectralIntegrator::RenderFrameGPU(
         fprintf(stderr, "SpectralIntegrator: GPU accel build failed, using CPU\n");
         RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces,
                     nullptr, nullptr, nullptr, nullptr, nullptr, 0.5f, colorSpace,
-                    nv ? vols : nullptr, nv);
+                    volumes, numVolumes);
         return;
     }
 
     if (!gpu->Render(camera, camera.imageWidth, camera.imageHeight,
-                     pixels, depthOut, spp, maxBounces, colorSpace, volume)) {
+                     pixels, depthOut, spp, maxBounces, colorSpace,
+                     volumes, numVolumes)) {
         fprintf(stderr, "SpectralIntegrator: GPU render failed, using CPU\n");
         RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces,
                     nullptr, nullptr, nullptr, nullptr, nullptr, 0.5f, colorSpace,
-                    nv ? vols : nullptr, nv);
+                    volumes, numVolumes);
         return;
     }
 
-    fprintf(stderr, "SpectralIntegrator: GPU render complete (%dx%d)%s\n",
-            camera.imageWidth, camera.imageHeight,
-            (volume && volume->IsValid()) ? " +volume" : "");
+    fprintf(stderr, "SpectralIntegrator: GPU render complete (%dx%d) %d volume(s)\n",
+            camera.imageWidth, camera.imageHeight, numVolumes);
 }
 
 void SpectralIntegrator::DenoiseGPU(

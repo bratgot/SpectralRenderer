@@ -111,6 +111,15 @@ const char* SpectralRenderIop::_VdbGridName(int idx, const char* ovr) const
     return nullptr;
 }
 
+int SpectralRenderIop::_GetMasterMaxRes() const
+{
+    if (_vdbVolRes == 4) return 1024;
+    if (_vdbVolRes == 3) return 512;
+    if (_vdbVolRes == 2) return 256;
+    if (_vdbVolRes == 1) return 128;
+    return 64;
+}
+
 const char* SpectralRenderIop::node_help() const
 {
     return
@@ -640,9 +649,9 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         Divider(f, "Voxel Resolution");
         Text_knob(f,
             "<font color='#777' size='-1'>"
-            "Controls how many voxels the VDB is resampled to for rendering.<br>"
-            "Lower = faster load + less memory. Higher = sharper detail.<br>"
-            "Native uses the original VDB resolution (capped at 1024\xc2\xb3)."
+            "Master cap on voxel resolution across all VDBRead nodes.<br>"
+            "Each VDBRead can set its own resolution, but will never<br>"
+            "exceed this master setting. Lower = faster, higher = sharper."
             "</font>"
         );
         Newline(f);
@@ -656,13 +665,6 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                    "1/2 = ~12.5%% of native voxels (production)\n"
                    "Full = ~100%% at 512\xc2\xb3 cap (high quality)\n"
                    "Native = actual VDB dims, capped at 1024\xc2\xb3");
-        Button(f, "vdb_estimate_mem", "Estimate Memory");
-        ClearFlags(f, Knob::STARTLINE);
-        Tooltip(f, "Calculate the memory required for the current\n"
-                   "resolution setting with the loaded VDB file.");
-        Newline(f);
-        String_knob(f, &_vdbMemInfo, "vdb_mem_info", " ");
-        SetFlags(f, Knob::DISABLED | Knob::NO_UNDO);
         Double_knob(f, &_vdbAnisotropy, "vdb_anisotropy", "anisotropy"); SetRange(f, -1, 1);
         SetFlags(f, Knob::INVISIBLE);
 
@@ -725,13 +727,15 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         Divider(f, "");
         Text_knob(f,
             "<font size='-1' color='#666'>"
-            "<b>Renderer</b> \xe2\x80\x94 Beer-Lambert ray march, adaptive stepping,<br>"
-            "trilinear BoxSampler, transmittance shadow rays.<br>"
-            "<b>Phase</b> \xe2\x80\x94 Dual-lobe HG + Approximate Mie (Jendersie &amp; d'Eon 2023).<br>"
-            "<b>MS</b> \xe2\x80\x94 Analytical infinite-bounce (Wrenninge 2015).<br>"
-            "<b>Powder</b> \xe2\x80\x94 Schneider &amp; Vos (Horizon Zero Dawn 2015).<br>"
-            "<b>Blackbody</b> \xe2\x80\x94 Tanner Helland RGB approximation.<br>"
-            "<b>Noise</b> \xe2\x80\x94 Hash-based fBm, deterministic, world-space."
+            "<b>Volume renderer</b> -- Beer-Lambert ray march, adaptive stepping,<br>"
+            "trilinear BoxSampler, transmittance shadow rays, GPU + CPU.<br>"
+            "<b>Phase</b> -- Dual-lobe HG + Cornette-Shanks Mie.<br>"
+            "<b>MS</b> -- Analytical infinite-bounce (Wrenninge 2015). GPU + CPU.<br>"
+            "<b>Chromatic</b> -- Wavelength-dependent extinction (per-channel sigma). GPU + CPU.<br>"
+            "<b>Powder</b> -- Schneider &amp; Vos (Horizon Zero Dawn 2015).<br>"
+            "<b>Blackbody</b> -- Tanner Helland RGB approximation.<br>"
+            "<b>Noise</b> -- Hash-based fBm, deterministic, world-space.<br>"
+            "<b>Multi-volume</b> -- Up to 8 volumes composited on GPU natively."
             "</font>"
         );
         Newline(f);
@@ -952,86 +956,50 @@ void SpectralRenderIop::knobs(Knob_Callback f)
     ClearFlags(f, Knob::STARTLINE);
     Tooltip(f, "Time samples across shutter. 2 = fast. 3 = good. 5 = smooth.");
 
-    BeginClosedGroup(f, "spectral_engine", "Spectral rendering engine — how it works");
+    BeginClosedGroup(f, "spectral_engine", "Spectral rendering engine");
     {
         Text_knob(f,
             "<b>What makes this renderer different</b><br>"
-            "Most production renderers work in RGB &mdash; every ray carries 3 colour channels.<br>"
+            "Most production renderers work in RGB -- every ray carries 3 colour channels.<br>"
             "SpectralRenderer traces one wavelength per ray (380-780nm), like real photons.<br>"
-            "This means dispersion, thin-film interference, fluorescence and spectral absorption<br>"
-            "happen physically &mdash; no faking, no post-process tricks.<br>"
+            "Dispersion, thin-film interference, fluorescence, diffraction and spectral absorption<br>"
+            "all happen physically -- no faking, no post-process tricks. GPU and CPU.<br>"
             "<br>"
-            "<b>The rendering equation (Kajiya 1986)</b><br>"
-            "L<sub>o</sub>(p,&omega;<sub>o</sub>) = L<sub>e</sub>(p,&omega;<sub>o</sub>) "
-            "+ &int; f(p,&omega;<sub>i</sub>,&omega;<sub>o</sub>) &middot; "
-            "L<sub>i</sub>(p,&omega;<sub>i</sub>) &middot; cos&theta; d&omega;<sub>i</sub><br>"
-            "In words: outgoing light = emission + all incoming light &times; surface reflectance.<br>"
-            "We solve this with Monte Carlo &mdash; trace random rays, average the result.<br>"
-            "More samples = less noise. The spectral version evaluates per-wavelength &lambda;.<br>"
+            "<b>Spectral sampling</b><br>"
+            "Each sample picks a random wavelength in [380, 780] nm.<br>"
+            "Spectral radiance converts to CIE XYZ tristimulus, then to sRGB/ACEScg/ACES.<br>"
+            "RGB colours map to spectral reflectance via Gaussian basis functions.<br>"
             "<br>"
-            "<b>How spectral sampling works</b><br>"
-            "Each sample picks a random wavelength &lambda; &isin; [380, 780] nm.<br>"
-            "Spectral radiance L(&lambda;) converts to CIE XYZ tristimulus:<br>"
-            "X = &int; L(&lambda;) &middot; x&#772;(&lambda;) d&lambda; , "
-            "Y = &int; L(&lambda;) &middot; y&#772;(&lambda;) d&lambda; , "
-            "Z = &int; L(&lambda;) &middot; z&#772;(&lambda;) d&lambda;<br>"
-            "XYZ &rarr; linear sRGB via 3&times;3 matrix. Monte Carlo estimates each integral<br>"
-            "by averaging random &lambda; samples: X &asymp; (1/N) &sum; L(&lambda;<sub>i</sub>) &middot; x&#772;(&lambda;<sub>i</sub>).<br>"
-            "RGB colour &rarr; spectral reflectance via Gaussian basis functions:<br>"
-            "R(&lambda;) = r&middot;G(&lambda;,630,30) + g&middot;G(&lambda;,532,30) + b&middot;G(&lambda;,460,25)<br>"
-            "where G(&lambda;,&mu;,&sigma;) = e<sup>-(&lambda;-&mu;)&sup2;/2&sigma;&sup2;</sup>.<br>"
+            "<b>Materials and shading (GPU + CPU)</b><br>"
+            "Disney BSDF with spectral evaluation. GGX microfacet model.<br>"
+            "Metals use spectral (n,k) optical constants -- gold, copper, silver, etc.<br>"
+            "Fresnel conductor with complex refractive index. Kulla-Conty energy compensation.<br>"
+            "Diffraction grating: wavelength-dependent scattering from surface microstructure.<br>"
+            "Fluorescence: UV/blue absorption, visible re-emission (Stokes shift).<br>"
+            "Subsurface scattering: spectral random walk with wavelength-dependent MFP (CPU).<br>"
             "<br>"
-            "<b>Materials and shading</b><br>"
-            "Disney BSDF: f = f<sub>diff</sub> + f<sub>spec</sub>. "
-            "Specular: D&middot;G&middot;F / (4 cos&theta;<sub>i</sub> cos&theta;<sub>o</sub>).<br>"
-            "D = GGX: &alpha;&sup2; / (&pi;(cos&sup2;&theta;<sub>h</sub>(&alpha;&sup2;-1)+1)&sup2;). "
-            "G = Smith height-correlated.<br>"
-            "Metals use measured spectral (n,k) optical constants &mdash; gold, copper, silver, etc.<br>"
-            "have physically correct colour that shifts with viewing angle.<br>"
-            "Fresnel conductor: F = (R<sub>s</sub>+R<sub>p</sub>)/2 with complex refractive index.<br>"
-            "Multiscatter GGX (Kulla-Conty): compensates energy lost to multiple microfacet bounces.<br>"
+            "<b>Glass and dispersion (GPU + CPU)</b><br>"
+            "Snell's law refraction with Cauchy dispersion (Abbe number).<br>"
+            "Thin-film interference for soap bubbles and oil slicks.<br>"
+            "Beer-Lambert volumetric absorption per wavelength.<br>"
             "<br>"
-            "<b>Glass and dispersion</b><br>"
-            "Transparent materials refract using Snell's law: n<sub>1</sub>sin&theta;<sub>1</sub> = n<sub>2</sub>sin&theta;<sub>2</sub>.<br>"
-            "The Abbe number controls how much each wavelength &lambda; bends differently.<br>"
-            "Crown glass (V<sub>d</sub>=58) gives subtle dispersion. Flint glass (30) gives strong rainbows.<br>"
-            "Diamond (V<sub>d</sub>=55, IOR 2.42) produces dramatic fire effects.<br>"
-            "<br>"
-            "<b>Beer-Lambert volumetric absorption</b><br>"
-            "Light traveling through glass/liquid is absorbed: T(&lambda;) = e<sup>-&sigma;(&lambda;)&middot;d</sup><br>"
-            "where &sigma;(&lambda;) = -ln(color<sub>&lambda;</sub>) &times; density, and d = distance inside the medium.<br>"
-            "Red glass absorbs blue/green wavelengths. Thicker glass = deeper colour.<br>"
-            "Each wavelength is absorbed independently &mdash; physically correct spectral absorption.<br>"
-            "<br>"
-            "<b>Caustics</b><br>"
-            "Light concentrations from refraction (glass focusing) or reflection (curved mirrors).<br>"
-            "Currently disabled for stability &mdash; will be re-implemented with progressive<br>"
-            "photon mapping in a future update for production-quality rainbow caustics.<br>"
+            "<b>Volumes (GPU + CPU)</b><br>"
+            "OpenVDB reader with multi-volume compositing (up to 8 on GPU).<br>"
+            "Per-volume materials via SpectralVolumeMaterial.<br>"
+            "Chromatic extinction: wavelength-dependent volume absorption.<br>"
+            "Multiple scattering: Wrenninge 2015 analytical approximation.<br>"
+            "Cornette-Shanks Mie phase function. Procedural fBm noise.<br>"
             "<br>"
             "<b>Noise reduction</b><br>"
-            "Multiple Importance Sampling (MIS) combines light and surface sampling strategies<br>"
-            "to reduce noise — especially effective for glossy surfaces under small bright lights.<br>"
-            "Adaptive sampling stops sending rays to pixels that are already clean.<br>"
-            "Blue noise (R2 sequence) distributes samples more evenly than pure random.<br>"
-            "OptiX AI denoiser can clean up remaining noise as a post-process.<br>"
+            "MIS, adaptive sampling, blue noise (R2), OptiX AI denoiser.<br>"
             "<br>"
             "<b>Depth of field</b><br>"
-            "Thin lens model: f-stop controls aperture size, focus distance sets the sharp plane.<br>"
-            "Each ray origin is jittered on a circular lens disk — objects away from the focus<br>"
-            "plane blur naturally. Lower f-stop = shallower DOF. f/0 = pinhole (everything sharp).<br>"
+            "Thin lens model: f-stop aperture, focus distance. f/0 = pinhole.<br>"
             "<br>"
             "<b>Environment and lighting</b><br>"
-            "HDRI environment maps provide image-based lighting from all directions.<br>"
-            "Each shading point samples the hemisphere around its surface normal.<br>"
-            "CIE illuminants (D65, D50, A, etc.) provide physically standardised light spectra.<br>"
-            "Shadow rays pass through glass with Fresnel-weighted transmittance.<br>"
-            "<br>"
-            "<b>Metal presets — spectral Fresnel conductor</b><br>"
-            "Gold: warm yellow, shifts to white at grazing. Absorbs blue wavelengths.<br>"
-            "Copper: reddish face-on, whitens at edges. Sharp spectral transition at 580nm.<br>"
-            "Silver: near-neutral, very high reflectance across all wavelengths.<br>"
-            "Aluminium: slightly warm neutral, subtle blue-shift at grazing angles.<br>"
-            "Iron/Titanium: dark metals with strong wavelength-dependent absorption."
+            "HDRI environment maps. CIE illuminants (D65, D50, A, F2, F11).<br>"
+            "47 studio light presets. 18 sky presets including planetary atmospheres.<br>"
+            "Shadow rays with Fresnel-weighted glass transmittance."
         );
     }
     EndGroup(f);
@@ -1039,7 +1007,8 @@ void SpectralRenderIop::knobs(Knob_Callback f)
     Divider(f);
     Text_knob(f,
         "<font color='#666' size='-1'>"
-        "SpectralRenderer v1.0 \xc2\xb7 NDK + Hydra \xc2\xb7 Nuke 17 \xc2\xb7 Embree 4 \xc2\xb7 OptiX 8.1 \xc2\xb7 OpenSubdiv 3.6<br>"
+        "SpectralRenderer v1.1 \xc2\xb7 NDK + Hydra \xc2\xb7 Nuke 17 \xc2\xb7 Embree 4 \xc2\xb7 OptiX 8.1 \xc2\xb7 CUDA 12.6 \xc2\xb7 OpenSubdiv 3.6<br>"
+        "GPU multi-volume \xc2\xb7 Spectral volumes \xc2\xb7 Diffraction \xc2\xb7 Fluorescence<br>"
         "Created by Marten Blumen"
         "</font>"
     );
@@ -1334,63 +1303,6 @@ int SpectralRenderIop::knob_changed(Knob* k)
     if (k->is("vdb_vol_res")) {
         _vdbLoadedPath.clear(); _volume.reset(); _vdbIsPreviewRes = true;
         _frameReady.store(false);
-        return 1;
-    }
-    if (k->is("vdb_estimate_mem")) {
-        // Calculate memory estimate for current resolution setting
-        if (_vdbFile && strlen(_vdbFile) > 0) {
-#ifdef SPECTRAL_HAS_VDB
-            auto grids = pxr::SpectralVDBLoader::DiscoverGrids(_vdbFile);
-            int nativeMax = 0;
-            int nativeX = 0, nativeY = 0, nativeZ = 0;
-            int gridCount = 0;
-            for (const auto& g : grids) {
-                if (g.voxelCount > 0) {
-                    int d = int(std::cbrt(double(g.voxelCount)));
-                    if (d > nativeMax) nativeMax = d;
-                    gridCount++;
-                }
-            }
-            // Get actual bbox dims from a metadata-only load
-            auto meta = pxr::SpectralVDBLoader::LoadMetadataOnly(_vdbFile,
-                _VdbGridName(_vdbDensityGridIdx, _vdbDensityOverride));
-            if (meta) {
-                GfVec3f bs = meta->bboxMax - meta->bboxMin;
-                float maxS = std::max({bs[0], bs[1], bs[2]});
-                if (maxS > 0) {
-                    nativeX = int(nativeMax * bs[0] / maxS);
-                    nativeY = int(nativeMax * bs[1] / maxS);
-                    nativeZ = int(nativeMax * bs[2] / maxS);
-                }
-            }
-            if (nativeMax == 0) nativeMax = nativeX = nativeY = nativeZ = 128;
-
-            // Compute render dims
-            int renderMax;
-            if (_vdbVolRes == 4) renderMax = std::min(1024, nativeMax);
-            else if (_vdbVolRes == 3) renderMax = std::min(512, nativeMax);
-            else {
-                static const float fracs[] = { 0.125f, 0.25f, 0.5f };
-                renderMax = std::max(32, int(nativeMax * fracs[_vdbVolRes]));
-            }
-            float ratio = float(renderMax) / std::max(1, nativeMax);
-            int rX = std::max(1, int(nativeX * ratio));
-            int rY = std::max(1, int(nativeY * ratio));
-            int rZ = std::max(1, int(nativeZ * ratio));
-            size_t voxels = size_t(rX) * rY * rZ;
-            int numGrids = std::max(1, std::min(gridCount, 4));  // density + temp + flame + color
-            float memMB = voxels * sizeof(float) * numGrids / (1024.f * 1024.f);
-
-            char buf[256];
-            std::snprintf(buf, sizeof(buf),
-                "Native: %dx%dx%d | Render: %dx%dx%d | ~%.0f MB (%d grid%s)",
-                nativeX, nativeY, nativeZ, rX, rY, rZ, memMB,
-                numGrids, numGrids > 1 ? "s" : "");
-            if (Knob* mk = knob("vdb_mem_info")) mk->set_text(buf);
-#endif
-        } else {
-            if (Knob* mk = knob("vdb_mem_info")) mk->set_text("No VDB file loaded");
-        }
         return 1;
     }
     if (k->is("vdb_shadow_cache") || k->is("vdb_shadow_cache_res")) return 1;
@@ -3576,6 +3488,7 @@ void SpectralRenderIop::append(Hash& hash)
 void SpectralRenderIop::build_handles(ViewerContext* ctx)
 {
     if (ctx->transform_mode() == VIEWER_2D) return;
+    if (node_disabled()) return;
 
     // Upstream Hydra/USD rendering doesn't propagate through Iop build_handles.
     // SpectralRender draws its own GL preview instead (local 3D preview checkbox).
@@ -3906,6 +3819,8 @@ void SpectralRenderIop::_LoadVDB()
         SpectralVolMerge* volMerge = nullptr;
         _cachedEnvLight = nullptr;
         _cachedStudioLight = nullptr;
+        _allEnvLights.clear();
+        _allStudioLights.clear();
         std::vector<Op*> searchOps;
         searchOps.push_back(scn);
         for (int depth = 0; depth < 4; ++depth) {
@@ -3916,10 +3831,16 @@ void SpectralRenderIop::_LoadVDB()
                     vdbReads.push_back(static_cast<SpectralVDBRead*>(op));
                 if (!volMerge && strcmp(op->Class(), "SpectralVolMerge") == 0 && !op->node_disabled())
                     volMerge = static_cast<SpectralVolMerge*>(op);
-                if (!_cachedEnvLight && strcmp(op->Class(), "SpectralEnvLight") == 0 && !op->node_disabled())
-                    _cachedEnvLight = static_cast<SpectralEnvLight*>(op);
-                if (!_cachedStudioLight && strcmp(op->Class(), "SpectralStudioLight") == 0 && !op->node_disabled())
-                    _cachedStudioLight = static_cast<SpectralStudioLight*>(op);
+                if (strcmp(op->Class(), "SpectralEnvLight") == 0 && !op->node_disabled()) {
+                    auto* el = static_cast<SpectralEnvLight*>(op);
+                    _allEnvLights.push_back(el);
+                    if (!_cachedEnvLight) _cachedEnvLight = el;
+                }
+                if (strcmp(op->Class(), "SpectralStudioLight") == 0 && !op->node_disabled()) {
+                    auto* sl = static_cast<SpectralStudioLight*>(op);
+                    _allStudioLights.push_back(sl);
+                    if (!_cachedStudioLight) _cachedStudioLight = sl;
+                }
                 for (int i = 0; i < op->inputs(); ++i) {
                     Op* up = op->input(i);
                     if (up) {
@@ -3933,18 +3854,44 @@ void SpectralRenderIop::_LoadVDB()
 
         // Prefer VolMerge for multi-volume (handles transforms properly)
         if (volMerge) {
-            int renderMaxRes = 128;
-            if (_vdbVolRes == 4) renderMaxRes = 1024;
-            else if (_vdbVolRes == 3) renderMaxRes = 512;
-            else if (_vdbVolRes == 2) renderMaxRes = 256;
-            else if (_vdbVolRes == 1) renderMaxRes = 128;
-            else renderMaxRes = 64;
-            auto entries = volMerge->GetVolumes(int(outputContext().frame()), renderMaxRes);
+            int masterMaxRes = _GetMasterMaxRes();
+            auto entries = volMerge->GetVolumes(int(outputContext().frame()), masterMaxRes);
+
+            // Collect SpectralVolumeMaterial ops from VolMerge inputs (in order)
+            // Materials are mapped positionally to volume entries:
+            // 1st material → 1st volume, 2nd material → 2nd volume, etc.
+            std::vector<SpectralVolumeMaterial*> volMats;
+            for (int inp = 0; inp < volMerge->inputs(); ++inp) {
+                Op* up = volMerge->input(inp);
+                if (!up || up->node_disabled()) continue;
+                up->validate(true);
+                // Check this input and walk its chain for a VolumeMaterial
+                Op* cur = up;
+                for (int d = 0; d < 6 && cur; ++d) {
+                    if (strcmp(cur->Class(), "SpectralVolumeMaterial") == 0) {
+                        volMats.push_back(static_cast<SpectralVolumeMaterial*>(cur));
+                        break;
+                    }
+                    cur = (cur->inputs() > 0) ? cur->input(0) : nullptr;
+                }
+            }
+
             _volumes.clear();
+            int volIdx = 0;
             for (auto& e : entries) {
                 if (e.volume && e.volume->IsValid()) {
-                    _applyVolumeShading(e.volume);
+                    if (volIdx < (int)volMats.size()) {
+                        // Apply this volume's specific material
+                        _applyVolumeMaterialDirect(e.volume, volMats[volIdx]);
+                    } else if (!volMats.empty()) {
+                        // More volumes than materials: use last material
+                        _applyVolumeMaterialDirect(e.volume, volMats.back());
+                    } else {
+                        // No materials found: use built-in knobs
+                        _applyVolumeShading(e.volume);
+                    }
                     _volumes.push_back(e.volume);
+                    volIdx++;
                 }
             }
             // Get lights from VolMerge if not already found
@@ -3960,16 +3907,13 @@ void SpectralRenderIop::_LoadVDB()
         if (!vdbReads.empty()) {
             _volumes.clear();
             int renderFrame = int(outputContext().frame());
-            int renderMaxRes = 128;
-            if (_vdbVolRes == 4) renderMaxRes = 1024;
-            else if (_vdbVolRes == 3) renderMaxRes = 512;
-            else if (_vdbVolRes == 2) renderMaxRes = 256;
-            else if (_vdbVolRes == 1) renderMaxRes = 128;
-            else renderMaxRes = 64;
+            int masterMaxRes = _GetMasterMaxRes();
             for (size_t vi = 0; vi < vdbReads.size(); ++vi) {
-                auto vol = vdbReads[vi]->GetVolumeAtFrame(renderFrame, renderMaxRes);
+                int nodeRes = vdbReads[vi]->GetMaxRes();
+                int effectiveRes = std::min(masterMaxRes, nodeRes);
+                auto vol = vdbReads[vi]->GetVolumeAtFrame(renderFrame, effectiveRes);
                 if (vol && vol->IsValid()) {
-                    _applyVolumeShading(vol);
+                    _applyVolumeShading(vol, vdbReads[vi]);
                     if (vi < _volumeXforms.size() && _volumeXforms[vi].hasXform) {
                         vol->translate = _volumeXforms[vi].translate;
                         vol->rotate = _volumeXforms[vi].rotate;
@@ -4065,18 +4009,71 @@ void SpectralRenderIop::_LoadVDBForRender()
 }
 
 // ---------------------------------------------------------------------------
-// _applyVolumeShading — copy shading params from knobs to volume
+// _applyVolumeMaterialDirect — apply a specific SpectralVolumeMaterial to a volume
+// Used by VolMerge path for per-volume material assignment.
 // ---------------------------------------------------------------------------
-void SpectralRenderIop::_applyVolumeShading(std::shared_ptr<pxr::SpectralVolume>& vol)
+void SpectralRenderIop::_applyVolumeMaterialDirect(
+    std::shared_ptr<pxr::SpectralVolume>& vol, SpectralVolumeMaterial* mat)
 {
-    // Find SpectralVolumeMaterial by walking scn input chain
-    // (VDBRead may have mat connected, or GeoBind assignment)
+    if (mat) {
+        vol->extinction = float(mat->extinction);
+        vol->scattering = float(mat->scattering);
+        vol->densityMult = float(mat->densityMult);
+        vol->scatterColor = pxr::GfVec3f(mat->scatterColor[0], mat->scatterColor[1], mat->scatterColor[2]);
+        vol->phaseMode = mat->phaseMode;
+        vol->mieDropletD = float(mat->mieDropletD);
+        vol->gForward = float(mat->gForward);
+        vol->gBackward = float(mat->gBackward);
+        vol->lobeMix = float(mat->lobeMix);
+        vol->powderStrength = float(mat->powder);
+        vol->gradientMix = float(mat->gradientMix);
+        vol->jitter = mat->jitter;
+        vol->emissionIntensity = float(mat->emissionIntensity);
+        vol->tempMin = float(mat->tempMin);
+        vol->tempMax = float(mat->tempMax);
+        vol->flameIntensity = float(mat->flameIntensity);
+        vol->useBlackbody = mat->useBlackbody;
+        vol->chromaticExtinction = mat->chromaticExtinction;
+        vol->sigmaR = float(mat->sigmaR);
+        vol->sigmaG = float(mat->sigmaG);
+        vol->sigmaB = float(mat->sigmaB);
+        vol->noiseEnable = mat->noiseEnable;
+        vol->noiseNormalize = mat->noiseNormalize;
+        vol->noiseScale = float(mat->noiseScale);
+        vol->noiseStrength = float(mat->noiseStrength);
+        vol->noiseOctaves = mat->noiseOctaves;
+        vol->noiseRoughness = float(mat->noiseRoughness);
+        vol->msApprox = mat->msApprox;
+        vol->msTint = pxr::GfVec3f(mat->msTint[0], mat->msTint[1], mat->msTint[2]);
+    }
+    // Always from SpectralRender (rendering quality, not look)
+    vol->stepSize = float(_vdbStepSize);
+    vol->shadowSteps = _vdbShadowSteps;
+    vol->shadowDensity = float(_vdbShadowDensity);
+    vol->quality = float(_vdbQuality);
+    vol->adaptiveStep = _vdbAdaptiveStep;
+    vol->renderMode = _vdbRenderMode;
+    vol->intensity = float(_vdbIntensity);
+    vol->envIntensity = float(_vdbEnvIntensity);
+    vol->envDiffuse = float(_vdbEnvDiffuse);
+    vol->spectralVolumes = _vdbSpectralVolumes;
+}
+
+// ---------------------------------------------------------------------------
+// _applyVolumeShading — copy shading params from knobs to volume
+// If searchFrom is provided, search that Op's inputs for a SpectralVolumeMaterial.
+// Otherwise, search from the scene input (input 0) for global material.
+// ---------------------------------------------------------------------------
+void SpectralRenderIop::_applyVolumeShading(std::shared_ptr<pxr::SpectralVolume>& vol,
+                                             DD::Image::Op* searchFrom)
+{
+    // Find SpectralVolumeMaterial by walking input chain
     SpectralVolumeMaterial* mat = nullptr;
 
-    if (inputs() > 0 && input(0)) {
-        Op* scn = input(0);
+    Op* startOp = searchFrom ? searchFrom : (inputs() > 0 ? input(0) : nullptr);
+    if (startOp) {
         std::vector<Op*> searchOps;
-        searchOps.push_back(scn);
+        searchOps.push_back(startOp);
         for (int depth = 0; depth < 4 && !mat; ++depth) {
             std::vector<Op*> nextLevel;
             for (Op* op : searchOps) {
@@ -4271,10 +4268,14 @@ void SpectralRenderIop::_BuildLightRig()
 {
     if (!_scene) return;
 
-    // Search scn input chain for SpectralEnvLight and SpectralStudioLight
-    SpectralEnvLight* envLight = nullptr;
-    SpectralStudioLight* studioLight = nullptr;
-    if (inputs() > 0 && input(0)) {
+    // Search scn input chain for ALL SpectralEnvLight and SpectralStudioLight nodes
+    // (vectors already populated in _EnsureFrameRendered scene walk)
+    // Use first of each for param override; all contribute lights additively
+    SpectralEnvLight* envLight = !_allEnvLights.empty() ? _allEnvLights[0] : nullptr;
+    SpectralStudioLight* studioLight = !_allStudioLights.empty() ? _allStudioLights[0] : nullptr;
+
+    // Also try direct discovery if vectors are empty (legacy path)
+    if (!envLight && !studioLight && inputs() > 0 && input(0)) {
         std::vector<Op*> searchOps;
         searchOps.push_back(input(0));
         for (int depth = 0; depth < 4 && (!envLight || !studioLight); ++depth) {
@@ -4609,18 +4610,6 @@ void SpectralRenderIop::_EnsureFrameRendered()
     std::vector<const pxr::SpectralVolume*> volPtrs;
     for (auto& v : _volumes) if (v) volPtrs.push_back(v.get());
     if (volPtrs.empty() && _volume) volPtrs.push_back(_volume.get());
-
-    // Track CPU fallback for multi-volume
-    _gpuFallbackToCPU = (volPtrs.size() > 1 && useGPU);
-    if (_gpuFallbackToCPU) {
-        if (Knob* tc = knob("tile_color")) tc->set_value(0x4488bb00);
-        if (Knob* lk = knob("label")) lk->set_text("CPU (multi-vol)");
-    } else {
-        if (Knob* lk = knob("label")) {
-            const char* cur = lk->get_text();
-            if (cur && strcmp(cur, "CPU (multi-vol)") == 0) lk->set_text("");
-        }
-    }
 
 #ifdef SPECTRAL_HAS_OPTIX
     if (useGPU) {

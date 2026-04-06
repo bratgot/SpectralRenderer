@@ -50,6 +50,7 @@ using namespace DD::Image;
 
 class SpectralEnvLight;
 class SpectralStudioLight;
+class SpectralVolumeMaterial;
 
 class HDSPECTRAL_API SpectralRenderIop : public Iop, public DeepOp
 {
@@ -119,7 +120,10 @@ private:
     void _BuildLightRig();
     void _LoadVDB();
     void _LoadVDBForRender();
-    void _applyVolumeShading(std::shared_ptr<pxr::SpectralVolume>& vol);
+    void _applyVolumeShading(std::shared_ptr<pxr::SpectralVolume>& vol,
+                              DD::Image::Op* searchFrom = nullptr);
+    void _applyVolumeMaterialDirect(std::shared_ptr<pxr::SpectralVolume>& vol,
+                                     SpectralVolumeMaterial* mat);
     void _EnsureFrameRendered();
     std::string _resolveFramePath(int frame) const;
 
@@ -277,7 +281,7 @@ private:
 
     int   _tileSize   = 64;
     int   _deviceMode = 2;         // 0=cpu, 1=gpu, 2=auto
-    bool  _gpuFallbackToCPU = false; // true when multi-volume forces CPU
+    int _GetMasterMaxRes() const;
     int   _colorSpace = 0;         // 0=sRGB, 1=ACEScg, 2=ACES 2065-1
 
     // LPE-style AOV decomposition
@@ -350,8 +354,10 @@ private:
     std::vector<VolumeXform> _volumeXforms;
 
     // Cached light node pointers for 3D viewport drawing
-    SpectralEnvLight*    _cachedEnvLight = nullptr;
-    SpectralStudioLight* _cachedStudioLight = nullptr;
+    SpectralEnvLight*    _cachedEnvLight = nullptr;      // first, for GL preview
+    SpectralStudioLight* _cachedStudioLight = nullptr;    // first, for GL preview
+    std::vector<SpectralEnvLight*>    _allEnvLights;      // all, for additive rendering
+    std::vector<SpectralStudioLight*> _allStudioLights;   // all, for additive rendering
     SpectralCamera                      _camera;
     bool                                _cameraFromInput = false;
 

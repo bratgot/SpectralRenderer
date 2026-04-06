@@ -364,6 +364,12 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
             gpuMats[i].bumpStrength      = mats[i].bumpStrength;
             gpuMats[i].absorptionColor   = make_float3(mats[i].absorptionColor[0], mats[i].absorptionColor[1], mats[i].absorptionColor[2]);
             gpuMats[i].absorptionDensity = mats[i].absorptionDensity;
+            // Phase 14: diffraction + fluorescence
+            gpuMats[i].gratingSpacing  = mats[i].gratingSpacing;
+            gpuMats[i].gratingStrength = mats[i].gratingStrength;
+            gpuMats[i].fluorAbsorb     = mats[i].fluorAbsorb;
+            gpuMats[i].fluorEmit       = mats[i].fluorEmit;
+            gpuMats[i].fluorStrength   = mats[i].fluorStrength;
         }
         const size_t matBytes = gpuMats.size() * sizeof(spectral_gpu::GPUMaterial);
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_materials), matBytes));
@@ -527,7 +533,8 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
 bool SpectralGPU::Render(const SpectralCamera& camera,
                           unsigned int width, unsigned int height,
                           float* pixels, float* depth, int spp, int maxBounces,
-                          int colorSpace, const SpectralVolume* volume)
+                          int colorSpace, const SpectralVolume* const* volumes,
+                          int numVolumes)
 {
     if (!_pipeline || !_gasHandle) return false;
     if (width == 0 || height == 0) return false;
@@ -580,94 +587,148 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     launchParams.textureCount = _textureCount;
     launchParams.blueNoise    = camera.blueNoise ? 1 : 0;
 
-    // Volume data
+    // Multi-volume upload (Phase 13)
+    launchParams.numGpuVolumes = 0;
+    memset(launchParams.gpuVolumes, 0, sizeof(launchParams.gpuVolumes));
+    // Legacy single-volume fields
     launchParams.hasVolume = 0;
     launchParams.volumeDensity = nullptr;
     launchParams.volumeTemperature = nullptr;
     launchParams.volumeFlame = nullptr;
-    if (volume && volume->IsValid()) {
-        launchParams.hasVolume = 1;
-        launchParams.volResX = volume->resX;
-        launchParams.volResY = volume->resY;
-        launchParams.volResZ = volume->resZ;
-        launchParams.volBboxMin = make_float3(volume->GetBboxMin()[0], volume->GetBboxMin()[1], volume->GetBboxMin()[2]);
-        launchParams.volBboxMax = make_float3(volume->GetBboxMax()[0], volume->GetBboxMax()[1], volume->GetBboxMax()[2]);
-        launchParams.volExtinction = volume->extinction;
-        launchParams.volScattering = volume->scattering;
-        launchParams.volDensityMult = volume->densityMult;
-        launchParams.volGForward = volume->gForward;
-        launchParams.volEmissionIntensity = volume->emissionIntensity;
-        launchParams.volTempMin = volume->tempMin;
-        launchParams.volTempMax = volume->tempMax;
-        launchParams.volPowder = volume->powderStrength;
-        launchParams.volScatterColor = make_float3(volume->scatterColor[0], volume->scatterColor[1], volume->scatterColor[2]);
-        launchParams.volStepSize = volume->stepSize;
-        launchParams.volJitter = volume->jitter ? 1 : 0;
 
+    int nv = numVolumes;
+    if (nv > SPECTRAL_MAX_GPU_VOLUMES) nv = SPECTRAL_MAX_GPU_VOLUMES;
+
+    for (int vi = 0; vi < nv; ++vi) {
+        const SpectralVolume* volume = volumes[vi];
+        if (!volume || !volume->IsValid()) continue;
+
+        int gi = launchParams.numGpuVolumes;
+        spectral_gpu::GPUVolume& gv = launchParams.gpuVolumes[gi];
+
+        gv.resX = volume->resX; gv.resY = volume->resY; gv.resZ = volume->resZ;
+        gv.bboxMin = make_float3(volume->GetBboxMin()[0], volume->GetBboxMin()[1], volume->GetBboxMin()[2]);
+        gv.bboxMax = make_float3(volume->GetBboxMax()[0], volume->GetBboxMax()[1], volume->GetBboxMax()[2]);
+        gv.extinction = volume->extinction;
+        gv.scattering = volume->scattering;
+        gv.densityMult = volume->densityMult;
+        gv.gForward = volume->gForward;
+        gv.gBackward = volume->gBackward;
+        gv.lobeMix = volume->lobeMix;
+        gv.emissionIntensity = volume->emissionIntensity;
+        gv.tempMin = volume->tempMin;
+        gv.tempMax = volume->tempMax;
+        gv.powder = volume->powderStrength;
+        gv.scatterColor = make_float3(volume->scatterColor[0], volume->scatterColor[1], volume->scatterColor[2]);
+        gv.stepSize = volume->stepSize;
+        gv.jitter = volume->jitter ? 1 : 0;
+        gv.phaseMode = volume->phaseMode;
+        gv.mieDropletD = volume->mieDropletD;
+        gv.shadowSteps = volume->shadowSteps;
+        gv.shadowDensity = volume->shadowDensity;
+        gv.quality = volume->quality;
+        gv.adaptiveStep = volume->adaptiveStep ? 1 : 0;
+        gv.renderMode = volume->renderMode;
+        gv.intensity = volume->intensity;
+        gv.flameIntensity = volume->flameIntensity;
+        gv.noiseEnable = volume->noiseEnable ? 1 : 0;
+        gv.noiseScale = volume->noiseScale;
+        gv.noiseStrength = volume->noiseStrength;
+        gv.noiseOctaves = volume->noiseOctaves;
+        gv.noiseRoughness = volume->noiseRoughness;
+        gv.hasTransform = volume->hasTransform ? 1 : 0;
+        gv.xfCenter = make_float3(volume->_center[0], volume->_center[1], volume->_center[2]);
+        gv.invScale = make_float3(volume->_invScale[0], volume->_invScale[1], volume->_invScale[2]);
+        for (int i = 0; i < 9; ++i) gv.invRotM[i] = volume->_rotM[i];
+        gv.origBboxMin = make_float3(volume->bboxMin[0], volume->bboxMin[1], volume->bboxMin[2]);
+        gv.origBboxMax = make_float3(volume->bboxMax[0], volume->bboxMax[1], volume->bboxMax[2]);
+        // Phase 14: chromatic extinction + multiple scattering
+        gv.chromaticExtinction = volume->chromaticExtinction ? 1 : 0;
+        gv.sigmaR = volume->sigmaR;
+        gv.sigmaG = volume->sigmaG;
+        gv.sigmaB = volume->sigmaB;
+        gv.msApprox = volume->msApprox ? 1 : 0;
+        gv.msTint = make_float3(volume->msTint[0], volume->msTint[1], volume->msTint[2]);
+
+        // Upload density grid
         size_t densBytes = volume->density.size() * sizeof(float);
-        // Only re-upload if size changed (volume data is cached on GPU)
-        if (densBytes != _volCachedSize) {
-            if (_d_volumeDensity) cudaFree(reinterpret_cast<void*>(_d_volumeDensity));
-            _d_volumeDensity = 0;
-            CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_volumeDensity), densBytes));
-            _volCachedSize = densBytes;
+        auto& dv = _d_volumes[gi];
+        if (dv.cachedSize != densBytes) {
+            if (dv.d_density) cudaFree(reinterpret_cast<void*>(dv.d_density));
+            dv.d_density = 0;
+            CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&dv.d_density), densBytes));
+            dv.cachedSize = densBytes;
         }
-        CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_volumeDensity), volume->density.data(),
+        CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(dv.d_density), volume->density.data(),
                               densBytes, cudaMemcpyHostToDevice));
-        launchParams.volumeDensity = reinterpret_cast<float*>(_d_volumeDensity);
+        gv.density = reinterpret_cast<float*>(dv.d_density);
 
+        // Temperature
+        gv.temperature = nullptr;
         if (!volume->temperature.empty()) {
             size_t tempBytes = volume->temperature.size() * sizeof(float);
-            if (_d_volumeTemp) cudaFree(reinterpret_cast<void*>(_d_volumeTemp));
-            _d_volumeTemp = 0;
-            CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_volumeTemp), tempBytes));
-            CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_volumeTemp), volume->temperature.data(),
+            if (dv.d_temp) cudaFree(reinterpret_cast<void*>(dv.d_temp));
+            dv.d_temp = 0;
+            CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&dv.d_temp), tempBytes));
+            CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(dv.d_temp), volume->temperature.data(),
                                   tempBytes, cudaMemcpyHostToDevice));
-            launchParams.volumeTemperature = reinterpret_cast<float*>(_d_volumeTemp);
+            gv.temperature = reinterpret_cast<float*>(dv.d_temp);
         }
 
-        // Flame grid upload
-        launchParams.volumeFlame = nullptr;
+        // Flame
+        gv.flame = nullptr;
         if (!volume->flame.empty()) {
             size_t flameBytes = volume->flame.size() * sizeof(float);
-            static CUdeviceptr _d_volumeFlame = 0;
-            if (_d_volumeFlame) cudaFree(reinterpret_cast<void*>(_d_volumeFlame));
-            _d_volumeFlame = 0;
-            CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_volumeFlame), flameBytes));
-            CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_volumeFlame), volume->flame.data(),
+            if (dv.d_flame) cudaFree(reinterpret_cast<void*>(dv.d_flame));
+            dv.d_flame = 0;
+            CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&dv.d_flame), flameBytes));
+            CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(dv.d_flame), volume->flame.data(),
                                   flameBytes, cudaMemcpyHostToDevice));
-            launchParams.volumeFlame = reinterpret_cast<float*>(_d_volumeFlame);
+            gv.flame = reinterpret_cast<float*>(dv.d_flame);
         }
 
-        // Phase 12 params
-        launchParams.volGBackward = volume->gBackward;
-        launchParams.volLobeMix = volume->lobeMix;
-        launchParams.volPhaseMode = volume->phaseMode;
-        launchParams.volMieDropletD = volume->mieDropletD;
-        launchParams.volShadowSteps = volume->shadowSteps;
-        launchParams.volShadowDensity = volume->shadowDensity;
-        launchParams.volQuality = volume->quality;
-        launchParams.volAdaptiveStep = volume->adaptiveStep ? 1 : 0;
-        launchParams.volRenderMode = volume->renderMode;
-        launchParams.volIntensity = volume->intensity;
-        launchParams.volFlameIntensity = volume->flameIntensity;
-        launchParams.volNoiseEnable = volume->noiseEnable ? 1 : 0;
-        launchParams.volNoiseScale = volume->noiseScale;
-        launchParams.volNoiseStrength = volume->noiseStrength;
-        launchParams.volNoiseOctaves = volume->noiseOctaves;
-        launchParams.volNoiseRoughness = volume->noiseRoughness;
+        // Also populate legacy single-volume fields for volume[0]
+        if (gi == 0) {
+            launchParams.hasVolume = 1;
+            launchParams.volumeDensity = gv.density;
+            launchParams.volumeTemperature = gv.temperature;
+            launchParams.volumeFlame = gv.flame;
+            launchParams.volResX = gv.resX; launchParams.volResY = gv.resY; launchParams.volResZ = gv.resZ;
+            launchParams.volBboxMin = gv.bboxMin; launchParams.volBboxMax = gv.bboxMax;
+            launchParams.volExtinction = gv.extinction; launchParams.volScattering = gv.scattering;
+            launchParams.volDensityMult = gv.densityMult; launchParams.volGForward = gv.gForward;
+            launchParams.volGBackward = gv.gBackward; launchParams.volLobeMix = gv.lobeMix;
+            launchParams.volEmissionIntensity = gv.emissionIntensity;
+            launchParams.volTempMin = gv.tempMin; launchParams.volTempMax = gv.tempMax;
+            launchParams.volPowder = gv.powder; launchParams.volScatterColor = gv.scatterColor;
+            launchParams.volStepSize = gv.stepSize; launchParams.volJitter = gv.jitter;
+            launchParams.volPhaseMode = gv.phaseMode; launchParams.volMieDropletD = gv.mieDropletD;
+            launchParams.volShadowSteps = gv.shadowSteps; launchParams.volShadowDensity = gv.shadowDensity;
+            launchParams.volQuality = gv.quality; launchParams.volAdaptiveStep = gv.adaptiveStep;
+            launchParams.volRenderMode = gv.renderMode; launchParams.volIntensity = gv.intensity;
+            launchParams.volFlameIntensity = gv.flameIntensity;
+            launchParams.volNoiseEnable = gv.noiseEnable; launchParams.volNoiseScale = gv.noiseScale;
+            launchParams.volNoiseStrength = gv.noiseStrength; launchParams.volNoiseOctaves = gv.noiseOctaves;
+            launchParams.volNoiseRoughness = gv.noiseRoughness;
+            launchParams.volHasTransform = gv.hasTransform; launchParams.volXfCenter = gv.xfCenter;
+            launchParams.volInvScale = gv.invScale;
+            for (int i = 0; i < 9; ++i) launchParams.volInvRotM[i] = gv.invRotM[i];
+            launchParams.volOrigBboxMin = gv.origBboxMin; launchParams.volOrigBboxMax = gv.origBboxMax;
+        }
 
-        // Volume transform
-        launchParams.volHasTransform = volume->hasTransform ? 1 : 0;
-        launchParams.volXfCenter = make_float3(volume->_center[0], volume->_center[1], volume->_center[2]);
-        launchParams.volInvScale = make_float3(volume->_invScale[0], volume->_invScale[1], volume->_invScale[2]);
-        for (int i = 0; i < 9; ++i) launchParams.volInvRotM[i] = volume->_rotM[i];
-        launchParams.volOrigBboxMin = make_float3(volume->bboxMin[0], volume->bboxMin[1], volume->bboxMin[2]);
-        launchParams.volOrigBboxMax = make_float3(volume->bboxMax[0], volume->bboxMax[1], volume->bboxMax[2]);
-
-        fprintf(stderr, "SpectralGPU: volume uploaded %dx%dx%d (%.1f MB)\n",
-                volume->resX, volume->resY, volume->resZ, densBytes / (1024.f * 1024.f));
+        fprintf(stderr, "SpectralGPU: volume[%d] uploaded %dx%dx%d (%.1f MB)\n",
+                gi, gv.resX, gv.resY, gv.resZ, densBytes / (1024.f * 1024.f));
+        launchParams.numGpuVolumes = gi + 1;
     }
+
+    // Free unused volume slots
+    for (int vi = launchParams.numGpuVolumes; vi < _numDeviceVolumes; ++vi) {
+        if (_d_volumes[vi].d_density) { cudaFree(reinterpret_cast<void*>(_d_volumes[vi].d_density)); _d_volumes[vi].d_density = 0; }
+        if (_d_volumes[vi].d_temp)    { cudaFree(reinterpret_cast<void*>(_d_volumes[vi].d_temp));    _d_volumes[vi].d_temp = 0; }
+        if (_d_volumes[vi].d_flame)   { cudaFree(reinterpret_cast<void*>(_d_volumes[vi].d_flame));   _d_volumes[vi].d_flame = 0; }
+        _d_volumes[vi].cachedSize = 0;
+    }
+    _numDeviceVolumes = launchParams.numGpuVolumes;
 
     // projInverse: CPU uses M*v (column-vector), copy as-is
     // viewToWorld: CPU uses v*M (row-vector via Transform), so transpose for GPU

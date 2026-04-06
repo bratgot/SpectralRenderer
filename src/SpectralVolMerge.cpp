@@ -74,9 +74,7 @@ void SpectralVolMerge::knobs(Knob_Callback f)
     Text_knob(f,
         "<font color='#777' size='-1'>"
         "Merges multiple VDBRead nodes for multi-volume rendering.<br>"
-        "Also accepts SpectralEnvLight and SpectralStudioLight inputs.<br>"
-        "<font color='#68a'>Multi-volume compositing currently uses CPU.</font><br>"
-        "Single volume renders on GPU as normal."
+        "Also accepts SpectralEnvLight and SpectralStudioLight inputs."
         "</font>"
     );
     Divider(f, "");
@@ -108,7 +106,6 @@ std::vector<VolMergeEntry> SpectralVolMerge::GetVolumes(int frame, int maxRes)
         Op* cur = op;
         for (int depth = 0; depth < 4 && cur; ++depth) {
             if (cur->node_disabled()) break;
-            fprintf(stderr, "VolMerge: inp%d depth%d class=%s\n", inp, depth, cur->Class());
 
             if (strcmp(cur->Class(), "SpectralVDBRead") == 0) {
                 vdbRead = static_cast<SpectralVDBRead*>(cur);
@@ -126,21 +123,10 @@ std::vector<VolMergeEntry> SpectralVolMerge::GetVolumes(int frame, int maxRes)
             if (strcmp(cur->Class(), "GeoTransform") == 0 ||
                 strcmp(cur->Class(), "TransformGeo") == 0) {
                 foundXform = true;
-                // Debug: dump knob names to find translate/rotate/scale
-                fprintf(stderr, "VolMerge: %s knobs:", cur->Class());
-                for (int ki = 0; ; ++ki) {
-                    Knob* kn = cur->knob(ki);
-                    if (!kn) break;
-                    if (!kn->name().empty())
-                        fprintf(stderr, " %s", kn->name().c_str());
-                }
-                fprintf(stderr, "\n");
-                // Try known Nuke translate knob names
                 const char* transNames[] = {"translate","xform_translate","trans","position",nullptr};
                 for (const char** tn = transNames; *tn; ++tn) {
                     if (Knob* k = cur->knob(*tn)) {
                         tx=k->get_value(0); ty=k->get_value(1); tz=k->get_value(2);
-                        fprintf(stderr, "VolMerge: translate knob '%s' = (%.1f,%.1f,%.1f)\n", *tn, tx,ty,tz);
                         break;
                     }
                 }
@@ -158,13 +144,10 @@ std::vector<VolMergeEntry> SpectralVolMerge::GetVolumes(int frame, int maxRes)
                         break;
                     }
                 }
-                // uniform_scale multiplies all axes
                 if (Knob* us = cur->knob("uniform_scale")) {
                     double u = us->get_value(0);
                     scx *= u; scy *= u; scz *= u;
                 }
-                fprintf(stderr, "VolMerge: xform T=(%.1f,%.1f,%.1f) R=(%.1f,%.1f,%.1f) S=(%.2f,%.2f,%.2f)\n",
-                        tx,ty,tz, rx,ry,rz, scx,scy,scz);
             }
 
             if (cur->inputs() > 0 && cur->input(0)) {
@@ -174,7 +157,10 @@ std::vector<VolMergeEntry> SpectralVolMerge::GetVolumes(int frame, int maxRes)
         }
 
         if (vdbRead && !vdbRead->node_disabled()) {
-            auto vol = vdbRead->GetVolumeAtFrame(frame, maxRes);
+            // Master maxRes caps per-node resolution (Phase 13)
+            int nodeRes = vdbRead->GetMaxRes();
+            int effectiveRes = std::min(maxRes, nodeRes);
+            auto vol = vdbRead->GetVolumeAtFrame(frame, effectiveRes);
             if (vol && vol->IsValid()) {
                 VolMergeEntry e;
                 e.volume = vol;
@@ -189,11 +175,6 @@ std::vector<VolMergeEntry> SpectralVolMerge::GetVolumes(int frame, int maxRes)
                     vol->BuildTransform();
                 }
                 result.push_back(e);
-                fprintf(stderr, "VolMerge: inp%d vol %dx%dx%d bbox(%.1f,%.1f,%.1f)-(%.1f,%.1f,%.1f)%s\n",
-                        inp, vol->resX, vol->resY, vol->resZ,
-                        vol->GetBboxMin()[0],vol->GetBboxMin()[1],vol->GetBboxMin()[2],
-                        vol->GetBboxMax()[0],vol->GetBboxMax()[1],vol->GetBboxMax()[2],
-                        foundXform?" [xform]":"");
             }
         }
     }

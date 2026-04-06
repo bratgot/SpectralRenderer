@@ -47,6 +47,7 @@ public:
     std::shared_ptr<pxr::SpectralVolume> GetVolume();
     std::shared_ptr<pxr::SpectralVolume> GetVolumeAtFrame(int frame, int maxRes = 128);
     bool HasVolume();
+    int GetMaxRes() const;
     std::string ResolvePathAtFrame(int frame) const { return _resolveFramePath(frame); }
 
     static DD::Image::Op* Build(Node* node) { return new SpectralVDBRead(node); }
@@ -92,6 +93,7 @@ private:
     // Volume data
     std::shared_ptr<pxr::SpectralVolume> _volume;
     std::string _loadedPath;
+    int _loadedMaxRes = 0;
     int _lastViewportFrame = -999;
 
     // Preview (Display tab)
@@ -102,5 +104,8 @@ private:
     float _pointSize   = 2.0f;
     float _densityThreshold = 0.01f;
     bool  _lit         = false;
+    // Voxel Resolution
+    int   _voxelRes    = 3;  // 0=1/8, 1=1/4, 2=1/2, 3=Full, 4=Native
+    const char* _memInfo = "";
     const char* _vdbInfo = "";
 };

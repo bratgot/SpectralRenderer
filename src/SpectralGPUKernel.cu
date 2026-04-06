@@ -579,70 +579,155 @@ static __forceinline__ __device__ float shadeHit(
         }
     }
 
+    // Phase 14: Diffraction grating
+    if (mat.gratingSpacing > 0.f && mat.gratingStrength > 0.f) {
+        float d = mat.gratingSpacing;  // um
+        float lambdaUm = lambda * 0.001f;
+        float cosI = fabsf(N.x*V.x + N.y*V.y + N.z*V.z);
+        float sinI = sqrtf(fmaxf(0.f, 1.f - cosI*cosI));
+        float diffracted = 0.f;
+        for (int m = 1; m <= 3; ++m) {
+            float sinM = sinI - float(m) * lambdaUm / d;
+            if (sinM > -1.f && sinM < 1.f) {
+                float cosM = sqrtf(1.f - sinM*sinM);
+                diffracted += cosM / float(m * m);
+            }
+        }
+        float gratingContrib = diffracted * mat.gratingStrength;
+        for (unsigned li = 0; li < params.lightCount; ++li) {
+            const GPULight& light = params.lights[li];
+            float lightRad = lightEmission(light, lambda);
+            float atten = lightAttenuation(light, hitPos);
+            radiance += gratingContrib * lightRad * atten * 0.2f;
+        }
+    }
+
+    // Phase 14: Fluorescence (Stokes shift)
+    if (mat.fluorStrength > 0.f && mat.fluorAbsorb > 0.f) {
+        float absCenter = mat.fluorAbsorb;
+        float emCenter = mat.fluorEmit;
+        float dAbs = lambda - absCenter;
+        float absProb = expf(-dAbs * dAbs / (2.f * 30.f * 30.f));
+        float dEm = lambda - emCenter;
+        float emSpectrum = expf(-dEm * dEm / (2.f * 40.f * 40.f));
+        float fluorContrib = absProb * emSpectrum * mat.fluorStrength * 0.5f;
+        for (unsigned li = 0; li < params.lightCount; ++li) {
+            const GPULight& light = params.lights[li];
+            float lightRad = lightEmission(light, absCenter);
+            float atten = lightAttenuation(light, hitPos);
+            radiance += fluorContrib * lightRad * atten;
+        }
+    }
+
     return radiance;
 }
 
 // ---------------------------------------------------------------------------
 // GPU Volume ray marching — Beer-Lambert + HG phase + emission
 // ---------------------------------------------------------------------------
-static __forceinline__ __device__ float sampleVolumeDensity(float u, float v, float w)
+
+// Per-volume sampling functions (Phase 13 multi-volume)
+static __forceinline__ __device__ float sampleDensity(const spectral_gpu::GPUVolume& vol, float u, float v, float w)
 {
-    if (u < 0.f || u > 1.f || v < 0.f || v > 1.f || w < 0.f || w > 1.f) return 0.f;
-    float fx = u * (params.volResX - 1), fy = v * (params.volResY - 1), fz = w * (params.volResZ - 1);
-    int x0 = max(0, min(int(fx), params.volResX - 2));
-    int y0 = max(0, min(int(fy), params.volResY - 2));
-    int z0 = max(0, min(int(fz), params.volResZ - 2));
-    float dx = fx - x0, dy = fy - y0, dz = fz - z0;
-    int x1 = x0+1, y1 = y0+1, z1 = z0+1;
-    int sY = params.volResX, sZ = params.volResY * params.volResX;
-    float c000=params.volumeDensity[z0*sZ+y0*sY+x0], c100=params.volumeDensity[z0*sZ+y0*sY+x1];
-    float c010=params.volumeDensity[z0*sZ+y1*sY+x0], c110=params.volumeDensity[z0*sZ+y1*sY+x1];
-    float c001=params.volumeDensity[z1*sZ+y0*sY+x0], c101=params.volumeDensity[z1*sZ+y0*sY+x1];
-    float c011=params.volumeDensity[z1*sZ+y1*sY+x0], c111=params.volumeDensity[z1*sZ+y1*sY+x1];
+    if (u<0.f||u>1.f||v<0.f||v>1.f||w<0.f||w>1.f) return 0.f;
+    float fx=u*(vol.resX-1), fy=v*(vol.resY-1), fz=w*(vol.resZ-1);
+    int x0=max(0,min(int(fx),vol.resX-2));
+    int y0=max(0,min(int(fy),vol.resY-2));
+    int z0=max(0,min(int(fz),vol.resZ-2));
+    float dx=fx-x0, dy=fy-y0, dz=fz-z0;
+    int x1=x0+1, y1=y0+1, z1=z0+1;
+    int sY=vol.resX, sZ=vol.resY*vol.resX;
+    float c000=vol.density[z0*sZ+y0*sY+x0], c100=vol.density[z0*sZ+y0*sY+x1];
+    float c010=vol.density[z0*sZ+y1*sY+x0], c110=vol.density[z0*sZ+y1*sY+x1];
+    float c001=vol.density[z1*sZ+y0*sY+x0], c101=vol.density[z1*sZ+y0*sY+x1];
+    float c011=vol.density[z1*sZ+y1*sY+x0], c111=vol.density[z1*sZ+y1*sY+x1];
     float c00=c000*(1-dx)+c100*dx, c10=c010*(1-dx)+c110*dx;
     float c01=c001*(1-dx)+c101*dx, c11=c011*(1-dx)+c111*dx;
-    return ((c00*(1-dy)+c10*dy)*(1-dz) + (c01*(1-dy)+c11*dy)*dz) * params.volDensityMult;
+    return ((c00*(1-dy)+c10*dy)*(1-dz)+(c01*(1-dy)+c11*dy)*dz)*vol.densityMult;
 }
 
-static __forceinline__ __device__ float sampleVolumeTemp(float u, float v, float w)
+static __forceinline__ __device__ float sampleTemp(const spectral_gpu::GPUVolume& vol, float u, float v, float w)
 {
-    if (!params.volumeTemperature) return 0.f;
-    if (u < 0.f || u > 1.f || v < 0.f || v > 1.f || w < 0.f || w > 1.f) return 0.f;
-    float fx = u * (params.volResX - 1), fy = v * (params.volResY - 1), fz = w * (params.volResZ - 1);
-    int x0 = max(0, min(int(fx), params.volResX - 2));
-    int y0 = max(0, min(int(fy), params.volResY - 2));
-    int z0 = max(0, min(int(fz), params.volResZ - 2));
-    float dx = fx - x0, dy = fy - y0, dz = fz - z0;
-    int x1=x0+1, y1=y0+1, z1=z0+1, sY=params.volResX, sZ=params.volResY*params.volResX;
-    float c000=params.volumeTemperature[z0*sZ+y0*sY+x0], c100=params.volumeTemperature[z0*sZ+y0*sY+x1];
-    float c010=params.volumeTemperature[z0*sZ+y1*sY+x0], c110=params.volumeTemperature[z0*sZ+y1*sY+x1];
-    float c001=params.volumeTemperature[z1*sZ+y0*sY+x0], c101=params.volumeTemperature[z1*sZ+y0*sY+x1];
-    float c011=params.volumeTemperature[z1*sZ+y1*sY+x0], c111=params.volumeTemperature[z1*sZ+y1*sY+x1];
-    float c00=c000*(1-dx)+c100*dx, c10=c010*(1-dx)+c110*dx;
-    float c01=c001*(1-dx)+c101*dx, c11=c011*(1-dx)+c111*dx;
-    return (c00*(1-dy)+c10*dy)*(1-dz) + (c01*(1-dy)+c11*dy)*dz;
+    if (!vol.temperature) return 0.f;
+    if (u<0.f||u>1.f||v<0.f||v>1.f||w<0.f||w>1.f) return 0.f;
+    float fx=u*(vol.resX-1), fy=v*(vol.resY-1), fz=w*(vol.resZ-1);
+    int x0=max(0,min(int(fx),vol.resX-2)),y0=max(0,min(int(fy),vol.resY-2)),z0=max(0,min(int(fz),vol.resZ-2));
+    float dx=fx-x0,dy=fy-y0,dz=fz-z0;
+    int x1=x0+1,y1=y0+1,z1=z0+1,sY=vol.resX,sZ=vol.resY*vol.resX;
+    float c000=vol.temperature[z0*sZ+y0*sY+x0],c100=vol.temperature[z0*sZ+y0*sY+x1];
+    float c010=vol.temperature[z0*sZ+y1*sY+x0],c110=vol.temperature[z0*sZ+y1*sY+x1];
+    float c001=vol.temperature[z1*sZ+y0*sY+x0],c101=vol.temperature[z1*sZ+y0*sY+x1];
+    float c011=vol.temperature[z1*sZ+y1*sY+x0],c111=vol.temperature[z1*sZ+y1*sY+x1];
+    float c00=c000*(1-dx)+c100*dx,c10=c010*(1-dx)+c110*dx;
+    float c01=c001*(1-dx)+c101*dx,c11=c011*(1-dx)+c111*dx;
+    return (c00*(1-dy)+c10*dy)*(1-dz)+(c01*(1-dy)+c11*dy)*dz;
 }
 
-static __forceinline__ __device__ float sampleVolumeFlame(float u, float v, float w)
+static __forceinline__ __device__ float sampleFlame(const spectral_gpu::GPUVolume& vol, float u, float v, float w)
 {
-    if (!params.volumeFlame) return 0.f;
-    if (u < 0.f || u > 1.f || v < 0.f || v > 1.f || w < 0.f || w > 1.f) return 0.f;
-    float fx = u * (params.volResX - 1), fy = v * (params.volResY - 1), fz = w * (params.volResZ - 1);
-    int x0 = max(0, min(int(fx), params.volResX - 2));
-    int y0 = max(0, min(int(fy), params.volResY - 2));
-    int z0 = max(0, min(int(fz), params.volResZ - 2));
-    float dx = fx - x0, dy = fy - y0, dz = fz - z0;
-    int x1=x0+1, y1=y0+1, z1=z0+1, sY=params.volResX, sZ=params.volResY*params.volResX;
-    float c000=params.volumeFlame[z0*sZ+y0*sY+x0], c100=params.volumeFlame[z0*sZ+y0*sY+x1];
-    float c010=params.volumeFlame[z0*sZ+y1*sY+x0], c110=params.volumeFlame[z0*sZ+y1*sY+x1];
-    float c001=params.volumeFlame[z1*sZ+y0*sY+x0], c101=params.volumeFlame[z1*sZ+y0*sY+x1];
-    float c011=params.volumeFlame[z1*sZ+y1*sY+x0], c111=params.volumeFlame[z1*sZ+y1*sY+x1];
-    float c00=c000*(1-dx)+c100*dx, c10=c010*(1-dx)+c110*dx;
-    float c01=c001*(1-dx)+c101*dx, c11=c011*(1-dx)+c111*dx;
-    return (c00*(1-dy)+c10*dy)*(1-dz) + (c01*(1-dy)+c11*dy)*dz;
+    if (!vol.flame) return 0.f;
+    if (u<0.f||u>1.f||v<0.f||v>1.f||w<0.f||w>1.f) return 0.f;
+    float fx=u*(vol.resX-1), fy=v*(vol.resY-1), fz=w*(vol.resZ-1);
+    int x0=max(0,min(int(fx),vol.resX-2)),y0=max(0,min(int(fy),vol.resY-2)),z0=max(0,min(int(fz),vol.resZ-2));
+    float dx=fx-x0,dy=fy-y0,dz=fz-z0;
+    int x1=x0+1,y1=y0+1,z1=z0+1,sY=vol.resX,sZ=vol.resY*vol.resX;
+    float c000=vol.flame[z0*sZ+y0*sY+x0],c100=vol.flame[z0*sZ+y0*sY+x1];
+    float c010=vol.flame[z0*sZ+y1*sY+x0],c110=vol.flame[z0*sZ+y1*sY+x1];
+    float c001=vol.flame[z1*sZ+y0*sY+x0],c101=vol.flame[z1*sZ+y0*sY+x1];
+    float c011=vol.flame[z1*sZ+y1*sY+x0],c111=vol.flame[z1*sZ+y1*sY+x1];
+    float c00=c000*(1-dx)+c100*dx,c10=c010*(1-dx)+c110*dx;
+    float c01=c001*(1-dx)+c101*dx,c11=c011*(1-dx)+c111*dx;
+    return (c00*(1-dy)+c10*dy)*(1-dz)+(c01*(1-dy)+c11*dy)*dz;
 }
 
-// GPU fBm noise — deterministic hash-based
+static __forceinline__ __device__ void worldToVolUV(
+    const spectral_gpu::GPUVolume& vol, float px, float py, float pz,
+    float& u, float& v, float& w)
+{
+    if (vol.hasTransform) {
+        float lx=px-vol.xfCenter.x, ly=py-vol.xfCenter.y, lz=pz-vol.xfCenter.z;
+        float rx=vol.invRotM[0]*lx+vol.invRotM[3]*ly+vol.invRotM[6]*lz;
+        float ry=vol.invRotM[1]*lx+vol.invRotM[4]*ly+vol.invRotM[7]*lz;
+        float rz=vol.invRotM[2]*lx+vol.invRotM[5]*ly+vol.invRotM[8]*lz;
+        rx*=vol.invScale.x; ry*=vol.invScale.y; rz*=vol.invScale.z;
+        float3 oc=make_float3(
+            (vol.origBboxMin.x+vol.origBboxMax.x)*0.5f,
+            (vol.origBboxMin.y+vol.origBboxMax.y)*0.5f,
+            (vol.origBboxMin.z+vol.origBboxMax.z)*0.5f);
+        float3 oh=make_float3(
+            (vol.origBboxMax.x-vol.origBboxMin.x)*0.5f,
+            (vol.origBboxMax.y-vol.origBboxMin.y)*0.5f,
+            (vol.origBboxMax.z-vol.origBboxMin.z)*0.5f);
+        u=(oh.x>1e-6f)?(rx+oc.x-vol.origBboxMin.x)/(oh.x*2.f):0.5f;
+        v=(oh.y>1e-6f)?(ry+oc.y-vol.origBboxMin.y)/(oh.y*2.f):0.5f;
+        w=(oh.z>1e-6f)?(rz+oc.z-vol.origBboxMin.z)/(oh.z*2.f):0.5f;
+    } else {
+        float3 bSize=make_float3(vol.bboxMax.x-vol.bboxMin.x,
+                                  vol.bboxMax.y-vol.bboxMin.y,
+                                  vol.bboxMax.z-vol.bboxMin.z);
+        u=(bSize.x>1e-6f)?(px-vol.bboxMin.x)/bSize.x:0.5f;
+        v=(bSize.y>1e-6f)?(py-vol.bboxMin.y)/bSize.y:0.5f;
+        w=(bSize.z>1e-6f)?(pz-vol.bboxMin.z)/bSize.z:0.5f;
+    }
+}
+
+// Legacy wrappers — keep old call sites working during transition
+static __forceinline__ __device__ float sampleVolumeDensity(float u, float v, float w) {
+    return (params.numGpuVolumes > 0) ? sampleDensity(params.gpuVolumes[0], u, v, w) : 0.f;
+}
+static __forceinline__ __device__ float sampleVolumeTemp(float u, float v, float w) {
+    return (params.numGpuVolumes > 0) ? sampleTemp(params.gpuVolumes[0], u, v, w) : 0.f;
+}
+static __forceinline__ __device__ float sampleVolumeFlame(float u, float v, float w) {
+    return (params.numGpuVolumes > 0) ? sampleFlame(params.gpuVolumes[0], u, v, w) : 0.f;
+}
+static __forceinline__ __device__ void worldToVolumeUV(float px, float py, float pz,
+    float& u, float& v, float& w) {
+    if (params.numGpuVolumes > 0) worldToVolUV(params.gpuVolumes[0], px, py, pz, u, v, w);
+    else { u = v = w = 0.5f; }
+}
+
+// GPU fBm noise - deterministic hash-based
 static __forceinline__ __device__ float gpuNoiseHash3(float x, float y, float z)
 {
     int ix = __float2int_rd(x), iy = __float2int_rd(y), iz = __float2int_rd(z);
@@ -668,43 +753,9 @@ static __forceinline__ __device__ float gpuNoiseFBm(float x, float y, float z, i
     return total>0 ? val/total : 0;
 }
 
-// Inverse-transform world point to [0,1] volume UV (rotation-aware)
-static __forceinline__ __device__ void worldToVolumeUV(float px, float py, float pz, float& u, float& v, float& w)
-{
-    if (params.volHasTransform) {
-        // Translate to transform center
-        float lx = px - params.volXfCenter.x;
-        float ly = py - params.volXfCenter.y;
-        float lz = pz - params.volXfCenter.z;
-        // Inverse rotation (transpose)
-        float rx = params.volInvRotM[0]*lx + params.volInvRotM[3]*ly + params.volInvRotM[6]*lz;
-        float ry = params.volInvRotM[1]*lx + params.volInvRotM[4]*ly + params.volInvRotM[7]*lz;
-        float rz = params.volInvRotM[2]*lx + params.volInvRotM[5]*ly + params.volInvRotM[8]*lz;
-        // Inverse scale
-        rx *= params.volInvScale.x; ry *= params.volInvScale.y; rz *= params.volInvScale.z;
-        // Back to original bbox coords
-        float3 oc = make_float3(
-            (params.volOrigBboxMin.x+params.volOrigBboxMax.x)*0.5f,
-            (params.volOrigBboxMin.y+params.volOrigBboxMax.y)*0.5f,
-            (params.volOrigBboxMin.z+params.volOrigBboxMax.z)*0.5f);
-        float3 oh = make_float3(
-            (params.volOrigBboxMax.x-params.volOrigBboxMin.x)*0.5f,
-            (params.volOrigBboxMax.y-params.volOrigBboxMin.y)*0.5f,
-            (params.volOrigBboxMax.z-params.volOrigBboxMin.z)*0.5f);
-        u = (oh.x>1e-6f) ? (rx+oc.x-params.volOrigBboxMin.x)/(oh.x*2.f) : 0.5f;
-        v = (oh.y>1e-6f) ? (ry+oc.y-params.volOrigBboxMin.y)/(oh.y*2.f) : 0.5f;
-        w = (oh.z>1e-6f) ? (rz+oc.z-params.volOrigBboxMin.z)/(oh.z*2.f) : 0.5f;
-    } else {
-        float3 bSize = make_float3(params.volBboxMax.x-params.volBboxMin.x,
-                                    params.volBboxMax.y-params.volBboxMin.y,
-                                    params.volBboxMax.z-params.volBboxMin.z);
-        u = (bSize.x>1e-6f) ? (px-params.volBboxMin.x)/bSize.x : 0.5f;
-        v = (bSize.y>1e-6f) ? (py-params.volBboxMin.y)/bSize.y : 0.5f;
-        w = (bSize.z>1e-6f) ? (pz-params.volBboxMin.z)/bSize.z : 0.5f;
-    }
-}
-
-static __forceinline__ __device__ void marchVolume(
+// March a single volume - takes GPUVolume reference (Phase 13)
+static __forceinline__ __device__ void marchSingleVolume(
+    const spectral_gpu::GPUVolume& vol,
     float3 ro, float3 rdRaw, float surfaceT, float lambda, unsigned int seed,
     float3& outRGB, float& outTransmittance)
 {
@@ -718,164 +769,209 @@ static __forceinline__ __device__ void marchVolume(
 
     // Ray-AABB
     float3 invDir = make_float3(
-        1.f / (fabsf(rd.x)>1e-8f ? rd.x : 1e-8f),
-        1.f / (fabsf(rd.y)>1e-8f ? rd.y : 1e-8f),
-        1.f / (fabsf(rd.z)>1e-8f ? rd.z : 1e-8f));
-    float3 t0 = make_float3((params.volBboxMin.x-ro.x)*invDir.x,(params.volBboxMin.y-ro.y)*invDir.y,(params.volBboxMin.z-ro.z)*invDir.z);
-    float3 t1 = make_float3((params.volBboxMax.x-ro.x)*invDir.x,(params.volBboxMax.y-ro.y)*invDir.y,(params.volBboxMax.z-ro.z)*invDir.z);
-    float tNear = fmaxf(fmaxf(fminf(t0.x,t1.x),fminf(t0.y,t1.y)),fminf(t0.z,t1.z));
-    float tFar  = fminf(fminf(fmaxf(t0.x,t1.x),fmaxf(t0.y,t1.y)),fmaxf(t0.z,t1.z));
-    tNear = fmaxf(tNear,0.f); tFar = fminf(tFar,surfaceT);
-    if (tNear >= tFar) return;
+        1.f/(fabsf(rd.x)>1e-8f?rd.x:1e-8f),
+        1.f/(fabsf(rd.y)>1e-8f?rd.y:1e-8f),
+        1.f/(fabsf(rd.z)>1e-8f?rd.z:1e-8f));
+    float3 t0=make_float3((vol.bboxMin.x-ro.x)*invDir.x,(vol.bboxMin.y-ro.y)*invDir.y,(vol.bboxMin.z-ro.z)*invDir.z);
+    float3 t1=make_float3((vol.bboxMax.x-ro.x)*invDir.x,(vol.bboxMax.y-ro.y)*invDir.y,(vol.bboxMax.z-ro.z)*invDir.z);
+    float tNear=fmaxf(fmaxf(fminf(t0.x,t1.x),fminf(t0.y,t1.y)),fminf(t0.z,t1.z));
+    float tFar=fminf(fminf(fmaxf(t0.x,t1.x),fmaxf(t0.y,t1.y)),fmaxf(t0.z,t1.z));
+    tNear=fmaxf(tNear,0.f); tFar=fminf(tFar,surfaceT);
+    if (tNear>=tFar) return;
 
-    // Step size from quality
-    float3 bSize = make_float3(params.volBboxMax.x-params.volBboxMin.x, params.volBboxMax.y-params.volBboxMin.y, params.volBboxMax.z-params.volBboxMin.z);
-    float bboxDiag = sqrtf(bSize.x*bSize.x + bSize.y*bSize.y + bSize.z*bSize.z);
-    float voxelSize = fmaxf(fmaxf(bSize.x/params.volResX, bSize.y/params.volResY), bSize.z/params.volResZ);
-    float q = fmaxf(1.f, params.volQuality);
-    float dt = (params.volStepSize > 0.01f) ? params.volStepSize : voxelSize / (q*q*0.25f);
-    int maxSteps = min(1024, int((tFar-tNear)/dt)+1);
+    float3 bSize=make_float3(vol.bboxMax.x-vol.bboxMin.x,vol.bboxMax.y-vol.bboxMin.y,vol.bboxMax.z-vol.bboxMin.z);
+    float bboxDiag=sqrtf(bSize.x*bSize.x+bSize.y*bSize.y+bSize.z*bSize.z);
+    float voxelSize=fmaxf(fmaxf(bSize.x/vol.resX,bSize.y/vol.resY),bSize.z/vol.resZ);
+    float q=fmaxf(1.f,vol.quality);
+    float dt=(vol.stepSize>0.01f)?vol.stepSize:voxelSize/(q*q*0.25f);
+    int maxSteps=min(1024,int((tFar-tNear)/dt)+1);
 
-    float jitterOff = params.volJitter ? hashRNG(seed)*dt : 0.f;
-    float t = tNear + jitterOff;
-
-    int rmode = params.volRenderMode;
+    float jitterOff=vol.jitter?hashRNG(seed)*dt:0.f;
+    float t=tNear+jitterOff;
+    int rmode=vol.renderMode;
 
     for (int step=0; step<maxSteps && t<tFar; ++step, t+=dt) {
         float px=ro.x+rd.x*t, py=ro.y+rd.y*t, pz=ro.z+rd.z*t;
-        float u, v, w;
-        worldToVolumeUV(px, py, pz, u, v, w);
+        float u,v,w;
+        worldToVolUV(vol, px, py, pz, u, v, w);
 
-        float density = sampleVolumeDensity(u,v,w);
+        float density = sampleDensity(vol, u, v, w);
 
         // Procedural noise
-        if (params.volNoiseEnable && density > 1e-6f) {
-            float ns = params.volNoiseScale / fmaxf(bboxDiag, 1e-4f);
-            float n = gpuNoiseFBm(px*ns, py*ns, pz*ns, params.volNoiseOctaves, params.volNoiseRoughness);
-            density = fmaxf(0.f, density * (1.f + params.volNoiseStrength * n));
+        if (vol.noiseEnable && density > 1e-6f) {
+            float ns = vol.noiseScale / fmaxf(bboxDiag, 1e-4f);
+            float n = gpuNoiseFBm(px*ns, py*ns, pz*ns,
+                                   vol.noiseOctaves, vol.noiseRoughness);
+            density = fmaxf(0.f, density * (1.f + vol.noiseStrength * n));
         }
 
-        if (density < 1e-5f) { if (params.volAdaptiveStep) t+=dt*3.f; continue; }
+        if (density < 1e-5f) { if (vol.adaptiveStep) t+=dt*3.f; continue; }
 
-        float sigma_t = density * params.volExtinction;
+        float sigma_t = density * vol.extinction;
+        // Phase 14: chromatic extinction — wavelength-dependent absorption
+        if (vol.chromaticExtinction) {
+            float wt = (lambda < 500.f) ? vol.sigmaB : (lambda < 580.f) ? vol.sigmaG : vol.sigmaR;
+            sigma_t *= wt;
+        }
         float stepTrans = expf(-sigma_t*dt);
         float absorption = 1.f - stepTrans;
         float3 stepRGB = make_float3(0.f, 0.f, 0.f);
 
-        if (rmode==1) { // Greyscale
-            { float v=density*params.volIntensity; stepRGB=make_float3(v,v,v); }
-        } else if (rmode==2 || rmode==3) { // Heat / Cool
-            { float t=fminf(density*params.volExtinction*0.5f,1.f)*params.volIntensity; stepRGB=make_float3(fminf(t*3.f,1.f),fmaxf(0.f,(t-.33f)*3.f),fmaxf(0.f,(t-.66f)*3.f)); }
-        } else if (rmode==4) { // Blackbody only
-            float temp = sampleVolumeTemp(u,v,w);
-            if (temp > params.volTempMin) {
-                float tN = fminf((temp-params.volTempMin)/(params.volTempMax-params.volTempMin+1e-6f), 1.f);
-                float T = params.volTempMin+tN*(params.volTempMax-params.volTempMin);
+        if (rmode==1) {
+            float vv=density*vol.intensity; stepRGB=make_float3(vv,vv,vv);
+        } else if (rmode==2||rmode==3) {
+            float tt=fminf(density*vol.extinction*0.5f,1.f)*vol.intensity;
+            stepRGB=make_float3(fminf(tt*3.f,1.f),fmaxf(0.f,(tt-.33f)*3.f),fmaxf(0.f,(tt-.66f)*3.f));
+        } else if (rmode==4) {
+            float temp = sampleTemp(vol, u, v, w);
+            if (temp > vol.tempMin) {
+                float tN=fminf((temp-vol.tempMin)/(vol.tempMax-vol.tempMin+1e-6f),1.f);
+                float T=vol.tempMin+tN*(vol.tempMax-vol.tempMin);
                 float t100b=T/100.f; float cr=1,cg=1,cb=1;
-                if(T<=6600.f){cr=1;cg=fmaxf(0.f,fminf(0.39f*logf(t100b)-0.63f,1.f));cb=fmaxf(0.f,fminf(0.54f*logf(t100b-10.f)-1.19f,1.f));}
-                else{cr=fmaxf(0.f,fminf(1.29f*powf(t100b-60.f,-0.13f),1.f));cg=fmaxf(0.f,fminf(1.13f*powf(t100b-60.f,-0.07f),1.f));cb=1;}
-                float em=params.volEmissionIntensity*density*params.volIntensity;
+                if(T<=6600.f){cr=1;cg=fmaxf(0.f,fminf(0.39f*logf(t100b)-0.63f,1.f));
+                    cb=fmaxf(0.f,fminf(0.54f*logf(t100b-10.f)-1.19f,1.f));}
+                else{cr=fmaxf(0.f,fminf(1.29f*powf(t100b-60.f,-0.13f),1.f));
+                    cg=fmaxf(0.f,fminf(1.13f*powf(t100b-60.f,-0.07f),1.f));cb=1;}
+                float em=vol.emissionIntensity*density*vol.intensity;
                 stepRGB=make_float3(cr*em,cg*em,cb*em);
             }
         } else { // Lit (0) / Explosion (5)
-            float powder = 1.f;
-            if (params.volPowder>0.01f) powder = 1.f-expf(-density*params.volPowder*2.f);
+            float powder=1.f;
+            if (vol.powder>0.01f) powder=1.f-expf(-density*vol.powder*2.f);
 
-            // Iterate ALL non-dome lights (matches CPU)
             for (unsigned li=0; li<params.lightCount; ++li) {
                 const GPULight& L = params.lights[li];
                 if (L.type==3) continue;
-                float lI = (L.color.x+L.color.y+L.color.z)*0.333f*L.intensity;
+                float lI=(L.color.x+L.color.y+L.color.z)*0.333f*L.intensity;
                 if (lI<0.001f) continue;
 
                 float3 lDir;
                 if (L.type==1||L.type==4) {
-                    lDir=make_float3(px-L.position.x, py-L.position.y, pz-L.position.z);
+                    lDir=make_float3(px-L.position.x,py-L.position.y,pz-L.position.z);
                     float dl=sqrtf(lDir.x*lDir.x+lDir.y*lDir.y+lDir.z*lDir.z);
                     if(dl>1e-6f){lDir.x/=dl;lDir.y/=dl;lDir.z/=dl;}
                 } else {
                     float dl=sqrtf(L.direction.x*L.direction.x+L.direction.y*L.direction.y+L.direction.z*L.direction.z);
                     lDir=(dl>1e-6f)?make_float3(L.direction.x/dl,L.direction.y/dl,L.direction.z/dl):make_float3(0,-1,0);
                 }
-                float3 lCol=make_float3(L.color.x*L.intensity, L.color.y*L.intensity, L.color.z*L.intensity);
-
-                float cosTheta = -(rd.x*lDir.x+rd.y*lDir.y+rd.z*lDir.z);
+                float3 lCol=make_float3(L.color.x*L.intensity,L.color.y*L.intensity,L.color.z*L.intensity);
+                float cosTheta=-(rd.x*lDir.x+rd.y*lDir.y+rd.z*lDir.z);
                 float phase;
-                if (params.volPhaseMode == 1) {
-                    // Cornette-Shanks Mie approximation
-                    float d = params.volMieDropletD;
-                    float g = 0.85f * (1.f - expf(-d * 0.8f));
-                    float g2 = g*g;
-                    float num = (1.f-g2)*(1.f+cosTheta*cosTheta);
-                    float denom = (2.f+g2)*powf(fmaxf(1.f+g2-2.f*g*cosTheta,1e-4f),1.5f);
-                    phase = (3.f/(8.f*3.14159f)) * num / denom;
+                if (vol.phaseMode==1) {
+                    float d=vol.mieDropletD;
+                    float g=0.85f*(1.f-expf(-d*0.8f));
+                    float g2=g*g;
+                    float num=(1.f-g2)*(1.f+cosTheta*cosTheta);
+                    float denom=(2.f+g2)*powf(fmaxf(1.f+g2-2.f*g*cosTheta,1e-4f),1.5f);
+                    phase=(3.f/(8.f*3.14159f))*num/denom;
                 } else {
-                    float gF=params.volGForward, gB=params.volGBackward;
+                    float gF=vol.gForward, gB=vol.gBackward;
                     float denomF=1.f+gF*gF-2.f*gF*cosTheta, denomB=1.f+gB*gB-2.f*gB*cosTheta;
                     float phaseF=(1.f-gF*gF)/(4.f*3.14159f*powf(fmaxf(denomF,1e-4f),1.5f));
                     float phaseB=(1.f-gB*gB)/(4.f*3.14159f*powf(fmaxf(denomB,1e-4f),1.5f));
-                    phase=params.volLobeMix*phaseF+(1.f-params.volLobeMix)*phaseB;
+                    phase=vol.lobeMix*phaseF+(1.f-vol.lobeMix)*phaseB;
                 }
 
                 float shadowTrans=1.f;
-                if (params.volShadowSteps>0 && params.volShadowDensity>0.01f) {
+                if (vol.shadowSteps>0 && vol.shadowDensity>0.01f) {
                     float3 sDir=make_float3(-lDir.x,-lDir.y,-lDir.z);
-                    float sDt=bboxDiag/(float)params.volShadowSteps;
-                    for (int ss=1;ss<=params.volShadowSteps;++ss) {
+                    float sDt=bboxDiag/(float)vol.shadowSteps;
+                    for (int ss=1;ss<=vol.shadowSteps;++ss) {
                         float spx=px+sDir.x*sDt*ss,spy=py+sDir.y*sDt*ss,spz=pz+sDir.z*sDt*ss;
-                        float su, sv, sw;
-                        worldToVolumeUV(spx, spy, spz, su, sv, sw);
+                        float su,sv,sw;
+                        worldToVolUV(vol, spx, spy, spz, su, sv, sw);
                         if(su<0||su>1||sv<0||sv>1||sw<0||sw>1) break;
-                        shadowTrans*=expf(-sampleVolumeDensity(su,sv,sw)*params.volExtinction*params.volShadowDensity*sDt);
+                        shadowTrans*=expf(-sampleDensity(vol,su,sv,sw)*vol.extinction*vol.shadowDensity*sDt);
                         if(shadowTrans<0.001f) break;
                     }
                 }
-                float scatW=params.volScattering*density*phase*shadowTrans*powder;
-                stepRGB.x+=lCol.x*params.volScatterColor.x*scatW;
-                stepRGB.y+=lCol.y*params.volScatterColor.y*scatW;
-                stepRGB.z+=lCol.z*params.volScatterColor.z*scatW;
+                float scatW=vol.scattering*density*phase*shadowTrans*powder;
+                stepRGB.x+=lCol.x*vol.scatterColor.x*scatW;
+                stepRGB.y+=lCol.y*vol.scatterColor.y*scatW;
+                stepRGB.z+=lCol.z*vol.scatterColor.z*scatW;
             }
 
-            // Dome ambient RGB — phase integral over sphere = 1.0
+            // Dome ambient
             for (unsigned li=0; li<params.lightCount; ++li) {
                 if (params.lights[li].type==3) {
-                    float dW = params.volScattering*density;
+                    float dW=vol.scattering*density;
                     stepRGB.x+=params.lights[li].color.x*params.lights[li].intensity*dW;
                     stepRGB.y+=params.lights[li].color.y*params.lights[li].intensity*dW;
                     stepRGB.z+=params.lights[li].color.z*params.lights[li].intensity*dW;
-                    break; } }
-
-            stepRGB.x*=params.volIntensity; stepRGB.y*=params.volIntensity; stepRGB.z*=params.volIntensity;
+                    break;
+                }
+            }
+            // Phase 14: analytical MS approximation (Wrenninge 2015)
+            if (vol.msApprox && vol.scattering > 0.01f) {
+                float albedo = vol.scattering / fmaxf(vol.extinction, 0.01f);
+                float msB = albedo / fmaxf(1.f - albedo * vol.gForward * vol.lobeMix, 0.01f);
+                stepRGB.x += vol.msTint.x * density * vol.scattering * msB * 0.3f;
+                stepRGB.y += vol.msTint.y * density * vol.scattering * msB * 0.3f;
+                stepRGB.z += vol.msTint.z * density * vol.scattering * msB * 0.3f;
+            }
+            stepRGB.x*=vol.intensity; stepRGB.y*=vol.intensity; stepRGB.z*=vol.intensity;
         }
 
-        // Scatter through absorption (RGB)
         outRGB.x += outTransmittance * absorption * stepRGB.x;
         outRGB.y += outTransmittance * absorption * stepRGB.y;
         outRGB.z += outTransmittance * absorption * stepRGB.z;
 
-        // Emission RGB — bypasses absorption
-        if (rmode==4||rmode==5||params.volEmissionIntensity>0.01f) {
-            float3 emRGB = make_float3(0.f,0.f,0.f);
-            float temp2 = sampleVolumeTemp(u,v,w);
-            if (temp2 > params.volTempMin) {
-                float tN2 = fminf((temp2-params.volTempMin)/(params.volTempMax-params.volTempMin+1e-6f), 1.f);
-                float T2=params.volTempMin+tN2*(params.volTempMax-params.volTempMin);
+        // Emission
+        if (rmode==4||rmode==5||vol.emissionIntensity>0.01f) {
+            float3 emRGB=make_float3(0.f,0.f,0.f);
+            float temp2=sampleTemp(vol,u,v,w);
+            if (temp2>vol.tempMin) {
+                float tN2=fminf((temp2-vol.tempMin)/(vol.tempMax-vol.tempMin+1e-6f),1.f);
+                float T2=vol.tempMin+tN2*(vol.tempMax-vol.tempMin);
                 float t100=T2/100.f; float cr=1,cg=1,cb=1;
-                if(T2<=6600.f){cr=1;cg=fmaxf(0.f,fminf(0.39f*logf(t100)-0.63f,1.f));cb=fmaxf(0.f,fminf(0.54f*logf(t100-10.f)-1.19f,1.f));}
-                else{cr=fmaxf(0.f,fminf(1.29f*powf(t100-60.f,-0.13f),1.f));cg=fmaxf(0.f,fminf(1.13f*powf(t100-60.f,-0.07f),1.f));cb=1;}
-                emRGB=make_float3(cr*params.volEmissionIntensity*tN2, cg*params.volEmissionIntensity*tN2, cb*params.volEmissionIntensity*tN2);
+                if(T2<=6600.f){cr=1;cg=fmaxf(0.f,fminf(0.39f*logf(t100)-0.63f,1.f));
+                    cb=fmaxf(0.f,fminf(0.54f*logf(t100-10.f)-1.19f,1.f));}
+                else{cr=fmaxf(0.f,fminf(1.29f*powf(t100-60.f,-0.13f),1.f));
+                    cg=fmaxf(0.f,fminf(1.13f*powf(t100-60.f,-0.07f),1.f));cb=1;}
+                emRGB=make_float3(cr*vol.emissionIntensity*tN2,
+                                  cg*vol.emissionIntensity*tN2,
+                                  cb*vol.emissionIntensity*tN2);
             }
-            float fl2 = sampleVolumeFlame(u,v,w);
+            float fl2=sampleFlame(vol,u,v,w);
             if(fl2>0.01f){
                 float T3=1500.f+fl2*2000.f,t100=T3/100.f;
-                float cr=1,cg=fmaxf(0.f,fminf(0.39f*logf(t100)-0.63f,1.f)),cb=fmaxf(0.f,fminf(0.54f*logf(t100-10.f)-1.19f,1.f));
-                emRGB.x+=cr*params.volFlameIntensity*fl2; emRGB.y+=cg*params.volFlameIntensity*fl2; emRGB.z+=cb*params.volFlameIntensity*fl2;}
-            float emW=outTransmittance*density*dt*params.volIntensity;
+                float cr=1,cg=fmaxf(0.f,fminf(0.39f*logf(t100)-0.63f,1.f)),
+                      cb=fmaxf(0.f,fminf(0.54f*logf(t100-10.f)-1.19f,1.f));
+                emRGB.x+=cr*vol.flameIntensity*fl2;
+                emRGB.y+=cg*vol.flameIntensity*fl2;
+                emRGB.z+=cb*vol.flameIntensity*fl2;
+            }
+            float emW=outTransmittance*density*dt*vol.intensity;
             outRGB.x+=emRGB.x*emW; outRGB.y+=emRGB.y*emW; outRGB.z+=emRGB.z*emW;
         }
 
         outTransmittance *= stepTrans;
         if (outTransmittance < 0.001f) break;
+    }
+}
+
+// Multi-volume compositing wrapper - matches CPU logic (Phase 13)
+static __forceinline__ __device__ void marchVolume(
+    float3 ro, float3 rd, float surfaceT, float lambda, unsigned int seed,
+    float3& outRGB, float& outTransmittance)
+{
+    outRGB = make_float3(0.f, 0.f, 0.f);
+    outTransmittance = 1.f;
+
+    for (int vi = 0; vi < params.numGpuVolumes; ++vi) {
+        const spectral_gpu::GPUVolume& vol = params.gpuVolumes[vi];
+        if (!vol.density) continue;
+
+        float3 volRGB = make_float3(0.f, 0.f, 0.f);
+        float volTrans = 1.f;
+        marchSingleVolume(vol, ro, rd, surfaceT, lambda, seed + vi * 31u,
+                          volRGB, volTrans);
+
+        // Composite: accumulate scatter, multiply transmittance
+        outRGB.x += outTransmittance * volRGB.x;
+        outRGB.y += outTransmittance * volRGB.y;
+        outRGB.z += outTransmittance * volRGB.z;
+        outTransmittance *= volTrans;
     }
 }
 
@@ -908,7 +1004,7 @@ extern "C" __global__ void __raygen__spectral()
         // Background: dome light color on miss (skip when volume for comp)
         if (!spp1Hit) {
             r = 0.f; g = 0.f; b = 0.f;
-            if (!params.hasVolume) {
+            if (params.numGpuVolumes == 0) {
                 for (unsigned int li = 0; li < params.lightCount; ++li) {
                     const GPULight& L = params.lights[li];
                     if (L.type == 3) {
@@ -922,7 +1018,7 @@ extern "C" __global__ void __raygen__spectral()
 
         // Volume overlay for spp=1
         float spp1Alpha = spp1Hit ? 1.f : 0.f;
-        if (params.hasVolume && params.volumeDensity) {
+        if (params.numGpuVolumes > 0) {
             float surfT = spp1Hit ? __uint_as_float(p3) : 1e30f;
             float3 volRGB = make_float3(0.f,0.f,0.f); float volTrans = 1.f;
             marchVolume(origin, dir, surfT, 550.f, dofSeed + 200u, volRGB, volTrans);
@@ -1111,7 +1207,7 @@ extern "C" __global__ void __raygen__spectral()
             } else {
                 // Miss — dome background only when no volume (for comp)
                 radiance = 0.f;
-                if (!params.hasVolume) {
+                if (params.numGpuVolumes == 0) {
                     for (unsigned int li = 0; li < params.lightCount; ++li) {
                         const GPULight& L = params.lights[li];
                         if (L.type == 3) {
@@ -1127,7 +1223,7 @@ extern "C" __global__ void __raygen__spectral()
             // GPU volume ray marching — single pass for radiance + transmittance
             float sampleAlpha = isHit ? 1.f : 0.f;
             float vx=0.f, vy=0.f, vz=0.f;
-            if (params.hasVolume && params.volumeDensity) {
+            if (params.numGpuVolumes > 0) {
                 float surfT = isHit ? depth : 1e30f;
                 float3 volRGB = make_float3(0.f,0.f,0.f); float volTrans = 1.f;
                 marchVolume(origin, dir, surfT, lambda, seed + 200u, volRGB, volTrans);

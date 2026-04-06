@@ -36,6 +36,13 @@ struct GPUMaterial {
     float  bumpStrength;     // bump intensity
     float3 absorptionColor;  // volume color (white=clear)
     float  absorptionDensity; // 0=clear, higher=darker
+    // Phase 14: diffraction grating
+    float  gratingSpacing;   // um, 0=disabled
+    float  gratingStrength;  // blend factor
+    // Phase 14: fluorescence
+    float  fluorAbsorb;      // absorption center wavelength (nm)
+    float  fluorEmit;        // emission center wavelength (nm)
+    float  fluorStrength;    // intensity, 0=disabled
 };
 
 // GPU-side texture (header only — pixel data is a separate device buffer)
@@ -71,6 +78,56 @@ struct CameraParams {
     float right[3];         // camera right vector (world)
     float up[3];            // camera up vector (world)
     float forward[3];       // camera forward vector (world)
+};
+
+#define SPECTRAL_MAX_GPU_VOLUMES 8
+
+struct GPUVolume {
+    float*  density;          // device ptr
+    float*  temperature;      // device ptr (null if none)
+    float*  flame;            // device ptr (null if none)
+    int     resX, resY, resZ;
+    float3  bboxMin, bboxMax;
+    float   extinction;
+    float   scattering;
+    float   densityMult;
+    float   gForward;
+    float   gBackward;
+    float   lobeMix;
+    float   emissionIntensity;
+    float   tempMin, tempMax;
+    float   powder;
+    float3  scatterColor;
+    float   stepSize;
+    int     jitter;
+    int     phaseMode;
+    float   mieDropletD;
+    int     shadowSteps;
+    float   shadowDensity;
+    float   quality;
+    int     adaptiveStep;
+    int     renderMode;
+    float   intensity;
+    float   flameIntensity;
+    // Noise
+    int     noiseEnable;
+    float   noiseScale;
+    float   noiseStrength;
+    int     noiseOctaves;
+    float   noiseRoughness;
+    // Transform
+    int     hasTransform;
+    float3  xfCenter;
+    float3  invScale;
+    float   invRotM[9];
+    float3  origBboxMin;
+    float3  origBboxMax;
+    // Phase 14: chromatic extinction
+    int     chromaticExtinction;
+    float   sigmaR, sigmaG, sigmaB;
+    // Phase 14: multiple scattering approximation
+    int     msApprox;
+    float3  msTint;
 };
 
 struct LaunchParams {
@@ -147,6 +204,10 @@ struct LaunchParams {
     float              volInvRotM[9];      // inverse rotation (transpose of rotation matrix)
     float3             volOrigBboxMin;     // original bbox (before transform)
     float3             volOrigBboxMax;
+
+    // Multi-volume support (Phase 13)
+    GPUVolume              gpuVolumes[SPECTRAL_MAX_GPU_VOLUMES];
+    int                    numGpuVolumes;
 };
 
 // Per-ray payload — carried through the trace

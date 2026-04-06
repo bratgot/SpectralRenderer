@@ -65,7 +65,8 @@ public:
                 unsigned int width, unsigned int height,
                 float* pixels, float* depth = nullptr,
                 int spp = 1, int maxBounces = 4, int colorSpace = 0,
-                const SpectralVolume* volume = nullptr);
+                const SpectralVolume* const* volumes = nullptr,
+                int numVolumes = 0);
 
     /// Denoise the framebuffer in-place on GPU, copy result to host pixels.
     bool Denoise(unsigned int width, unsigned int height, float* pixels);
@@ -112,6 +113,18 @@ private:
     CUdeviceptr            _d_textures     = 0;   // GPUTexture array
     std::vector<CUdeviceptr> _d_texPixels;         // per-texture pixel data
     CUdeviceptr            _d_params       = 0;
+
+    // Multi-volume device buffers (Phase 13)
+    struct DeviceVolume {
+        CUdeviceptr d_density  = 0;
+        CUdeviceptr d_temp     = 0;
+        CUdeviceptr d_flame    = 0;
+        size_t      cachedSize = 0;
+    };
+    DeviceVolume           _d_volumes[SPECTRAL_MAX_GPU_VOLUMES];
+    int                    _numDeviceVolumes = 0;
+
+    // Legacy single-volume (kept for cleanup)
     CUdeviceptr            _d_volumeDensity = 0;
     CUdeviceptr            _d_volumeTemp    = 0;
     size_t                 _volCachedSize   = 0;

@@ -322,6 +322,18 @@ std::shared_ptr<pxr::SpectralVolume> SpectralVDBRead::GetVolume()               
 std::shared_ptr<pxr::SpectralVolume> SpectralVDBRead::GetVolumeAtFrame(int f, int res)  { _requestFrame=f; _LoadVDBAtFrame(f, res); return _volume; }
 bool SpectralVDBRead::HasVolume()                                              { _LoadVDB(); return _volume && _volume->IsValid(); }
 
+int SpectralVDBRead::GetMaxRes() const
+{
+    switch (_voxelRes) {
+        case 0: return 64;    // 1/8
+        case 1: return 128;   // 1/4
+        case 2: return 256;   // 1/2
+        case 3: return 512;   // Full
+        case 4: return 1024;  // Native
+        default: return 128;
+    }
+}
+
 // ---------------------------------------------------------------------------
 void SpectralVDBRead::_UpdateVDBInfo()
 {
@@ -410,6 +422,34 @@ void SpectralVDBRead::knobs(Knob_Callback f)
     Divider(f, "");
     Text_knob(f, "<font size='1' color='#555'>Created by Marten Blumen</font>");
 
+    // ===================== VOXEL RESOLUTION =====================
+    Divider(f, "Voxel Resolution");
+    Text_knob(f,
+        "<font color='#777' size='-1'>"
+        "Controls how many voxels the VDB is resampled to for rendering.<br>"
+        "Lower = faster load + less memory. Higher = sharper detail.<br>"
+        "SpectralRender's master resolution caps this per-node setting."
+        "</font>"
+    );
+    Newline(f);
+    static const char* const volResOpts[] = {
+        "1/8 (fastest)", "1/4 (preview)", "1/2 (production)", "Full (high)", "Native", nullptr
+    };
+    Enumeration_knob(f, &_voxelRes, volResOpts, "voxel_res", "resolution");
+    Tooltip(f, "Fraction of native VDB resolution to render at.\n"
+               "1/8 = ~0.2%% of native voxels (very fast, rough look)\n"
+               "1/4 = ~1.6%% of native voxels (good for layout)\n"
+               "1/2 = ~12.5%% of native voxels (production)\n"
+               "Full = ~100%% at 512 cap (high quality)\n"
+               "Native = actual VDB dims, capped at 1024");
+    Button(f, "estimate_mem", "Estimate Memory");
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "Calculate the memory required for the current\n"
+               "resolution setting with the loaded VDB file.");
+    Newline(f);
+    String_knob(f, &_memInfo, "mem_info", " ");
+    SetFlags(f, Knob::DISABLED | Knob::NO_UNDO);
+
     // ===================== DISPLAY TAB =====================
     Tab_knob(f, 0, "Display");
     SourceGeomOp::addDisplayOptionsKnobs(f);
@@ -465,12 +505,12 @@ int SpectralVDBRead::knob_changed(Knob* k)
     if (k->is("discover_grids")) { _DiscoverGrids(); return 1; }
     if (k->is("detect_range"))   { _DetectFrameRange(); return 1; }
     if (k->is("reload")) {
-        _loadedPath.clear(); _volume.reset();
+        _loadedPath.clear(); _loadedMaxRes = 0; _volume.reset();
         _LoadVDB(); _UpdateVDBInfo();
         return 1;
     }
     if (k->is("file")) {
-        _loadedPath.clear(); _UpdateVDBInfo();
+        _loadedPath.clear(); _loadedMaxRes = 0; _UpdateVDBInfo();
         return 1;
     }
     if (k->is("auto_sequence")) {
@@ -498,17 +538,79 @@ int SpectralVDBRead::knob_changed(Knob* k)
                 if (Knob* ok = knob("orig_file")) ok->set_text("");
             }
         }
-        _loadedPath.clear(); _UpdateVDBInfo();
+        _loadedPath.clear(); _loadedMaxRes = 0; _UpdateVDBInfo();
         return 1;
     }
     if (k->is("frame_offset") || k->is("density_grid") ||
         k->is("temp_grid") || k->is("density_override") || k->is("temp_override")) {
-        _loadedPath.clear();
+        _loadedPath.clear(); _loadedMaxRes = 0;
         return 1;
     }
     if (k->is("show_bbox") || k->is("preview_res") || k->is("max_points") ||
         k->is("point_size") || k->is("density_threshold") || k->is("bbox_color") ||
         k->is("lit")) {
+        return 1;
+    }
+    if (k->is("voxel_res")) {
+        _loadedPath.clear(); _loadedMaxRes = 0;
+        _UpdateVDBInfo();
+        return 1;
+    }
+    if (k->is("estimate_mem")) {
+#ifdef SPECTRAL_HAS_VDB
+        if (_filePath && strlen(_filePath) > 0) {
+            int frame = _clampedFrame();
+            if (frame < 0) frame = _firstFrame;
+            std::string resolved = _autoSequence ? _resolveFramePath(frame) : std::string(_filePath);
+            if (!resolved.empty()) {
+                auto grids = pxr::SpectralVDBLoader::DiscoverGrids(resolved.c_str());
+                int nativeMax = 0, gridCount = 0;
+                int nativeX = 0, nativeY = 0, nativeZ = 0;
+                for (const auto& g : grids) {
+                    if (g.voxelCount > 0) {
+                        int d = int(std::cbrt(double(g.voxelCount)));
+                        if (d > nativeMax) nativeMax = d;
+                        gridCount++;
+                    }
+                }
+                auto meta = pxr::SpectralVDBLoader::LoadMetadataOnly(resolved.c_str(), _GetDensityName());
+                if (meta && meta->HasBbox()) {
+                    pxr::GfVec3f bs = meta->bboxMax - meta->bboxMin;
+                    float maxS = std::max({bs[0], bs[1], bs[2]});
+                    if (maxS > 0) {
+                        nativeX = int(nativeMax * bs[0] / maxS);
+                        nativeY = int(nativeMax * bs[1] / maxS);
+                        nativeZ = int(nativeMax * bs[2] / maxS);
+                    }
+                }
+                if (nativeMax == 0) nativeMax = nativeX = nativeY = nativeZ = 128;
+
+                int renderMax;
+                if (_voxelRes == 4) renderMax = std::min(1024, nativeMax);
+                else if (_voxelRes == 3) renderMax = std::min(512, nativeMax);
+                else {
+                    static const float fracs[] = { 0.125f, 0.25f, 0.5f };
+                    renderMax = std::max(32, int(nativeMax * fracs[_voxelRes]));
+                }
+                float ratio = float(renderMax) / std::max(1, nativeMax);
+                int rX = std::max(1, int(nativeX * ratio));
+                int rY = std::max(1, int(nativeY * ratio));
+                int rZ = std::max(1, int(nativeZ * ratio));
+                size_t voxels = size_t(rX) * rY * rZ;
+                int numGrids = std::max(1, std::min(gridCount, 4));
+                float memMB = voxels * sizeof(float) * numGrids / (1024.f * 1024.f);
+
+                char buf[256];
+                std::snprintf(buf, sizeof(buf),
+                    "Native: %dx%dx%d | Render: %dx%dx%d | ~%.0f MB (%d grid%s)",
+                    nativeX, nativeY, nativeZ, rX, rY, rZ, memMB,
+                    numGrids, numGrids > 1 ? "s" : "");
+                if (Knob* mk = knob("mem_info")) mk->set_text(buf);
+            }
+        } else {
+            if (Knob* mk = knob("mem_info")) mk->set_text("No VDB file loaded");
+        }
+#endif
         return 1;
     }
     return SourceGeomOp::knob_changed(k);
@@ -574,7 +676,7 @@ void SpectralVDBRead::_DiscoverGrids()
     if (!bestV.empty() && knob("vel_override"))      knob("vel_override")->set_text(bestV.c_str());
     if (!bestC.empty() && knob("color_override"))    knob("color_override")->set_text(bestC.c_str());
 
-    _loadedPath.clear();
+    _loadedPath.clear(); _loadedMaxRes = 0;
     _UpdateVDBInfo();
 #else
     error("OpenVDB not compiled.");
@@ -667,10 +769,11 @@ void SpectralVDBRead::_LoadVDBAtFrame(int frame, int maxRes)
     std::string resolved = _autoSequence ? _resolveFramePath(frame) : std::string(_filePath);
     if (resolved.empty()) return;
     int curRes = (_volume && _volume->IsValid()) ? std::max({_volume->resX, _volume->resY, _volume->resZ}) : 0;
-    if (_volume && _volume->IsValid() && _loadedPath == resolved && curRes >= maxRes) return;
+    if (_volume && _volume->IsValid() && _loadedPath == resolved && _loadedMaxRes == maxRes) return;
     _volume = pxr::SpectralVDBLoader::Load(resolved.c_str(), _GetDensityName(), _GetTempName(), maxRes);
     if (_volume) {
         _loadedPath = resolved;
+        _loadedMaxRes = maxRes;
         fprintf(stderr, "SpectralVDBRead: loaded %dx%dx%d (maxRes=%d)\n",
                 _volume->resX, _volume->resY, _volume->resZ, maxRes);
     }
