@@ -847,7 +847,20 @@ static __forceinline__ __device__ void marchSingleVolume(
 
                 float3 lDir;
                 if (L.type==1||L.type==4) {
-                    lDir=make_float3(px-L.position.x,py-L.position.y,pz-L.position.z);
+                    // Sphere/spot light — jitter on sphere surface for soft shadows
+                    float3 lightPos = L.position;
+                    if (L.radius > 0.01f) {
+                        unsigned int jSeed = seed + step * 131u + li * 37u;
+                        float ju1 = hashRNG(jSeed);
+                        float ju2 = hashRNG(jSeed + 0x9e3779b9u);
+                        float jTheta = 6.28318f * ju1;
+                        float jPhi = acosf(1.f - 2.f * ju2);
+                        float jsp = sinf(jPhi);
+                        lightPos.x += L.radius * jsp * cosf(jTheta);
+                        lightPos.y += L.radius * jsp * sinf(jTheta);
+                        lightPos.z += L.radius * cosf(jPhi);
+                    }
+                    lDir=make_float3(px-lightPos.x,py-lightPos.y,pz-lightPos.z);
                     float dl=sqrtf(lDir.x*lDir.x+lDir.y*lDir.y+lDir.z*lDir.z);
                     if(dl>1e-6f){lDir.x/=dl;lDir.y/=dl;lDir.z/=dl;}
                 } else {
@@ -891,13 +904,99 @@ static __forceinline__ __device__ void marchSingleVolume(
                 stepRGB.z+=lCol.z*vol.scatterColor.z*scatW;
             }
 
-            // Dome ambient
+            // HDRI virtual lights — directional or sphere for soft shadows
+            for (int vli = 0; vli < params.numVirtualLights; ++vli) {
+                float3 vlDir = params.gpuVirtualLights[vli].dir;
+                float3 vlCol = params.gpuVirtualLights[vli].color;
+                float vlRadius = params.gpuVirtualLights[vli].radius;
+
+                float3 lDir;
+                if (vlRadius > 0.01f) {
+                    // Sphere light at distance 500 for soft shadows
+                    float dist = 500.f;
+                    float3 lightPos = make_float3(-vlDir.x*dist, -vlDir.y*dist, -vlDir.z*dist);
+                    // Jitter on sphere surface using step index as seed
+                    unsigned int vlSeed = seed + step * 131u + vli * 37u;
+                    float ju1 = hashRNG(vlSeed); vlSeed += 0x9e3779b9u;
+                    float ju2 = hashRNG(vlSeed);
+                    float jTheta = 6.28318f * ju1;
+                    float jPhi = acosf(1.f - 2.f * ju2);
+                    float jsp = sinf(jPhi);
+                    lightPos.x += vlRadius * jsp * cosf(jTheta);
+                    lightPos.y += vlRadius * jsp * sinf(jTheta);
+                    lightPos.z += vlRadius * cosf(jPhi);
+                    // Direction from volume point to jittered light position
+                    lDir = make_float3(px-lightPos.x, py-lightPos.y, pz-lightPos.z);
+                    float dl = sqrtf(lDir.x*lDir.x+lDir.y*lDir.y+lDir.z*lDir.z);
+                    if (dl>1e-6f) { lDir.x/=dl; lDir.y/=dl; lDir.z/=dl; }
+                } else {
+                    // Hard shadow: distant light
+                    lDir = make_float3(-vlDir.x, -vlDir.y, -vlDir.z);
+                }
+                float cosTheta = -(rd.x*lDir.x+rd.y*lDir.y+rd.z*lDir.z);
+
+                float phase;
+                if (vol.phaseMode==1) {
+                    float d=vol.mieDropletD;
+                    float g=0.85f*(1.f-expf(-d*0.8f));
+                    float g2=g*g;
+                    float num=(1.f-g2)*(1.f+cosTheta*cosTheta);
+                    float denom=(2.f+g2)*powf(fmaxf(1.f+g2-2.f*g*cosTheta,1e-4f),1.5f);
+                    phase=(3.f/(8.f*3.14159f))*num/denom;
+                } else {
+                    float gF=vol.gForward, gB=vol.gBackward;
+                    float denomF=1.f+gF*gF-2.f*gF*cosTheta, denomB=1.f+gB*gB-2.f*gB*cosTheta;
+                    float phaseF=(1.f-gF*gF)/(4.f*3.14159f*powf(fmaxf(denomF,1e-4f),1.5f));
+                    float phaseB=(1.f-gB*gB)/(4.f*3.14159f*powf(fmaxf(denomB,1e-4f),1.5f));
+                    phase=vol.lobeMix*phaseF+(1.f-vol.lobeMix)*phaseB;
+                }
+
+                // Shadow ray for virtual light
+                float shadowTrans=1.f;
+                if (vol.shadowSteps>0 && vol.shadowDensity>0.01f) {
+                    float3 sDir=make_float3(-lDir.x,-lDir.y,-lDir.z);
+                    float sDt=bboxDiag/(float)vol.shadowSteps;
+                    for (int ss=1;ss<=vol.shadowSteps;++ss) {
+                        float spx=px+sDir.x*sDt*ss,spy=py+sDir.y*sDt*ss,spz=pz+sDir.z*sDt*ss;
+                        float su,sv,sw;
+                        worldToVolUV(vol, spx, spy, spz, su, sv, sw);
+                        if(su<0||su>1||sv<0||sv>1||sw<0||sw>1) break;
+                        shadowTrans*=expf(-sampleDensity(vol,su,sv,sw)*vol.extinction*vol.shadowDensity*sDt);
+                        if(shadowTrans<0.001f) break;
+                    }
+                }
+                float vScatW=vol.scattering*density*phase*shadowTrans*powder;
+                stepRGB.x+=vlCol.x*vol.scatterColor.x*vScatW;
+                stepRGB.y+=vlCol.y*vol.scatterColor.y*vScatW;
+                stepRGB.z+=vlCol.z*vol.scatterColor.z*vScatW;
+            }
+
+            // Dome ambient — SH or flat average
             for (unsigned li=0; li<params.lightCount; ++li) {
                 if (params.lights[li].type==3) {
                     float dW=vol.scattering*density;
-                    stepRGB.x+=params.lights[li].color.x*params.lights[li].intensity*dW;
-                    stepRGB.y+=params.lights[li].color.y*params.lights[li].intensity*dW;
-                    stepRGB.z+=params.lights[li].color.z*params.lights[li].intensity*dW;
+                    float3 domeCol;
+                    if (params.hasEnvSH) {
+                        // SH L0+L1 evaluated at negative ray direction
+                        float3 evalDir = make_float3(-rd.x, -rd.y, -rd.z);
+                        domeCol.x = params.envSH[0].x*0.2821f + params.envSH[1].x*0.4886f*evalDir.y
+                                  + params.envSH[2].x*0.4886f*evalDir.z + params.envSH[3].x*0.4886f*evalDir.x;
+                        domeCol.y = params.envSH[0].y*0.2821f + params.envSH[1].y*0.4886f*evalDir.y
+                                  + params.envSH[2].y*0.4886f*evalDir.z + params.envSH[3].y*0.4886f*evalDir.x;
+                        domeCol.z = params.envSH[0].z*0.2821f + params.envSH[1].z*0.4886f*evalDir.y
+                                  + params.envSH[2].z*0.4886f*evalDir.z + params.envSH[3].z*0.4886f*evalDir.x;
+                        domeCol.x = fmaxf(0.f, domeCol.x);
+                        domeCol.y = fmaxf(0.f, domeCol.y);
+                        domeCol.z = fmaxf(0.f, domeCol.z);
+                    } else {
+                        domeCol = make_float3(
+                            params.lights[li].color.x*params.lights[li].intensity,
+                            params.lights[li].color.y*params.lights[li].intensity,
+                            params.lights[li].color.z*params.lights[li].intensity);
+                    }
+                    stepRGB.x+=domeCol.x*dW;
+                    stepRGB.y+=domeCol.y*dW;
+                    stepRGB.z+=domeCol.z*dW;
                     break;
                 }
             }

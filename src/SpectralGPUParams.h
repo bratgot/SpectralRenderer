@@ -208,6 +208,13 @@ struct LaunchParams {
     // Multi-volume support (Phase 13)
     GPUVolume              gpuVolumes[SPECTRAL_MAX_GPU_VOLUMES];
     int                    numGpuVolumes;
+
+    // HDRI virtual lights + SH for GPU volume lighting (Phase 15)
+    struct { float3 dir; float3 color; float radius; } gpuVirtualLights[8];
+    int                    numVirtualLights;
+    float3                 envSH[4];       // SH L0+L1 (DC + 3 directional)
+    int                    hasEnvSH;
+    float                  envIntensityGPU; // dome envIntensity for volumes
 };
 
 // Per-ray payload — carried through the trace

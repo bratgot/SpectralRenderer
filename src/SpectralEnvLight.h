@@ -26,6 +26,14 @@ public:
     const char* node_help() const override;
     unsigned    node_color() const override { return 0xFFCC00FF; }
 
+    // Input 0: chain (SourceGeomOp default)
+    // Input 1: HDRI texture (Iop — Read node, Constant, etc.)
+    int  minimum_inputs() const override { return 2; }
+    int  maximum_inputs() const override { return 2; }
+    bool test_input(int input, Op* op) const override;
+    const char* input_label(int input, char* buf) const override;
+    Op*  default_input(int input) const override;
+
     void knobs(Knob_Callback f) override;
     int  knob_changed(Knob* k) override;
     void build_handles(ViewerContext* ctx) override;
@@ -47,6 +55,7 @@ public:
     double sunAzimuth = 180.0;
     double sunIntensity = 5.0;
     double skyIntensity = 1.0;
+    double sunShadowSoftness = 0.3;  // 0=hard, 1=soft
 
     // --- Solar Position ---
     int    locationPreset = 0;
@@ -59,6 +68,8 @@ public:
     const char* hdriFile = "";
     double hdriIntensity = 1.0;
     double hdriRotate = 0.0;
+    double ndFilter = 0.0;     // ND filter in stops (0=none, 1=halve, 10=1/1024)
+    double hdriShadowSoftness = 0.5; // 0=hard, 1=very soft
 
     // --- Environment Controls ---
     double envIntensity = 1.0;
@@ -67,6 +78,9 @@ public:
     int    envMode = 1;
     int    envVirtualLights = 2;
     bool   useReSTIR = false;
+
+    // HDRI from input pipe (populated during render if input 1 connected)
+    bool   hasHdriInput = false;
 
     void ComputeSunPosition();
 };

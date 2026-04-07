@@ -3820,7 +3820,15 @@ void SpectralRenderIop::_LoadVDB()
                 if (strcmp(op->Class(), "SpectralEnvLight") == 0 && !op->node_disabled()) {
                     auto* el = static_cast<SpectralEnvLight*>(op);
                     _allEnvLights.push_back(el);
-                    if (!_cachedEnvLight) _cachedEnvLight = el;
+                    if (!_cachedEnvLight) {
+                        _cachedEnvLight = el;
+                        // Copy volume env params immediately so _applyVolumeShading works
+                        _vdbEnvIntensity = el->envIntensity;
+                        _vdbEnvDiffuse = el->envDiffuse;
+                        _vdbEnvMode = el->envMode;
+                        _vdbEnvVirtualLights = el->envVirtualLights;
+                        _vdbUseReSTIR = el->useReSTIR;
+                    }
                 }
                 if (strcmp(op->Class(), "SpectralStudioLight") == 0 && !op->node_disabled()) {
                     auto* sl = static_cast<SpectralStudioLight*>(op);
@@ -3886,6 +3894,12 @@ void SpectralRenderIop::_LoadVDB()
             _volume = _volumes.empty() ? nullptr : _volumes[0];
             _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
             fprintf(stderr, "SpectralRender: loaded %d volume(s) from VolMerge\n", (int)_volumes.size());
+            for (size_t vi = 0; vi < _volumes.size(); ++vi) {
+                auto& v = _volumes[vi];
+                fprintf(stderr, "  vol[%zu] scatter=(%.2f,%.2f,%.2f) ext=%.2f scat=%.2f int=%.2f envI=%.2f envD=%.2f\n",
+                    vi, v->scatterColor[0], v->scatterColor[1], v->scatterColor[2],
+                    v->extinction, v->scattering, v->intensity, v->envIntensity, v->envDiffuse);
+            }
             return;
         }
 
@@ -3966,6 +3980,12 @@ void SpectralRenderIop::_LoadVDB()
             _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
             fprintf(stderr, "SpectralRender: loaded %d volume(s) from scn input chain\n",
                     (int)_volumes.size());
+            for (size_t vi = 0; vi < _volumes.size(); ++vi) {
+                auto& v = _volumes[vi];
+                fprintf(stderr, "  vol[%zu] scatter=(%.2f,%.2f,%.2f) ext=%.2f scat=%.2f int=%.2f envI=%.2f envD=%.2f\n",
+                    vi, v->scatterColor[0], v->scatterColor[1], v->scatterColor[2],
+                    v->extinction, v->scattering, v->intensity, v->envIntensity, v->envDiffuse);
+            }
             return;
         }
     }
@@ -4304,22 +4324,18 @@ void SpectralRenderIop::_BuildLightRig()
 
     // Search scn input chain for ALL SpectralEnvLight and SpectralStudioLight nodes
     // (vectors already populated in _EnsureFrameRendered scene walk)
-    // Use first of each for param override; all contribute lights additively
-    SpectralEnvLight* envLight = !_allEnvLights.empty() ? _allEnvLights[0] : nullptr;
-    SpectralStudioLight* studioLight = !_allStudioLights.empty() ? _allStudioLights[0] : nullptr;
-
-    // Also try direct discovery if vectors are empty (legacy path)
-    if (!envLight && !studioLight && inputs() > 1 && input(1)) {
+    // Legacy fallback: direct discovery if vectors are empty
+    if (_allEnvLights.empty() && _allStudioLights.empty() && inputs() > 1 && input(1)) {
         std::vector<Op*> searchOps;
         searchOps.push_back(input(1));
-        for (int depth = 0; depth < 4 && (!envLight || !studioLight); ++depth) {
+        for (int depth = 0; depth < 4; ++depth) {
             std::vector<Op*> nextLevel;
             for (Op* op : searchOps) {
                 if (!op) continue;
-                if (!envLight && strcmp(op->Class(), "SpectralEnvLight") == 0)
-                    envLight = static_cast<SpectralEnvLight*>(op);
-                if (!studioLight && strcmp(op->Class(), "SpectralStudioLight") == 0)
-                    studioLight = static_cast<SpectralStudioLight*>(op);
+                if (strcmp(op->Class(), "SpectralEnvLight") == 0)
+                    _allEnvLights.push_back(static_cast<SpectralEnvLight*>(op));
+                if (strcmp(op->Class(), "SpectralStudioLight") == 0)
+                    _allStudioLights.push_back(static_cast<SpectralStudioLight*>(op));
                 for (int i = 0; i < op->inputs(); ++i) {
                     Op* up = op->input(i);
                     if (up) nextLevel.push_back(up);
@@ -4329,37 +4345,11 @@ void SpectralRenderIop::_BuildLightRig()
         }
     }
 
-    // Override local lighting params from scene-graph nodes
-    _cachedEnvLight = envLight;
-    _cachedStudioLight = studioLight;
-    if (envLight) {
-        _skyPreset = envLight->skyPreset;
-        _sunElevation = envLight->sunElevation;
-        _sunAzimuth = envLight->sunAzimuth;
-        _sunIntensity = envLight->sunIntensity;
-        _skyIntensity = envLight->skyIntensity;
-        _hdriFile = envLight->hdriFile;
-        _hdriIntensity = envLight->hdriIntensity;
-        _hdriRotate = envLight->hdriRotate;
-        _vdbEnvIntensity = envLight->envIntensity;
-        _vdbEnvDiffuse = envLight->envDiffuse;
-        _vdbEnvMode = envLight->envMode;
-        _vdbEnvVirtualLights = envLight->envVirtualLights;
-        _vdbUseReSTIR = envLight->useReSTIR;
-    }
-    if (studioLight) {
-        _studioPreset = 1;  // studio light node connected — activate rig
-        _studioMix = studioLight->mix;
-        _studioKeyAzimuth = studioLight->keyAzimuth;
-        _studioKeyElevation = studioLight->keyElevation;
-        _studioKeyIntensity = studioLight->keyIntensity;
-        _studioFillRatio = studioLight->fillRatio;
-        _studioRimIntensity = studioLight->rimIntensity;
-        _shadowSoftness = studioLight->shadowSoftness;
-    }
+    // Cache first of each for legacy param reads
+    _cachedEnvLight = !_allEnvLights.empty() ? _allEnvLights[0] : nullptr;
+    _cachedStudioLight = !_allStudioLights.empty() ? _allStudioLights[0] : nullptr;
 
     // Remove previous rig lights but preserve scene input lights.
-    // Scene input lights have names from USD. Rig lights have empty names.
     auto& lights = _scene->GetLights();
     std::vector<pxr::SpectralLight> sceneLights;
     for (const auto& L : lights) {
@@ -4368,75 +4358,164 @@ void SpectralRenderIop::_BuildLightRig()
     _scene->ClearLights();
     for (const auto& L : sceneLights) _scene->AddLight(L);
 
-    // Sun/sky (Preetham analytical model)
-    if (_skyPreset > 0 && _skyMix > 0.001) {
-        double m = _skyMix;
-        double sunR, sunG, sunB, skyR, skyG, skyB;
-        sunColorFromElevation(_sunElevation, _turbidity, sunR, sunG, sunB);
-        skyColorFromElevation(_sunElevation, _turbidity, skyR, skyG, skyB);
-        GfVec3f sunDir = dirFromElevAzim(_sunElevation, _sunAzimuth);
+    // ---- Additive env lights: each SpectralEnvLight contributes sun + sky + HDRI ----
+    for (SpectralEnvLight* el : _allEnvLights) {
+        if (!el) continue;
 
-        // Direct sun — use sphere light for soft shadows
-        // Exponential: high values rapidly increase brightness
-        double sunPow = _sunIntensity * _sunIntensity;  // squared for exponential feel
-        double si = sunPow * std::max(0.1, std::min(_sunElevation / 12.0, 1.0)) * m;
-        if (si > 0.001) {
-            SpectralLight sun;
-            if (_shadowSoftness > 0.01) {
-                // Sphere light at distance for soft shadows
-                sun.type = SpectralLight::Type::Sphere;
-                float dist = 500.f;
-                sun.position = GfVec3f(sunDir[0]*-dist, sunDir[1]*-dist, sunDir[2]*-dist);
-                sun.radius = float(_shadowSoftness * 50.f);
-            } else {
-                sun.type = SpectralLight::Type::Distant;
-                sun.direction = sunDir;
-            }
-            sun.color = GfVec3f(float(sunR * si), float(sunG * si), float(sunB * si));
-            sun.intensity = 1.f;
-            _scene->AddLight(sun);
+        double skyMix = 1.0;  // env light node is connected — always active
+
+        // Copy params for volume env lighting from first env light
+        if (el == _allEnvLights[0]) {
+            _vdbEnvIntensity = el->envIntensity;
+            _vdbEnvDiffuse = el->envDiffuse;
+            _vdbEnvMode = el->envMode;
+            _vdbEnvVirtualLights = el->envVirtualLights;
+            _vdbUseReSTIR = el->useReSTIR;
         }
 
-        // Sky dome fill — exponential for quick brightness ramp
-        double skyPow = _skyIntensity * _skyIntensity;  // squared
-        double ski = skyPow * m;
-        if (ski > 0.001) {
-            SpectralLight sky;
-            sky.type = SpectralLight::Type::Dome;
-            sky.color = GfVec3f(float(skyR * ski), float(skyG * ski), float(skyB * ski));
-            sky.intensity = 1.f;
+        // Sun/sky from this env light
+        if (el->skyPreset > 0) {
+            double sunR, sunG, sunB, skyR, skyG, skyB;
+            sunColorFromElevation(el->sunElevation, 2.5, sunR, sunG, sunB);
+            skyColorFromElevation(el->sunElevation, 2.5, skyR, skyG, skyB);
+            GfVec3f sunDir = dirFromElevAzim(el->sunElevation, el->sunAzimuth);
 
-            // Planet sky colour overrides
-            if (_skyPreset == 13) { // Mars — butterscotch sky, pink-red sun
-                sky.color = GfVec3f(float(0.8*ski), float(0.55*ski), float(0.3*ski));
-            } else if (_skyPreset == 14) { // Titan — thick orange methane haze
-                sky.color = GfVec3f(float(0.7*ski), float(0.45*ski), float(0.15*ski));
-            } else if (_skyPreset == 15) { // Krypton — red giant star, crimson sky
-                sky.color = GfVec3f(float(0.9*ski), float(0.2*ski), float(0.15*ski));
-            } else if (_skyPreset == 16) { // Tatooine — warm amber twin-sun sky
-                sky.color = GfVec3f(float(0.9*ski), float(0.7*ski), float(0.35*ski));
-            } else if (_skyPreset == 17) { // Pandora — bioluminescent blue-violet
-                sky.color = GfVec3f(float(0.3*ski), float(0.4*ski), float(0.9*ski));
+            double sunPow = el->sunIntensity * el->sunIntensity;
+            double si = sunPow * std::max(0.1, std::min(el->sunElevation / 12.0, 1.0)) * skyMix;
+            if (si > 0.001) {
+                SpectralLight sun;
+                if (el->sunShadowSoftness > 0.01) {
+                    sun.type = SpectralLight::Type::Sphere;
+                    float dist = 500.f;
+                    sun.position = GfVec3f(sunDir[0]*-dist, sunDir[1]*-dist, sunDir[2]*-dist);
+                    sun.radius = float(el->sunShadowSoftness * 50.f);
+                } else {
+                    sun.type = SpectralLight::Type::Distant;
+                    sun.direction = sunDir;
+                }
+                sun.color = GfVec3f(float(sunR * si), float(sunG * si), float(sunB * si));
+                sun.intensity = 1.f;
+                _scene->AddLight(sun);
             }
 
-            _scene->AddLight(sky);
+            double skyPow = el->skyIntensity * el->skyIntensity;
+            double ski = skyPow * skyMix;
+            if (ski > 0.001) {
+                SpectralLight sky;
+                sky.type = SpectralLight::Type::Dome;
+                sky.color = GfVec3f(float(skyR * ski), float(skyG * ski), float(skyB * ski));
+                sky.intensity = 1.f;
+
+                // Planet sky colour overrides
+                if (el->skyPreset == 13) sky.color = GfVec3f(float(0.8*ski), float(0.55*ski), float(0.3*ski));
+                else if (el->skyPreset == 14) sky.color = GfVec3f(float(0.7*ski), float(0.45*ski), float(0.15*ski));
+                else if (el->skyPreset == 15) sky.color = GfVec3f(float(0.9*ski), float(0.2*ski), float(0.15*ski));
+                else if (el->skyPreset == 16) sky.color = GfVec3f(float(0.9*ski), float(0.7*ski), float(0.35*ski));
+                else if (el->skyPreset == 17) sky.color = GfVec3f(float(0.3*ski), float(0.4*ski), float(0.9*ski));
+
+                _scene->AddLight(sky);
+            }
+        }
+
+        // HDRI from this env light (file knob OR input pipe)
+        bool hasHdri = false;
+        int texId = -1;
+
+        // Check input pipe first (input 1 = HDRI Iop)
+        if (el->inputs() > 1 && el->input(1)) {
+            Iop* hdriIop = dynamic_cast<Iop*>(el->input(1));
+            if (hdriIop) {
+                try {
+                    hdriIop->validate(true);
+                    int W = hdriIop->info().w(), H = hdriIop->info().h();
+                    if (W > 0 && H > 0) {
+                        hdriIop->request(0, 0, W, H, Mask_RGB, 1);
+                        pxr::SpectralTexture tex;
+                        tex._pixels.resize(size_t(W) * H * 3);
+                        tex._width = W; tex._height = H; tex._channels = 3;
+                        tex._path = "input_pipe";
+                        for (int y = 0; y < H; ++y) {
+                            Row row(0, W);
+                            hdriIop->get(y, 0, W, Mask_RGB, row);
+                            const float* rp = row[Chan_Red];
+                            const float* gp = row[Chan_Green];
+                            const float* bp = row[Chan_Blue];
+                            int storeY = H - 1 - y;  // flip Y (Nuke bottom-up → top-down)
+                            for (int x = 0; x < W; ++x) {
+                                size_t idx = (size_t(storeY) * W + x) * 3;
+                                tex._pixels[idx]   = rp ? rp[x] : 0.f;
+                                tex._pixels[idx+1] = gp ? gp[x] : 0.f;
+                                tex._pixels[idx+2] = bp ? bp[x] : 0.f;
+                            }
+                        }
+                        texId = _scene->AddTexture(std::move(tex));
+                        hasHdri = true;
+                        fprintf(stderr, "SpectralRender: HDRI from input pipe (%dx%d)\n", W, H);
+                    }
+                } catch (...) {
+                    fprintf(stderr, "SpectralRender: HDRI input pipe failed\n");
+                }
+            }
+        }
+
+        // Fall back to file knob
+        if (!hasHdri && el->hdriFile && strlen(el->hdriFile) > 0) {
+            texId = _scene->LoadTexture(el->hdriFile);
+            hasHdri = (texId >= 0);
+        }
+
+        if (hasHdri && texId >= 0) {
+            const auto* tex = _scene->GetTexture(texId);
+            if (tex && tex->IsValid()) {
+                SpectralLight hdriDome;
+                hdriDome.type = SpectralLight::Type::Dome;
+                hdriDome.color = GfVec3f(1.f);
+                // Apply ND filter: each stop halves brightness
+                float ndAtten = (el->ndFilter > 0.01) ? float(std::pow(2.0, -el->ndFilter)) : 1.f;
+                hdriDome.intensity = float(el->hdriIntensity) * ndAtten;
+                hdriDome.envTexId = texId;
+                hdriDome.envWidth = tex->GetWidth();
+                hdriDome.envHeight = tex->GetHeight();
+                hdriDome.envPixels = tex->_pixels.data();
+                hdriDome.envRotation = float(el->hdriRotate);
+                hdriDome.envShadowSoftness = float(el->hdriShadowSoftness);
+                hdriDome.ComputeEnvAverage();
+                _scene->AddLight(hdriDome);
+                fprintf(stderr, "SpectralRender: HDRI dome (%dx%d) intensity=%.1f nd=%.1f stops (effective=%.3f) avg=(%.3f,%.3f,%.3f) cdf=%s sh=%s vlights=%d\n",
+                        hdriDome.envWidth, hdriDome.envHeight, el->hdriIntensity, el->ndFilter,
+                        hdriDome.intensity,
+                        hdriDome.envAvgColor[0], hdriDome.envAvgColor[1], hdriDome.envAvgColor[2],
+                        hdriDome.envHasCDF ? "yes" : "no",
+                        hdriDome.envHasSH ? "yes" : "no",
+                        (int)hdriDome.envVirtualLights.size());
+                for (size_t vi = 0; vi < hdriDome.envVirtualLights.size(); ++vi) {
+                    auto& vl = hdriDome.envVirtualLights[vi];
+                    fprintf(stderr, "  vlight[%zu] dir=(%.2f,%.2f,%.2f) rgb=(%.2f,%.2f,%.2f)\n",
+                            vi, vl.direction[0], vl.direction[1], vl.direction[2],
+                            vl.color[0], vl.color[1], vl.color[2]);
+                }
+            }
         }
     }
 
-    // Studio three-point rig
-    if (_studioPreset > 0 && _studioMix > 0.001) {
-        double m = _studioMix;
-        double ki = _studioKeyIntensity * m;
+    // ---- Additive studio lights: each SpectralStudioLight contributes key + fill + rim ----
+    for (SpectralStudioLight* sl : _allStudioLights) {
+        if (!sl) continue;
 
-        // Key light (slightly warm) — sphere for soft shadows
+        double m = sl->mix;
+        if (m < 0.001) continue;
+
+        double ki = sl->keyIntensity * m;
+
+        // Key light
         if (ki > 0.001) {
             SpectralLight key;
-            GfVec3f keyDir = dirFromElevAzim(_studioKeyElevation, _studioKeyAzimuth);
-            if (_shadowSoftness > 0.01) {
+            GfVec3f keyDir = dirFromElevAzim(sl->keyElevation, sl->keyAzimuth);
+            if (sl->shadowSoftness > 0.01) {
                 key.type = SpectralLight::Type::Sphere;
                 float dist = 500.f;
                 key.position = GfVec3f(keyDir[0]*-dist, keyDir[1]*-dist, keyDir[2]*-dist);
-                key.radius = float(_shadowSoftness * 50.f);
+                key.radius = float(sl->shadowSoftness * 50.f);
             } else {
                 key.type = SpectralLight::Type::Distant;
                 key.direction = keyDir;
@@ -4446,56 +4525,131 @@ void SpectralRenderIop::_BuildLightRig()
             _scene->AddLight(key);
         }
 
-        // Fill light (opposite side, cool)
-        double fi = ki * _studioFillRatio;
+        // Fill light
+        double fi = ki * sl->fillRatio;
         if (fi > 0.001) {
             SpectralLight fill;
             fill.type = SpectralLight::Type::Distant;
-            fill.direction = dirFromElevAzim(_studioKeyElevation * 0.5, _studioKeyAzimuth + 180);
+            fill.direction = dirFromElevAzim(sl->keyElevation * 0.5, sl->keyAzimuth + 180);
             fill.color = GfVec3f(float(fi * 0.9), float(fi * 0.92), float(fi));
             fill.intensity = 1.f;
             _scene->AddLight(fill);
         }
 
-        // Rim light (behind, high)
-        double ri = _studioRimIntensity * m;
+        // Rim light
+        double ri = sl->rimIntensity * m;
         if (ri > 0.001) {
             SpectralLight rim;
             rim.type = SpectralLight::Type::Distant;
-            rim.direction = dirFromElevAzim(_studioKeyElevation + 15, _studioKeyAzimuth + 160);
+            rim.direction = dirFromElevAzim(sl->keyElevation + 15, sl->keyAzimuth + 160);
             rim.color = GfVec3f(float(ri));
             rim.intensity = 1.f;
             _scene->AddLight(rim);
         }
     }
 
-    // HDRI file dome light (from Lighting tab file knob)
-    if (_hdriFile && strlen(_hdriFile) > 0) {
-        int texId = _scene->LoadTexture(_hdriFile);
-        if (texId >= 0) {
-            const auto* tex = _scene->GetTexture(texId);
-            if (tex && tex->IsValid()) {
-                SpectralLight hdriDome;
-                hdriDome.type = SpectralLight::Type::Dome;
-                hdriDome.color = GfVec3f(1.f);
-                hdriDome.intensity = float(_hdriIntensity);
-                hdriDome.envTexId = texId;
-                hdriDome.envWidth = tex->GetWidth();
-                hdriDome.envHeight = tex->GetHeight();
-                hdriDome.envPixels = tex->_pixels.data();
-                hdriDome.ComputeEnvAverage();
-                _scene->AddLight(hdriDome);
-                fprintf(stderr, "SpectralRender: HDRI dome from file '%s' (%dx%d) avg=(%.2f,%.2f,%.2f) intensity=%.1f\n",
-                        _hdriFile, hdriDome.envWidth, hdriDome.envHeight,
-                        hdriDome.envAvgColor[0], hdriDome.envAvgColor[1], hdriDome.envAvgColor[2],
-                        _hdriIntensity);
+    // ---- Fallback: use SpectralRender's own lighting knobs if no light nodes connected ----
+    if (_allEnvLights.empty() && _allStudioLights.empty()) {
+        // Sun/sky from local knobs
+        if (_skyPreset > 0 && _skyMix > 0.001) {
+            double m = _skyMix;
+            double sunR, sunG, sunB, skyR, skyG, skyB;
+            sunColorFromElevation(_sunElevation, _turbidity, sunR, sunG, sunB);
+            skyColorFromElevation(_sunElevation, _turbidity, skyR, skyG, skyB);
+            GfVec3f sunDir = dirFromElevAzim(_sunElevation, _sunAzimuth);
+
+            double sunPow = _sunIntensity * _sunIntensity;
+            double si = sunPow * std::max(0.1, std::min(_sunElevation / 12.0, 1.0)) * m;
+            if (si > 0.001) {
+                SpectralLight sun;
+                if (_shadowSoftness > 0.01) {
+                    sun.type = SpectralLight::Type::Sphere;
+                    float dist = 500.f;
+                    sun.position = GfVec3f(sunDir[0]*-dist, sunDir[1]*-dist, sunDir[2]*-dist);
+                    sun.radius = float(_shadowSoftness * 50.f);
+                } else {
+                    sun.type = SpectralLight::Type::Distant;
+                    sun.direction = sunDir;
+                }
+                sun.color = GfVec3f(float(sunR * si), float(sunG * si), float(sunB * si));
+                sun.intensity = 1.f;
+                _scene->AddLight(sun);
             }
-        } else {
-            fprintf(stderr, "SpectralRender: failed to load HDRI '%s'\n", _hdriFile);
+
+            double skyPow = _skyIntensity * _skyIntensity;
+            double ski = skyPow * m;
+            if (ski > 0.001) {
+                SpectralLight sky;
+                sky.type = SpectralLight::Type::Dome;
+                sky.color = GfVec3f(float(skyR * ski), float(skyG * ski), float(skyB * ski));
+                sky.intensity = 1.f;
+                _scene->AddLight(sky);
+            }
+        }
+
+        // Studio from local knobs
+        if (_studioPreset > 0 && _studioMix > 0.001) {
+            double m = _studioMix;
+            double ki = _studioKeyIntensity * m;
+            if (ki > 0.001) {
+                SpectralLight key;
+                GfVec3f keyDir = dirFromElevAzim(_studioKeyElevation, _studioKeyAzimuth);
+                if (_shadowSoftness > 0.01) {
+                    key.type = SpectralLight::Type::Sphere;
+                    float dist = 500.f;
+                    key.position = GfVec3f(keyDir[0]*-dist, keyDir[1]*-dist, keyDir[2]*-dist);
+                    key.radius = float(_shadowSoftness * 50.f);
+                } else {
+                    key.type = SpectralLight::Type::Distant;
+                    key.direction = keyDir;
+                }
+                key.color = GfVec3f(float(ki), float(ki * 0.95), float(ki * 0.9));
+                key.intensity = 1.f;
+                _scene->AddLight(key);
+            }
+            double fi = ki * _studioFillRatio;
+            if (fi > 0.001) {
+                SpectralLight fill;
+                fill.type = SpectralLight::Type::Distant;
+                fill.direction = dirFromElevAzim(_studioKeyElevation * 0.5, _studioKeyAzimuth + 180);
+                fill.color = GfVec3f(float(fi * 0.9), float(fi * 0.92), float(fi));
+                fill.intensity = 1.f;
+                _scene->AddLight(fill);
+            }
+            double ri = _studioRimIntensity * m;
+            if (ri > 0.001) {
+                SpectralLight rim;
+                rim.type = SpectralLight::Type::Distant;
+                rim.direction = dirFromElevAzim(_studioKeyElevation + 15, _studioKeyAzimuth + 160);
+                rim.color = GfVec3f(float(ri));
+                rim.intensity = 1.f;
+                _scene->AddLight(rim);
+            }
+        }
+
+        // HDRI from local knobs
+        if (_hdriFile && strlen(_hdriFile) > 0) {
+            int texId = _scene->LoadTexture(_hdriFile);
+            if (texId >= 0) {
+                const auto* tex = _scene->GetTexture(texId);
+                if (tex && tex->IsValid()) {
+                    SpectralLight hdriDome;
+                    hdriDome.type = SpectralLight::Type::Dome;
+                    hdriDome.color = GfVec3f(1.f);
+                    hdriDome.intensity = float(_hdriIntensity);
+                    hdriDome.envTexId = texId;
+                    hdriDome.envWidth = tex->GetWidth();
+                    hdriDome.envHeight = tex->GetHeight();
+                    hdriDome.envPixels = tex->_pixels.data();
+                    hdriDome.envRotation = float(_hdriRotate);
+                    hdriDome.ComputeEnvAverage();
+                    _scene->AddLight(hdriDome);
+                }
+            }
         }
     }
 
-    // Log all lights for debugging
+    // Log all lights
     {
         const auto& allLights = _scene->GetLights();
         fprintf(stderr, "SpectralRender: %zu lights in scene:\n", allLights.size());
@@ -4626,17 +4780,6 @@ void SpectralRenderIop::_EnsureFrameRendered()
 
     // Add built-in sun/sky and studio lights
     _BuildLightRig();
-
-    // If volume loaded but no lights at all, add a default dome
-    // so the volume is visible (extinction + scatter need light)
-    if (_volume && _volume->IsValid() && !_scene->HasLights()) {
-        pxr::SpectralLight defaultDome;
-        defaultDome.type = pxr::SpectralLight::Type::Dome;
-        defaultDome.color = pxr::GfVec3f(0.5f);
-        defaultDome.intensity = 1.f;
-        _scene->AddLight(defaultDome);
-        fprintf(stderr, "SpectralRender: added default dome light for volume (enable Lighting tab for better results)\n");
-    }
 
     // Volume already loaded at top of _EnsureFrameRendered
 

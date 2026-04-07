@@ -3,6 +3,7 @@
 
 #include "SpectralEnvLight.h"
 #include <DDImage/Knobs.h>
+#include <DDImage/Iop.h>
 #include <DDImage/ViewerContext.h>
 #include <DDImage/gl.h>
 #include "usg/geom/PointsPrim.h"
@@ -42,11 +43,32 @@ const char* SpectralEnvLight::node_help() const
            "Sun/sky model with 18 presets including planetary atmospheres.\n"
            "Solar position from latitude, longitude, and time of day.\n"
            "HDRI environment map loading with rotation and intensity.\n\n"
+           "Connect a Read node to the 'hdri' input for image-based lighting,\n"
+           "or use the HDRI file knob to load directly.\n\n"
+           "ND Filter: attenuates bright HDRIs by stops (1 stop = halve brightness).\n\n"
            "CONNECTION\n"
            "  Connect directly to GeoScene as a separate input.\n"
            "  Do NOT use GeoBind -- it breaks animated updates.\n\n"
            "Created by Marten Blumen\n"
            "github.com/bratgot/SpectralRenderer";
+}
+
+bool SpectralEnvLight::test_input(int input, Op* op) const
+{
+    if (input == 1) return op != nullptr;  // accept ANY op (Read, Constant, Grade, etc.)
+    return SourceGeomOp::test_input(input, op);
+}
+
+const char* SpectralEnvLight::input_label(int input, char* buf) const
+{
+    if (input == 1) { strcpy(buf, "hdri"); return buf; }
+    return SourceGeomOp::input_label(input, buf);
+}
+
+Op* SpectralEnvLight::default_input(int input) const
+{
+    if (input == 1) return nullptr;  // hdri pipe is optional
+    return SourceGeomOp::default_input(input);
 }
 
 static const double kPi = 3.14159265358979;
@@ -74,6 +96,8 @@ void SpectralEnvLight::ComputeSunPosition()
 void SpectralEnvLight::build_handles(ViewerContext* ctx)
 {
     if (ctx->transform_mode() == VIEWER_2D) return;
+    if (node_disabled()) return;
+    try { SourceGeomOp::build_handles(ctx); } catch (...) {}
     add_draw_handle(ctx);
 }
 
@@ -222,6 +246,75 @@ void SpectralEnvLight::draw_handle(ViewerContext* ctx)
         }
     }
 
+    // --- HDRI rotation indicator ---
+    // Shows where the HDRI's "front" (0°) is pointing and the rotation offset
+    if (hdriFile && strlen(hdriFile) > 0) {
+        float rotR = float(hdriRotate) * float(kPi) / 180.f;
+        float frontX = R * std::sin(rotR);
+        float frontZ = R * std::cos(rotR);
+
+        // HDRI front direction arrow (orange, on equator)
+        glColor4f(1.f, 0.6f, 0.1f, 0.7f);
+        glLineWidth(2.5f);
+        glBegin(GL_LINES);
+        glVertex3f(0.f, 0.f, 0.f);
+        glVertex3f(frontX, 0.f, frontZ);
+        glEnd();
+
+        // Sun disc at front (represents HDRI sun position)
+        // Draw a sun icon on the dome at rotation angle, elevated slightly
+        float sunEl = 15.f * float(kPi) / 180.f;  // assume sun ~15° above horizon
+        float hsx = R * std::cos(sunEl) * std::sin(rotR);
+        float hsy = R * std::sin(sunEl);
+        float hsz = R * std::cos(sunEl) * std::cos(rotR);
+
+        // Sun disc — warm orange
+        glColor4f(1.f, 0.7f, 0.2f, 0.8f);
+        glPointSize(14.f);
+        glBegin(GL_POINTS); glVertex3f(hsx, hsy, hsz); glEnd();
+
+        // Sun glow
+        glColor4f(1.f, 0.6f, 0.1f, 0.25f);
+        glPointSize(28.f);
+        glBegin(GL_POINTS); glVertex3f(hsx, hsy, hsz); glEnd();
+
+        // Sun rays (8 short lines radiating from disc)
+        float rayLen = R * 0.05f;
+        glColor4f(1.f, 0.75f, 0.3f, 0.5f);
+        glLineWidth(1.5f);
+        for (int ri = 0; ri < 8; ++ri) {
+            float a = float(ri) / 8.f * 2.f * float(kPi);
+            // Ray direction perpendicular to view — approximate in XY plane at sun position
+            float rdx = std::cos(a) * rayLen;
+            float rdy = std::sin(a) * rayLen;
+            glBegin(GL_LINES);
+            glVertex3f(hsx + rdx * 0.6f, hsy + rdy * 0.6f, hsz);
+            glVertex3f(hsx + rdx, hsy + rdy, hsz);
+            glEnd();
+        }
+
+        // "HDRI" label position indicator (small text-like tick)
+        glColor4f(1.f, 0.6f, 0.1f, 0.5f);
+        glPointSize(3.f);
+        glBegin(GL_POINTS);
+        glVertex3f(frontX * 1.05f, 0.f, frontZ * 1.05f);
+        glEnd();
+
+        // Rotation arc from 0° to current rotation
+        if (std::abs(hdriRotate) > 1.0) {
+            glColor4f(1.f, 0.6f, 0.1f, 0.3f);
+            glLineWidth(1.f);
+            glBegin(GL_LINE_STRIP);
+            int arcSteps = std::max(4, int(std::abs(hdriRotate) / 5.0));
+            for (int ai = 0; ai <= arcSteps; ++ai) {
+                float t = float(ai) / float(arcSteps);
+                float aa = t * rotR;
+                glVertex3f(R * 0.95f * std::sin(aa), R * 0.02f, R * 0.95f * std::cos(aa));
+            }
+            glEnd();
+        }
+    }
+
     // --- Center crosshair ---
     glColor4f(0.8f, 0.8f, 0.8f, 0.5f);
     float cm = R * 0.03f;
@@ -244,21 +337,13 @@ void SpectralEnvLight::knobs(Knob_Callback f)
     Newline(f);
     Text_knob(f,
         "<font color='#777' size='-1'>"
-        "Sky model, solar position, and HDRI environment maps.<br>"
-        "Connect to GeoScene alongside SpectralVDBRead."
+        "Sky model + HDRI environment maps for volume and surface lighting.<br>"
+        "Connect to VolMerge or GeoScene. Pipe an HDRI into the 'hdri' input."
         "</font>"
     );
 
+    // ─── Sky ──────────────────────────────────────────────────────────
     Divider(f, "Sky");
-    Text_knob(f,
-        "<font color='#777' size='-1'>"
-        "Physically-inspired sky model based on Preetham analytical atmosphere.<br>"
-        "18 presets include Earth atmospheres and planetary skies.<br>"
-        "Sun intensity is squared for exponential response (matches real-world<br>"
-        "perception where small slider moves = large brightness changes)."
-        "</font>"
-    );
-    Newline(f);
     static const char* const skyNames[] = {
         "Off", "Custom", "Clear Day", "Golden Hour", "Red Sky Dawn",
         "Sunrise", "Overcast", "Blue Hour", "Moonlit", "Starlight",
@@ -301,7 +386,14 @@ void SpectralEnvLight::knobs(Knob_Callback f)
     ClearFlags(f, Knob::STARTLINE); SetRange(f, 0, 360);
     Tooltip(f, "Sun compass direction in degrees.");
 
-    BeginClosedGroup(f, "grp_location", "Location and time of day");
+    Double_knob(f, &sunShadowSoftness, "sun_shadow_soft", "shadow soft");
+    SetRange(f, 0, 1);
+    Tooltip(f, "Sun shadow softness.\n"
+               "0 = hard distant shadows (no penumbra).\n"
+               "0.3 = natural sun softness (default).\n"
+               "1 = very soft (overcast feel).");
+
+    BeginClosedGroup(f, "grp_location", "Solar position calculator");
     {
         static const char* const locNames[] = {
             "Custom", "London", "New York", "Los Angeles", "Tokyo",
@@ -319,65 +411,75 @@ void SpectralEnvLight::knobs(Knob_Callback f)
     }
     EndGroup(f);
 
-    Divider(f, "HDRI Environment Map");
-    Text_knob(f,
-        "<font color='#777' size='-1'>"
-        "Image-based lighting from .hdr or .exr environment maps.<br>"
-        "Composes additively with the sky model above.<br>"
-        "Use HDRI Haven, Poly Haven, or sIBL Archive for free HDRIs."
-        "</font>"
-    );
-    Newline(f);
-    File_knob(f, &hdriFile, "hdri_file", "HDRI file");
-    Tooltip(f, "Load an HDRI environment map (.hdr, .exr).\n"
-               "Creates a dome light for image-based lighting.\n"
-               "Typical workflow: load HDRI, adjust intensity and rotation\n"
-               "to match your plate's lighting direction.");
+    // ─── HDRI ─────────────────────────────────────────────────────────
+    Divider(f, "HDRI");
+    File_knob(f, &hdriFile, "hdri_file", "file");
+    Tooltip(f, "Load an HDRI environment map (.hdr).\n"
+               "Or connect a Read node to the 'hdri' input pipe.\n"
+               "Input pipe takes priority over file knob.");
+
     Double_knob(f, &hdriIntensity, "hdri_intensity", "intensity");
     SetRange(f, 0, 20); SetFlags(f, Knob::LOG_SLIDER);
     Double_knob(f, &hdriRotate, "hdri_rotate", "rotate");
     ClearFlags(f, Knob::STARTLINE); SetRange(f, 0, 360);
+    Tooltip(f, "Rotate HDRI horizontally in degrees.\n"
+               "Use to align sun direction with your plate.");
 
-    BeginClosedGroup(f, "grp_env", "Environment settings");
+    Double_knob(f, &ndFilter, "nd_filter", "ND");
+    SetRange(f, 0, 10);
+    Tooltip(f, "Neutral density filter in stops.\n"
+               "0 = none. 1 = halve. 3 = 1/8. 10 = 1/1024.\n"
+               "Tames bright sun disc in HDR images.");
+    Double_knob(f, &hdriShadowSoftness, "hdri_shadow_softness", "shadow soft");
+    ClearFlags(f, Knob::STARTLINE); SetRange(f, 0, 1);
+    Tooltip(f, "Shadow softness for HDRI-derived virtual lights.\n"
+               "0 = hard. 0.5 = medium. 1 = very soft.");
+
+    // ─── Volume Lighting ──────────────────────────────────────────────
+    BeginClosedGroup(f, "grp_env", "Volume lighting");
     {
-        Double_knob(f, &envIntensity, "env_intensity", "env intensity");
+        Text_knob(f,
+            "<font color='#777' size='-1'>"
+            "Controls how environment light affects volumes.<br>"
+            "These are read by SpectralVolumeMaterial for per-volume control."
+            "</font>"
+        );
+        Newline(f);
+        Double_knob(f, &envIntensity, "env_intensity", "intensity");
         SetRange(f, 0, 10); SetFlags(f, Knob::LOG_SLIDER);
-        Double_knob(f, &envDiffuse, "env_diffuse", "env diffuse");
+        Tooltip(f, "Overall environment intensity for volume scattering.");
+        Double_knob(f, &envDiffuse, "env_diffuse", "diffuse");
         ClearFlags(f, Knob::STARTLINE); SetRange(f, 0, 2);
+        Tooltip(f, "Diffuse fill amount from environment dome.");
         static const char* const envModes[] = {
             "Average colour (fast)", "SH + Virtual Lights", nullptr
         };
         Enumeration_knob(f, &envMode, envModes, "env_mode", "mode");
-        Int_knob(f, &envVirtualLights, "env_virtual_lights", "virtual lights");
-        ClearFlags(f, Knob::STARTLINE); SetRange(f, 0, 4);
+        Tooltip(f, "Average colour: flat ambient from HDRI average.\n"
+                   "SH + Virtual Lights: directional ambient (SH L0+L1)\n"
+                   "plus up to 8 virtual directional lights from bright HDRI peaks.");
         Bool_knob(f, &useReSTIR, "use_restir", "ReSTIR sampling");
+        ClearFlags(f, Knob::STARTLINE);
     }
     EndGroup(f);
 
-    // --- Display ---
-    Divider(f, "3D Display");
-    Text_knob(f,
-        "<font color='#666' size='-1'>"
-        "View this node directly in a 3D viewer to see the dome,<br>"
-        "sun arrow, and compass. Not visible through GeoScene."
-        "</font>"
-    );
-    Newline(f);
-    Bool_knob(f, &showDome, "show_dome", "dome");
-    Tooltip(f, "Hemisphere wireframe in the 3D viewer.");
-    Bool_knob(f, &showSunArrow, "show_sun_arrow", "sun arrow");
-    ClearFlags(f, Knob::STARTLINE);
-    Tooltip(f, "Arrow pointing toward the sun position.");
-    Bool_knob(f, &showCompass, "show_compass", "compass");
-    ClearFlags(f, Knob::STARTLINE);
-    Tooltip(f, "N/S/E/W compass markers at dome base.");
-    Double_knob(f, &domeRadius, "dome_radius", "radius");
-    SetRange(f, 10, 500);
-    Tooltip(f, "Dome display radius in world units.");
+    // ─── Display ──────────────────────────────────────────────────────
+    BeginClosedGroup(f, "grp_display", "3D display");
+    {
+        Bool_knob(f, &showDome, "show_dome", "dome");
+        Tooltip(f, "Hemisphere wireframe in the 3D viewer.");
+        Bool_knob(f, &showSunArrow, "show_sun_arrow", "sun arrow");
+        ClearFlags(f, Knob::STARTLINE);
+        Bool_knob(f, &showCompass, "show_compass", "compass");
+        ClearFlags(f, Knob::STARTLINE);
+        Double_knob(f, &domeRadius, "dome_radius", "radius");
+        SetRange(f, 10, 500);
+    }
+    EndGroup(f);
 
     Divider(f, "");
     Text_knob(f, "<font size='1' color='#555'>"
-                 "SpectralEnvLight - SpectralRenderer for Nuke 17"
+                 "SpectralEnvLight \xc2\xb7 SpectralRenderer for Nuke 17"
                  "</font>");
 }
 

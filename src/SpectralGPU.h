@@ -137,6 +137,13 @@ private:
     unsigned int           _lightCount = 0;
     unsigned int           _textureCount = 0;
 
+    // HDRI virtual lights + SH (extracted from dome in BuildAccel)
+    struct { float dir[3]; float color[3]; float radius; } _virtualLights[8];
+    int                    _numVirtualLights = 0;
+    float                  _envSH[4][3] = {};  // 4 SH coeffs × RGB
+    bool                   _hasEnvSH = false;
+    float                  _envIntensityGPU = 1.f;
+
     // Denoiser
     OptixDenoiser          _denoiser = nullptr;
     CUdeviceptr            _d_denoiserState    = 0;

@@ -408,6 +408,39 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
             _lightCount = static_cast<unsigned int>(gpuLights.size());
             fprintf(stderr, "SpectralGPU: uploaded %zu lights to device\n", gpuLights.size());
         }
+
+        // Extract virtual lights + SH from dome lights for GPU volume lighting
+        _numVirtualLights = 0;
+        _hasEnvSH = false;
+        _envIntensityGPU = 1.f;
+        for (const auto& L : lights) {
+            if (L.type != pxr::SpectralLight::Type::Dome) continue;
+
+            // Virtual lights
+            int nVL = std::min(8, (int)L.envVirtualLights.size());
+            for (int i = 0; i < nVL && _numVirtualLights < 8; ++i) {
+                auto& vl = L.envVirtualLights[i];
+                _virtualLights[_numVirtualLights].dir[0] = vl.direction[0];
+                _virtualLights[_numVirtualLights].dir[1] = vl.direction[1];
+                _virtualLights[_numVirtualLights].dir[2] = vl.direction[2];
+                _virtualLights[_numVirtualLights].color[0] = vl.color[0] * L.EffectiveIntensity();
+                _virtualLights[_numVirtualLights].color[1] = vl.color[1] * L.EffectiveIntensity();
+                _virtualLights[_numVirtualLights].color[2] = vl.color[2] * L.EffectiveIntensity();
+                _virtualLights[_numVirtualLights].radius = L.envShadowSoftness * 50.f;
+                _numVirtualLights++;
+            }
+
+            // SH coefficients
+            if (L.envHasSH) {
+                for (int c = 0; c < 4; ++c) {
+                    _envSH[c][0] = L.envSH[c][0] * L.EffectiveIntensity();
+                    _envSH[c][1] = L.envSH[c][1] * L.EffectiveIntensity();
+                    _envSH[c][2] = L.envSH[c][2] * L.EffectiveIntensity();
+                }
+                _hasEnvSH = true;
+            }
+            break;  // use first dome light
+        }
     }
 
     // Upload textures
@@ -729,6 +762,19 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
         _d_volumes[vi].cachedSize = 0;
     }
     _numDeviceVolumes = launchParams.numGpuVolumes;
+
+    // Upload HDRI virtual lights + SH for GPU volume lighting
+    launchParams.numVirtualLights = _numVirtualLights;
+    for (int i = 0; i < _numVirtualLights; ++i) {
+        launchParams.gpuVirtualLights[i].dir = make_float3(
+            _virtualLights[i].dir[0], _virtualLights[i].dir[1], _virtualLights[i].dir[2]);
+        launchParams.gpuVirtualLights[i].color = make_float3(
+            _virtualLights[i].color[0], _virtualLights[i].color[1], _virtualLights[i].color[2]);
+        launchParams.gpuVirtualLights[i].radius = _virtualLights[i].radius;
+    }
+    for (int i = 0; i < 4; ++i)
+        launchParams.envSH[i] = make_float3(_envSH[i][0], _envSH[i][1], _envSH[i][2]);
+    launchParams.hasEnvSH = _hasEnvSH ? 1 : 0;
 
     // projInverse: CPU uses M*v (column-vector), copy as-is
     // viewToWorld: CPU uses v*M (row-vector via Transform), so transpose for GPU

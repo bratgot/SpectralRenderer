@@ -304,8 +304,8 @@ void SpectralIntegrator::RenderFrame(
                             } else {
                                 // Primary ray miss
                                 radiance = 0.f;
-                                // Show dome light environment on miss only when no volume
-                                // (volume scenes: background should be transparent for comp)
+                                // Show HDRI background only when no volumes
+                                // (volume scenes use transparent BG for compositing)
                                 bool hasAnyVolume = false;
                                 for (int vv = 0; vv < numVolumes; ++vv) {
                                     if (volumes[vv] && volumes[vv]->IsValid()) { hasAnyVolume = true; break; }
@@ -380,14 +380,39 @@ void SpectralIntegrator::RenderFrame(
                                     float volTransmittance = 1.f;
 
                                     // Collect all non-dome lights for directional scatter
-                                    struct VolLight { GfVec3f dir; GfVec3f color; GfVec3f pos; int type; };
+                                    struct VolLight { GfVec3f dir; GfVec3f color; GfVec3f pos; int type; float radius; };
                                     std::vector<VolLight> volLights;
                                     if (scene.HasLights()) {
                                         for (const auto& L : scene.GetLights()) {
-                                            if (L.type == SpectralLight::Type::Dome) continue;
+                                            if (L.type == SpectralLight::Type::Dome) {
+                                                // Add virtual lights extracted from HDRI
+                                                for (const auto& vl : L.envVirtualLights) {
+                                                    float li = vl.color.GetLength() * L.intensity;
+                                                    if (li < 0.001f) continue;
+                                                    GfVec3f vlDir(-vl.direction[0],-vl.direction[1],-vl.direction[2]);
+                                                    if (L.envShadowSoftness > 0.01f) {
+                                                        // Sphere light at distance for soft shadows
+                                                        float dist = 500.f;
+                                                        float sRadius = L.envShadowSoftness * 50.f;
+                                                        GfVec3f pos = GfVec3f(-vlDir[0]*dist, -vlDir[1]*dist, -vlDir[2]*dist);
+                                                        volLights.push_back({
+                                                            vlDir,
+                                                            vl.color * L.intensity * volume->envIntensity,
+                                                            pos, int(SpectralLight::Type::Sphere), sRadius
+                                                        });
+                                                    } else {
+                                                        volLights.push_back({
+                                                            vlDir,
+                                                            vl.color * L.intensity * volume->envIntensity,
+                                                            GfVec3f(0.f), int(SpectralLight::Type::Distant), 0.f
+                                                        });
+                                                    }
+                                                }
+                                                continue;
+                                            }
                                             float li = L.color.GetLength() * L.intensity;
                                             if (li < 0.001f) continue;
-                                            volLights.push_back({L.direction, L.color * L.intensity, L.position, int(L.type)});
+                                            volLights.push_back({L.direction, L.color * L.intensity, L.position, int(L.type), L.radius});
                                         }
                                     }
 
@@ -458,10 +483,29 @@ void SpectralIntegrator::RenderFrame(
                                             if (volume->powderStrength > 0.01f) powder = 1.f - std::exp(-density * volume->powderStrength * 2.f);
 
                                             GfVec3f scatRGB(0.f);
-                                            for (const auto& vl : volLights) {
+                                            for (size_t li = 0; li < volLights.size(); ++li) {
+                                                const auto& vl = volLights[li];
                                                 GfVec3f lDir = vl.dir;
                                                 if (vl.type==int(SpectralLight::Type::Sphere)||vl.type==int(SpectralLight::Type::Spot)) {
-                                                    lDir = p - vl.pos; float len = lDir.GetLength(); if (len>1e-6f) lDir /= len; }
+                                                    // Jitter target on sphere surface for soft shadows
+                                                    GfVec3f lightPos = vl.pos;
+                                                    if (vl.radius > 0.01f) {
+                                                        unsigned int js = unsigned(step*131 + li*37 + pixIdx*7) ^ 0x9e3779b9u;
+                                                        auto qhash = [](unsigned int s) -> float {
+                                                            s = (s ^ 61u) ^ (s >> 16u); s *= 9u; s ^= s >> 4u;
+                                                            s *= 0x27d4eb2du; s ^= s >> 15u;
+                                                            return float(s) / float(0xFFFFFFFFu);
+                                                        };
+                                                        float ju1 = qhash(js), ju2 = qhash(js + 1u);
+                                                        float jTheta = 6.28318f * ju1;
+                                                        float jPhi = std::acos(1.f - 2.f * ju2);
+                                                        float jsp = std::sin(jPhi);
+                                                        lightPos[0] += vl.radius * jsp * std::cos(jTheta);
+                                                        lightPos[1] += vl.radius * jsp * std::sin(jTheta);
+                                                        lightPos[2] += vl.radius * std::cos(jPhi);
+                                                    }
+                                                    lDir = p - lightPos; float len = lDir.GetLength(); if (len>1e-6f) lDir /= len;
+                                                }
                                                 float cosTheta = -(rd[0]*lDir[0]+rd[1]*lDir[1]+rd[2]*lDir[2]);
 
                                                 // Phase function — mode 0: dual-lobe HG, mode 1: Cornette-Shanks Mie
@@ -494,13 +538,23 @@ void SpectralIntegrator::RenderFrame(
                                                 GfVec3f lRGB(vl.color[0]*volume->scatterColor[0], vl.color[1]*volume->scatterColor[1], vl.color[2]*volume->scatterColor[2]);
                                                 scatRGB += lRGB * (volume->scattering*density*phase*shadowTrans*powder);
                                             }
-                                            // Dome ambient RGB (uses HDRI average if available)
-                                            // Dome illuminates from ALL directions: phase integral over sphere = 1
+                                            // Dome ambient RGB — SH or average
                                             if (scene.HasLights()) for (const auto& L : scene.GetLights()) {
                                                 if (L.type!=SpectralLight::Type::Dome) continue;
-                                                GfVec3f domeCol = (L.envPixels && L.envWidth > 0)
-                                                    ? L.envAvgColor * L.intensity * volume->envIntensity
-                                                    : L.color * L.intensity * volume->envIntensity;
+                                                GfVec3f domeCol;
+                                                if (L.envHasSH) {
+                                                    // SH L0+L1: evaluate at negative ray direction for incoming light
+                                                    GfVec3f evalDir(-rd[0], -rd[1], -rd[2]);
+                                                    domeCol = L.EvalSH(evalDir) * L.intensity * volume->envIntensity;
+                                                    // Clamp negative SH artifacts
+                                                    domeCol[0] = std::max(0.f, domeCol[0]);
+                                                    domeCol[1] = std::max(0.f, domeCol[1]);
+                                                    domeCol[2] = std::max(0.f, domeCol[2]);
+                                                } else if (L.envPixels && L.envWidth > 0) {
+                                                    domeCol = L.envAvgColor * L.intensity * volume->envIntensity;
+                                                } else {
+                                                    domeCol = L.color * L.intensity * volume->envIntensity;
+                                                }
                                                 scatRGB += domeCol*volume->envDiffuse * (volume->scattering*density); }
                                             // Analytical MS RGB (Wrenninge 2015)
                                             if (volume->msApprox && volume->scattering>0.01f) {

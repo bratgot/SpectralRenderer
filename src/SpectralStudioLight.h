@@ -26,6 +26,7 @@ public:
     const char* node_help() const override;
     unsigned    node_color() const override { return 0xFFCC00FF; }
 
+
     void knobs(Knob_Callback f) override;
     int  knob_changed(Knob* k) override;
     void build_handles(ViewerContext* ctx) override;
