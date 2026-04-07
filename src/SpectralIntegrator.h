@@ -237,7 +237,9 @@ private:
                                  float rayTime = 0.f,
                                  ShadeComponents* comps = nullptr,
                                  const SpectralPhotonMap* photonMap = nullptr,
-                                 float gatherRadius = 0.5f);
+                                 float gatherRadius = 0.5f,
+                                 const SpectralVolume* const* volumes = nullptr,
+                                 int numVolumes = 0);
     static float _SkySpectral(const GfVec3f& dir, float lambda);
 
     // Simple hash-based RNG for per-pixel, per-sample jitter

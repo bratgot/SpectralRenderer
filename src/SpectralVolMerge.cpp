@@ -111,6 +111,15 @@ std::vector<VolMergeEntry> SpectralVolMerge::GetVolumes(int frame, int maxRes)
                 vdbRead = static_cast<SpectralVDBRead*>(cur);
                 break;
             }
+            // Chained VolMerge: recursively collect its volumes
+            if (strcmp(cur->Class(), "SpectralVolMerge") == 0) {
+                SpectralVolMerge* childMerge = static_cast<SpectralVolMerge*>(cur);
+                auto childVols = childMerge->GetVolumes(frame, maxRes);
+                for (auto& cv : childVols) result.push_back(cv);
+                if (!_envLight) _envLight = childMerge->GetEnvLight();
+                if (!_studioLight) _studioLight = childMerge->GetStudioLight();
+                break;  // don't walk further — child handled everything
+            }
             if (!_envLight && strcmp(cur->Class(), "SpectralEnvLight") == 0) {
                 _envLight = static_cast<SpectralEnvLight*>(cur);
                 break;
@@ -164,6 +173,7 @@ std::vector<VolMergeEntry> SpectralVolMerge::GetVolumes(int frame, int maxRes)
             if (vol && vol->IsValid()) {
                 VolMergeEntry e;
                 e.volume = vol;
+                e.vdbRead = vdbRead;
                 if (foundXform) {
                     e.hasXform = true;
                     e.translate = pxr::GfVec3f(float(tx),float(ty),float(tz));

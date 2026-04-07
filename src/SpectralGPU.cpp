@@ -303,6 +303,7 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
     }
 
     _triCount = static_cast<unsigned int>(vertices.size() / 3);
+    _hasRealGeometry = (_triCount > 0);
     if (_triCount == 0) {
         fprintf(stderr, "SpectralGPU: no triangles — creating dummy GAS for volume\n");
         // Add a degenerate triangle far away so GAS/traversable is valid
@@ -609,6 +610,7 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     launchParams.normals     = reinterpret_cast<float3*>(_d_normals);
     launchParams.materialIds = reinterpret_cast<int*>(_d_materialIds);
     launchParams.triCount    = _triCount;
+    launchParams.hasRealGeometry = _hasRealGeometry ? 1 : 0;
     launchParams.materials   = reinterpret_cast<spectral_gpu::GPUMaterial*>(_d_materials);
     launchParams.materialCount = _materialCount;
 

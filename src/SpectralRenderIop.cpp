@@ -3871,21 +3871,37 @@ void SpectralRenderIop::_LoadVDB()
             }
 
             _volumes.clear();
-            int volIdx = 0;
             for (auto& e : entries) {
                 if (e.volume && e.volume->IsValid()) {
-                    if (volIdx < (int)volMats.size()) {
-                        // Apply this volume's specific material
-                        _applyVolumeMaterialDirect(e.volume, volMats[volIdx]);
-                    } else if (!volMats.empty()) {
-                        // More volumes than materials: use last material
-                        _applyVolumeMaterialDirect(e.volume, volMats.back());
-                    } else {
-                        // No materials found: use built-in knobs
-                        _applyVolumeShading(e.volume);
+                    // Find material from VDBRead's mat input (works across chained VolMerges)
+                    bool appliedMat = false;
+                    if (e.vdbRead && e.vdbRead->inputs() > 0 && e.vdbRead->input(0)) {
+                        Op* matOp = e.vdbRead->input(0);
+                        if (matOp) matOp->validate(true);
+                        // Walk up to 4 levels to find SpectralVolumeMaterial
+                        Op* cur = matOp;
+                        for (int d = 0; d < 4 && cur; ++d) {
+                            if (strcmp(cur->Class(), "SpectralVolumeMaterial") == 0) {
+                                _applyVolumeMaterialDirect(e.volume,
+                                    static_cast<SpectralVolumeMaterial*>(cur));
+                                appliedMat = true;
+                                break;
+                            }
+                            cur = (cur->inputs() > 0) ? cur->input(0) : nullptr;
+                        }
+                    }
+                    if (!appliedMat) {
+                        // Fallback: try positional from top-level VolMerge inputs
+                        int volIdx = (int)_volumes.size();
+                        if (volIdx < (int)volMats.size()) {
+                            _applyVolumeMaterialDirect(e.volume, volMats[volIdx]);
+                        } else if (!volMats.empty()) {
+                            _applyVolumeMaterialDirect(e.volume, volMats.back());
+                        } else {
+                            _applyVolumeShading(e.volume);
+                        }
                     }
                     _volumes.push_back(e.volume);
-                    volIdx++;
                 }
             }
             // Get lights from VolMerge if not already found
@@ -4396,6 +4412,9 @@ void SpectralRenderIop::_BuildLightRig()
                 sun.color = GfVec3f(float(sunR * si), float(sunG * si), float(sunB * si));
                 sun.intensity = 1.f;
                 _scene->AddLight(sun);
+                fprintf(stderr, "SpectralRender: env sky sun type=%s softness=%.2f radius=%.1f\n",
+                    sun.type == SpectralLight::Type::Sphere ? "Sphere" : "Distant",
+                    el->sunShadowSoftness, sun.radius);
             }
 
             double skyPow = el->skyIntensity * el->skyIntensity;

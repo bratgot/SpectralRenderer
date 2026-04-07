@@ -1,50 +1,28 @@
-Phase 15: HDRI lighting pipeline + soft shadows + UI overhaul
+Phase 16: Bidirectional volume/geometry shadows + chained VolMerge fix
 
-HDRI Importance Sampling:
-- 2D CDF from HDRI luminance (sin-theta weighted)
-- Dome SampleDirection uses CDF, SamplePdf returns CDF probability for MIS
-- Falls back to cosine-weighted hemisphere when no HDRI
+Bidirectional Shadows (CPU):
+- Surface shadow rays march through volumes (cloud shadow on ground)
+  Beer-Lambert extinction, 32 coarse steps per volume, both primary + bounce
+- Volume shadow rays trace BVH geometry (building shadow in fog)
+  Opaque geometry fully blocks, glass partial block by opacity
+- Volume parameters passed to _ShadeSpectral for shadow access
 
-Spherical Harmonics (L0+L1):
-- 4 SH bands projected at load, EvalSH(dir) for directional volume ambient
-- SH rotated by envRotation, uploaded to GPU LaunchParams
+Bidirectional Shadows (GPU):
+- Surface shadow rays march through gpuVolumes[] along light direction
+  Forward declarations for sampleDensity/worldToVolUV
+- Volume shadow rays call optixTrace from marchSingleVolume
+  One trace per light per step, guarded by hasRealGeometry flag
+- hasRealGeometry flag distinguishes real geometry from dummy GAS
+  Volume-only scenes skip all geometry shadow optixTrace calls
+- Applied to both scene lights and HDRI virtual lights
 
-Virtual Lights from HDRI:
-- Up to 8 brightest upper-hemisphere regions, peak pixel per cell
-- Contrast filter (2x avg threshold, 80% falloff)
-- Full phase function + shadow rays on CPU and GPU
-- Directions rotated by envRotation
+Chained VolMerge fix:
+- GetVolumes recursively collects from child SpectralVolMerge inputs
+- VolMergeEntry now carries vdbRead pointer for material lookup
+- Material walk uses per-entry vdbRead->input(0) to find SpectralVolumeMaterial
+  Works across any depth of VolMerge chaining
+- Fallback to positional matching from top-level VolMerge if no mat input
+- Child VolMerge lights also inherited
 
-HDRI Rotation:
-- Applied in EnvironmentEmission, CDF SampleDirection, SamplePdf, SH, virtual lights
-
-Soft Shadows (CPU + GPU):
-- Per-step hash-based sphere surface jitter for all sphere lights
-- Sky sun: sunShadowSoftness on SpectralEnvLight (default 0.3)
-- HDRI virtual lights: hdriShadowSoftness (default 0.5)
-- GPU: hashRNG jitter in both scene lights and virtual lights
-
-SpectralEnvLight:
-- HDRI input pipe (input 1 "hdri") — Read/Grade/etc
-- ND filter (0-10 stops), sun + HDRI shadow softness knobs
-- 3D viewport: sun icon + rotation arc for HDRI
-- UI reorganized: Sky | HDRI | Volume lighting | Display
-
-Additive Multi-Light:
-- Each env/studio light contributes independently
-- Auto fill dome removed
-
-Volume Deep + AOVs:
-- Adaptive density-driven deep, beauty redistribution
-- Volume direct/emission/depth AOVs
-- Proxy scaling fix, transparent BG for volumes
-
-Other:
-- Input reorder cam=0 scn=1 bg=2, default 24mm camera
-- VDBRead mat input, estimate memory fix
-- SIGGRAPH technical twirly on first tab
-
-Files: SpectralLight.h, SpectralEnvLight.h/.cpp, SpectralStudioLight.h,
-       SpectralRenderIop.h/.cpp, SpectralIntegrator.cpp,
-       SpectralGPUParams.h, SpectralGPU.h/.cpp, SpectralGPUKernel.cu,
-       SpectralVDBRead.h/.cpp
+Files: SpectralIntegrator.h/.cpp, SpectralGPUKernel.cu, SpectralGPUParams.h,
+       SpectralGPU.h/.cpp, SpectralVolMerge.h/.cpp, SpectralRenderIop.cpp

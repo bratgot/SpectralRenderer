@@ -252,7 +252,7 @@ void SpectralIntegrator::RenderFrame(
                                     static_cast<double>(hit.v),
                                     lambda, mat, scene, hitPos, rayDir,
                                     shadeBounces, bounceSeed, bvh, rayTime, &comps,
-                                    photonMap, gatherRadius);
+                                    photonMap, gatherRadius, volumes, numVolumes);
 
                                 GfVec3d viewHit = worldToView.Transform(worldHit);
                                 float camZ = static_cast<float>(-viewHit[2]);
@@ -535,6 +535,23 @@ void SpectralIntegrator::RenderFrame(
                                                         if (suv[0]<0||suv[0]>1||suv[1]<0||suv[1]>1||suv[2]<0||suv[2]>1) break;
                                                         shadowTrans *= std::exp(-volume->SampleDensity(suv[0],suv[1],suv[2])*volume->extinction*volume->shadowDensity*sDt);
                                                         if (shadowTrans<0.001f) break; } }
+
+                                                // Geometry occlusion: trace BVH shadow ray from volume point toward light
+                                                if (shadowTrans > 0.01f && scene.TotalTriangles() > 0) {
+                                                    GfVec3f shadowDir = GfVec3f(-lDir[0], -lDir[1], -lDir[2]);
+                                                    GfRay geoShadowRay;
+                                                    geoShadowRay.SetPointAndDirection(GfVec3d(p + shadowDir * 0.01f), GfVec3d(shadowDir));
+                                                    SpectralBVH::Hit geoHit = bvh.Intersect(geoShadowRay, 0.f);
+                                                    if (geoHit.valid()) {
+                                                        // Geometry blocks light — check opacity for glass
+                                                        const SpectralMaterial& gMat = scene.GetMaterial(geoHit.tri->materialId);
+                                                        if (gMat.opacity > 0.99f || gMat.metallic > 0.5f) {
+                                                            shadowTrans = 0.f;  // opaque geometry fully blocks
+                                                        } else {
+                                                            shadowTrans *= (1.f - gMat.opacity);  // glass partial block
+                                                        }
+                                                    }
+                                                }
                                                 GfVec3f lRGB(vl.color[0]*volume->scatterColor[0], vl.color[1]*volume->scatterColor[1], vl.color[2]*volume->scatterColor[2]);
                                                 scatRGB += lRGB * (volume->scattering*density*phase*shadowTrans*powder);
                                             }
@@ -1106,7 +1123,8 @@ float SpectralIntegrator::_ShadeSpectral(
     const GfVec3f& hitPos, const GfVec3f& rayDir, int maxBounces,
     unsigned int& rngSeed, const SpectralBVH& bvh, float rayTime,
     ShadeComponents* comps, const SpectralPhotonMap* photonMap,
-    float gatherRadius)
+    float gatherRadius,
+    const SpectralVolume* const* volumes, int numVolumes)
 {
     float w  = float(1.0 - u - v);
     float uf = float(u);
@@ -1209,6 +1227,52 @@ float SpectralIntegrator::_ShadeSpectral(
                     inShadow = (shadowHit.t < lightDist);
                 }
                 break;
+            }
+
+            // March shadow ray through volumes (cloud/fog shadows on surfaces)
+            if (!inShadow && numVolumes > 0 && shadowTransmit > 0.01f) {
+                GfVec3f sOrig = hitPos + N * 0.01f;
+                for (int vi = 0; vi < numVolumes; ++vi) {
+                    const SpectralVolume* vol = volumes[vi];
+                    if (!vol || !vol->IsValid()) continue;
+
+                    GfVec3f invDir(
+                        1.f/(std::abs(L[0])>1e-8f?L[0]:1e-8f),
+                        1.f/(std::abs(L[1])>1e-8f?L[1]:1e-8f),
+                        1.f/(std::abs(L[2])>1e-8f?L[2]:1e-8f));
+                    GfVec3f t0v(
+                        (vol->GetBboxMin()[0]-sOrig[0])*invDir[0],
+                        (vol->GetBboxMin()[1]-sOrig[1])*invDir[1],
+                        (vol->GetBboxMin()[2]-sOrig[2])*invDir[2]);
+                    GfVec3f t1v(
+                        (vol->GetBboxMax()[0]-sOrig[0])*invDir[0],
+                        (vol->GetBboxMax()[1]-sOrig[1])*invDir[1],
+                        (vol->GetBboxMax()[2]-sOrig[2])*invDir[2]);
+                    float tNear = std::max({std::min(t0v[0],t1v[0]),std::min(t0v[1],t1v[1]),std::min(t0v[2],t1v[2])});
+                    float tFar  = std::min({std::max(t0v[0],t1v[0]),std::max(t0v[1],t1v[1]),std::max(t0v[2],t1v[2])});
+                    tNear = std::max(tNear, 0.f);
+                    if (tNear >= tFar) continue;
+
+                    GfVec3f bSize = vol->GetBboxMax() - vol->GetBboxMin();
+                    float voxelSize = std::max({bSize[0]/std::max(1.f,float(vol->resX)),
+                                                bSize[1]/std::max(1.f,float(vol->resY)),
+                                                bSize[2]/std::max(1.f,float(vol->resZ))});
+                    float sDt = voxelSize * 2.f;
+                    int maxSS = std::min(32, int((tFar-tNear)/sDt)+1);
+
+                    for (int ss = 0; ss < maxSS; ++ss) {
+                        float st = tNear + ss * sDt;
+                        if (st >= tFar) break;
+                        GfVec3f sp = sOrig + L * st;
+                        GfVec3f suv = vol->WorldToNorm(sp);
+                        if (suv[0]<0||suv[0]>1||suv[1]<0||suv[1]>1||suv[2]<0||suv[2]>1) continue;
+                        float d = vol->SampleDensity(suv[0], suv[1], suv[2]) * vol->densityMult;
+                        if (d < 1e-5f) continue;
+                        shadowTransmit *= std::exp(-d * vol->extinction * sDt);
+                        if (shadowTransmit < 0.01f) break;
+                    }
+                    if (shadowTransmit < 0.01f) break;
+                }
             }
 
             if (!inShadow) {
@@ -1553,6 +1617,48 @@ float SpectralIntegrator::_ShadeSpectral(
                         inShadow = (shadowHit.t < lightDist);
                     }
                     break;
+                }
+
+                // March bounce shadow ray through volumes
+                if (!inShadow && numVolumes > 0 && shadowTransmit > 0.01f) {
+                    for (int vi = 0; vi < numVolumes; ++vi) {
+                        const SpectralVolume* vol = volumes[vi];
+                        if (!vol || !vol->IsValid()) continue;
+                        GfVec3f invDir(
+                            1.f/(std::abs(L[0])>1e-8f?L[0]:1e-8f),
+                            1.f/(std::abs(L[1])>1e-8f?L[1]:1e-8f),
+                            1.f/(std::abs(L[2])>1e-8f?L[2]:1e-8f));
+                        GfVec3f t0v(
+                            (vol->GetBboxMin()[0]-bounceOrigin[0])*invDir[0],
+                            (vol->GetBboxMin()[1]-bounceOrigin[1])*invDir[1],
+                            (vol->GetBboxMin()[2]-bounceOrigin[2])*invDir[2]);
+                        GfVec3f t1v(
+                            (vol->GetBboxMax()[0]-bounceOrigin[0])*invDir[0],
+                            (vol->GetBboxMax()[1]-bounceOrigin[1])*invDir[1],
+                            (vol->GetBboxMax()[2]-bounceOrigin[2])*invDir[2]);
+                        float tNear = std::max({std::min(t0v[0],t1v[0]),std::min(t0v[1],t1v[1]),std::min(t0v[2],t1v[2])});
+                        float tFar  = std::min({std::max(t0v[0],t1v[0]),std::max(t0v[1],t1v[1]),std::max(t0v[2],t1v[2])});
+                        tNear = std::max(tNear, 0.f);
+                        if (tNear >= tFar) continue;
+                        GfVec3f bSize = vol->GetBboxMax() - vol->GetBboxMin();
+                        float voxelSize = std::max({bSize[0]/std::max(1.f,float(vol->resX)),
+                                                    bSize[1]/std::max(1.f,float(vol->resY)),
+                                                    bSize[2]/std::max(1.f,float(vol->resZ))});
+                        float sDt = voxelSize * 2.f;
+                        int maxSS = std::min(32, int((tFar-tNear)/sDt)+1);
+                        for (int ss = 0; ss < maxSS; ++ss) {
+                            float st = tNear + ss * sDt;
+                            if (st >= tFar) break;
+                            GfVec3f sp = bounceOrigin + L * st;
+                            GfVec3f suv = vol->WorldToNorm(sp);
+                            if (suv[0]<0||suv[0]>1||suv[1]<0||suv[1]>1||suv[2]<0||suv[2]>1) continue;
+                            float d = vol->SampleDensity(suv[0], suv[1], suv[2]) * vol->densityMult;
+                            if (d < 1e-5f) continue;
+                            shadowTransmit *= std::exp(-d * vol->extinction * sDt);
+                            if (shadowTransmit < 0.01f) break;
+                        }
+                        if (shadowTransmit < 0.01f) break;
+                    }
                 }
 
                 if (!inShadow) {

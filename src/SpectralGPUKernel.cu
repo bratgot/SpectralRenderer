@@ -11,6 +11,13 @@ using namespace spectral_gpu;
 
 extern "C" { __constant__ LaunchParams params; }
 
+// Forward declarations for volume helpers (defined later, used in surface shadow code)
+static __forceinline__ __device__ void worldToVolUV(
+    const spectral_gpu::GPUVolume& vol, float px, float py, float pz,
+    float& u, float& v, float& w);
+static __forceinline__ __device__ float sampleDensity(
+    const spectral_gpu::GPUVolume& vol, float u, float v, float w);
+
 // ---------------------------------------------------------------------------
 // RNG
 // ---------------------------------------------------------------------------
@@ -573,6 +580,53 @@ static __forceinline__ __device__ float shadeHit(
             }
 
             if (!inShadow) {
+                // March shadow ray through volumes (cloud/fog shadows on surfaces)
+                if (params.numGpuVolumes > 0 && shadowTransmit > 0.01f) {
+                    for (int vi = 0; vi < params.numGpuVolumes; ++vi) {
+                        const GPUVolume& svol = params.gpuVolumes[vi];
+                        if (!svol.density) continue;
+
+                        // Ray-AABB for shadow ray
+                        float3 sInvDir = make_float3(
+                            1.f/(fabsf(L.x)>1e-8f?L.x:1e-8f),
+                            1.f/(fabsf(L.y)>1e-8f?L.y:1e-8f),
+                            1.f/(fabsf(L.z)>1e-8f?L.z:1e-8f));
+                        float3 st0=make_float3(
+                            (svol.bboxMin.x-hitPos.x)*sInvDir.x,
+                            (svol.bboxMin.y-hitPos.y)*sInvDir.y,
+                            (svol.bboxMin.z-hitPos.z)*sInvDir.z);
+                        float3 st1=make_float3(
+                            (svol.bboxMax.x-hitPos.x)*sInvDir.x,
+                            (svol.bboxMax.y-hitPos.y)*sInvDir.y,
+                            (svol.bboxMax.z-hitPos.z)*sInvDir.z);
+                        float stNear=fmaxf(fmaxf(fminf(st0.x,st1.x),fminf(st0.y,st1.y)),fminf(st0.z,st1.z));
+                        float stFar=fminf(fminf(fmaxf(st0.x,st1.x),fmaxf(st0.y,st1.y)),fmaxf(st0.z,st1.z));
+                        stNear=fmaxf(stNear,0.f);
+                        if (stNear >= stFar) continue;
+
+                        // Coarse march through volume
+                        float svoxel = fmaxf(fmaxf(
+                            (svol.bboxMax.x-svol.bboxMin.x)/svol.resX,
+                            (svol.bboxMax.y-svol.bboxMin.y)/svol.resY),
+                            (svol.bboxMax.z-svol.bboxMin.z)/svol.resZ);
+                        float sDt = svoxel * 2.f;
+                        int maxSS = min(32, int((stFar-stNear)/sDt)+1);
+                        for (int ss = 0; ss < maxSS; ++ss) {
+                            float st = stNear + ss * sDt;
+                            if (st >= stFar) break;
+                            float spx=hitPos.x+L.x*st, spy=hitPos.y+L.y*st, spz=hitPos.z+L.z*st;
+                            float su,sv,sw;
+                            worldToVolUV(svol, spx, spy, spz, su, sv, sw);
+                            if (su<0||su>1||sv<0||sv>1||sw<0||sw>1) continue;
+                            float d = sampleDensity(svol, su, sv, sw) * svol.densityMult;
+                            if (d < 1e-5f) continue;
+                            shadowTransmit *= expf(-d * svol.extinction * sDt);
+                            if (shadowTransmit < 0.01f) break;
+                        }
+                        if (shadowTransmit < 0.01f) break;
+                    }
+                }
+
                 float bsdf = evalBSDF(mat, N, V, L, lambda);
                 radiance += bsdf * lightEmission(light, lambda) * lightAttenuation(light, hitPos) * shadowTransmit;
             }
@@ -898,6 +952,31 @@ static __forceinline__ __device__ void marchSingleVolume(
                         if(shadowTrans<0.001f) break;
                     }
                 }
+
+                // Geometry occlusion: one optixTrace per light (not per step)
+                // Check if opaque geometry blocks light reaching this volume point
+                if (shadowTrans > 0.01f && params.hasRealGeometry) {
+                    float3 shadowDir = make_float3(-lDir.x, -lDir.y, -lDir.z);
+                    float3 shadowOrig = make_float3(px+shadowDir.x*0.01f, py+shadowDir.y*0.01f, pz+shadowDir.z*0.01f);
+                    unsigned int gp0=0,gp1=0,gp2=0,gp3=__float_as_uint(1e30f),gp4=0,gp5=0,gp6=0;
+                    optixTrace(params.traversable, shadowOrig, shadowDir,
+                               1e-3f, 1e30f, 0.f, OptixVisibilityMask(0xFF),
+                               OPTIX_RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+                               0, 1, 0, gp0,gp1,gp2,gp3,gp4,gp5,gp6);
+                    if (gp4 != 0u) {
+                        int gMatId = int(gp4) - 1;
+                        if (gMatId >= 0 && gMatId < int(params.materialCount)) {
+                            const GPUMaterial& gMat = params.materials[gMatId];
+                            if (gMat.opacity > 0.99f || gMat.metallic > 0.5f)
+                                shadowTrans = 0.f;
+                            else
+                                shadowTrans *= (1.f - gMat.opacity);
+                        } else {
+                            shadowTrans = 0.f;
+                        }
+                    }
+                }
+
                 float scatW=vol.scattering*density*phase*shadowTrans*powder;
                 stepRGB.x+=lCol.x*vol.scatterColor.x*scatW;
                 stepRGB.y+=lCol.y*vol.scatterColor.y*scatW;
@@ -965,6 +1044,30 @@ static __forceinline__ __device__ void marchSingleVolume(
                         if(shadowTrans<0.001f) break;
                     }
                 }
+
+                // Geometry occlusion for virtual light
+                if (shadowTrans > 0.01f && params.hasRealGeometry) {
+                    float3 shadowDir = make_float3(-lDir.x, -lDir.y, -lDir.z);
+                    float3 shadowOrig = make_float3(px+shadowDir.x*0.01f, py+shadowDir.y*0.01f, pz+shadowDir.z*0.01f);
+                    unsigned int gp0=0,gp1=0,gp2=0,gp3=__float_as_uint(1e30f),gp4=0,gp5=0,gp6=0;
+                    optixTrace(params.traversable, shadowOrig, shadowDir,
+                               1e-3f, 1e30f, 0.f, OptixVisibilityMask(0xFF),
+                               OPTIX_RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+                               0, 1, 0, gp0,gp1,gp2,gp3,gp4,gp5,gp6);
+                    if (gp4 != 0u) {
+                        int gMatId = int(gp4) - 1;
+                        if (gMatId >= 0 && gMatId < int(params.materialCount)) {
+                            const GPUMaterial& gMat = params.materials[gMatId];
+                            if (gMat.opacity > 0.99f || gMat.metallic > 0.5f)
+                                shadowTrans = 0.f;
+                            else
+                                shadowTrans *= (1.f - gMat.opacity);
+                        } else {
+                            shadowTrans = 0.f;
+                        }
+                    }
+                }
+
                 float vScatW=vol.scattering*density*phase*shadowTrans*powder;
                 stepRGB.x+=vlCol.x*vol.scatterColor.x*vScatW;
                 stepRGB.y+=vlCol.y*vol.scatterColor.y*vScatW;

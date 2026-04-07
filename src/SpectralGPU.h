@@ -133,6 +133,7 @@ private:
     unsigned int           _allocW = 0;
     unsigned int           _allocH = 0;
     unsigned int           _triCount = 0;
+    bool                   _hasRealGeometry = false;
     unsigned int           _materialCount = 0;
     unsigned int           _lightCount = 0;
     unsigned int           _textureCount = 0;

@@ -19,6 +19,7 @@ struct VolMergeEntry {
     pxr::GfVec3f rotate    = pxr::GfVec3f(0);
     pxr::GfVec3f scale     = pxr::GfVec3f(1);
     bool hasXform = false;
+    SpectralVDBRead* vdbRead = nullptr;  // source node for material lookup
 };
 
 class HDSPECTRAL_API SpectralVolMerge : public SourceGeomOp

@@ -146,6 +146,7 @@ struct LaunchParams {
     float3*            normals;
     int*               materialIds;
     unsigned int       triCount;
+    int                hasRealGeometry;  // 1 if scene has actual triangles (not dummy GAS)
 
     GPUMaterial*       materials;
     unsigned int       materialCount;
