@@ -120,6 +120,8 @@ private:
         CUdeviceptr d_temp     = 0;
         CUdeviceptr d_flame    = 0;
         size_t      cachedSize = 0;
+        unsigned int cachedChecksum = 0;
+        int         cachedResX = 0, cachedResY = 0, cachedResZ = 0;
     };
     DeviceVolume           _d_volumes[SPECTRAL_MAX_GPU_VOLUMES];
     int                    _numDeviceVolumes = 0;
@@ -134,6 +136,9 @@ private:
     unsigned int           _allocH = 0;
     unsigned int           _triCount = 0;
     bool                   _hasRealGeometry = false;
+    bool                   _gasBuilt = false;
+    unsigned int           _cachedSceneTriCount = UINT_MAX;
+    unsigned int           _cachedLightChecksum = 0;
     unsigned int           _materialCount = 0;
     unsigned int           _lightCount = 0;
     unsigned int           _textureCount = 0;

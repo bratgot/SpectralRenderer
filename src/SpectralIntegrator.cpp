@@ -528,13 +528,77 @@ void SpectralIntegrator::RenderFrame(
                                                 }
                                                 float shadowTrans = 1.f;
                                                 if (volume->shadowSteps>0 && volume->shadowDensity>0.01f) {
-                                                    GfVec3f sDir = -lDir;
-                                                    float sDt = bboxSize.GetLength()/float(volume->shadowSteps);
-                                                    for (int ss=1; ss<=volume->shadowSteps; ++ss) {
-                                                        GfVec3f sp = p+sDir*(sDt*ss); GfVec3f suv = volume->WorldToNorm(sp);
+                                                    GfVec3f sDir = GfVec3f(-lDir[0], -lDir[1], -lDir[2]);
+
+                                                    // Adaptive step size from voxel resolution (not bbox diagonal)
+                                                    float voxelSize = std::max({bboxSize[0]/std::max(1.f,float(volume->resX)),
+                                                                                bboxSize[1]/std::max(1.f,float(volume->resY)),
+                                                                                bboxSize[2]/std::max(1.f,float(volume->resZ))});
+                                                    float sDt = voxelSize * std::max(1.f, 32.f / std::max(1.f, float(volume->shadowSteps)));
+
+                                                    // Jitter first step to break banding
+                                                    unsigned int jSeed = unsigned(step*97 + li*53 + pixIdx*13) ^ 0xA3C59B2Du;
+                                                    auto qhash = [](unsigned int s) -> float {
+                                                        s = (s ^ 61u) ^ (s >> 16u); s *= 9u; s ^= s >> 4u;
+                                                        s *= 0x27d4eb2du; s ^= s >> 15u;
+                                                        return float(s) / float(0xFFFFFFFFu);
+                                                    };
+                                                    float jitter = qhash(jSeed) * sDt;
+
+                                                    // March through CURRENT volume toward light
+                                                    for (int ss=0; ss<volume->shadowSteps; ++ss) {
+                                                        float sT = sDt * (ss + 0.5f) + jitter;
+                                                        GfVec3f sp = p + sDir * sT;
+                                                        GfVec3f suv = volume->WorldToNorm(sp);
                                                         if (suv[0]<0||suv[0]>1||suv[1]<0||suv[1]>1||suv[2]<0||suv[2]>1) break;
-                                                        shadowTrans *= std::exp(-volume->SampleDensity(suv[0],suv[1],suv[2])*volume->extinction*volume->shadowDensity*sDt);
-                                                        if (shadowTrans<0.001f) break; } }
+                                                        float sd = volume->SampleDensity(suv[0],suv[1],suv[2]) * volume->densityMult;
+                                                        if (sd < 1e-5f) continue;  // skip empty — adaptive
+                                                        shadowTrans *= std::exp(-sd * volume->extinction * volume->shadowDensity * sDt);
+                                                        if (shadowTrans<0.001f) break;
+                                                    }
+
+                                                    // Cross-volume shadows: march through OTHER volumes toward light
+                                                    if (shadowTrans > 0.01f && numVolumes > 1) {
+                                                        for (int ovi = 0; ovi < numVolumes; ++ovi) {
+                                                            if (ovi == vi) continue;  // skip self
+                                                            const SpectralVolume* ovol = volumes[ovi];
+                                                            if (!ovol || !ovol->IsValid()) continue;
+
+                                                            // Ray-AABB test
+                                                            GfVec3f oInv(1.f/(std::abs(sDir[0])>1e-8f?sDir[0]:1e-8f),
+                                                                         1.f/(std::abs(sDir[1])>1e-8f?sDir[1]:1e-8f),
+                                                                         1.f/(std::abs(sDir[2])>1e-8f?sDir[2]:1e-8f));
+                                                            GfVec3f ot0((ovol->GetBboxMin()[0]-p[0])*oInv[0],
+                                                                        (ovol->GetBboxMin()[1]-p[1])*oInv[1],
+                                                                        (ovol->GetBboxMin()[2]-p[2])*oInv[2]);
+                                                            GfVec3f ot1((ovol->GetBboxMax()[0]-p[0])*oInv[0],
+                                                                        (ovol->GetBboxMax()[1]-p[1])*oInv[1],
+                                                                        (ovol->GetBboxMax()[2]-p[2])*oInv[2]);
+                                                            float otNear = std::max({std::min(ot0[0],ot1[0]),std::min(ot0[1],ot1[1]),std::min(ot0[2],ot1[2])});
+                                                            float otFar  = std::min({std::max(ot0[0],ot1[0]),std::max(ot0[1],ot1[1]),std::max(ot0[2],ot1[2])});
+                                                            otNear = std::max(otNear, 0.f);
+                                                            if (otNear >= otFar) continue;
+
+                                                            GfVec3f obSize = ovol->GetBboxMax() - ovol->GetBboxMin();
+                                                            float oVoxel = std::max({obSize[0]/std::max(1.f,float(ovol->resX)),
+                                                                                     obSize[1]/std::max(1.f,float(ovol->resY)),
+                                                                                     obSize[2]/std::max(1.f,float(ovol->resZ))});
+                                                            float oDt = oVoxel * 2.f;
+                                                            int oSteps = std::min(16, int((otFar-otNear)/oDt)+1);
+                                                            for (int os = 0; os < oSteps; ++os) {
+                                                                float ot = otNear + os * oDt;
+                                                                GfVec3f osp = p + sDir * ot;
+                                                                GfVec3f osuv = ovol->WorldToNorm(osp);
+                                                                if (osuv[0]<0||osuv[0]>1||osuv[1]<0||osuv[1]>1||osuv[2]<0||osuv[2]>1) continue;
+                                                                float od = ovol->SampleDensity(osuv[0],osuv[1],osuv[2]) * ovol->densityMult;
+                                                                if (od < 1e-5f) continue;
+                                                                shadowTrans *= std::exp(-od * ovol->extinction * oDt);
+                                                                if (shadowTrans < 0.001f) break;
+                                                            }
+                                                            if (shadowTrans < 0.001f) break;
+                                                        }
+                                                    }
+                                                }
 
                                                 // Geometry occlusion: trace BVH shadow ray from volume point toward light
                                                 if (shadowTrans > 0.01f && scene.TotalTriangles() > 0) {

@@ -3742,7 +3742,10 @@ void SpectralRenderIop::_LoadVDB()
     // Skip if already loaded for this frame
     int curFrame = int(outputContext().frame());
     if (_volume && _volume->IsValid() && _vdbLastLoadedFrame == curFrame) {
-        _applyVolumeShading(_volume);
+        // Only apply local shading for single-VDB path (not VolMerge)
+        if (_volumes.empty()) {
+            _applyVolumeShading(_volume);
+        }
         return;
     }
     _vdbLastLoadedFrame = curFrame;
@@ -3848,6 +3851,7 @@ void SpectralRenderIop::_LoadVDB()
 
         // Prefer VolMerge for multi-volume (handles transforms properly)
         if (volMerge) {
+            _cachedVolMerge = volMerge;
             int masterMaxRes = _GetMasterMaxRes();
             auto entries = volMerge->GetVolumes(int(outputContext().frame()), masterMaxRes);
 
@@ -3920,6 +3924,7 @@ void SpectralRenderIop::_LoadVDB()
         }
 
         // Fallback: individual VDBRead nodes
+        _cachedVolMerge = nullptr;
         if (!vdbReads.empty()) {
             _volumes.clear();
             int renderFrame = int(outputContext().frame());
@@ -4697,7 +4702,10 @@ void SpectralRenderIop::_EnsureFrameRendered()
 
     // Load volume — upgrade to full 128³ for render if currently at 64³ preview
     _LoadVDB();          // ensures volume is loaded (may be 64³ preview)
-    _LoadVDBForRender(); // upgrades to 128³ if needed
+    // Only upgrade resolution for single-VDB path (VolMerge handles its own resolution)
+    if (_volumes.empty()) {
+        _LoadVDBForRender(); // upgrades to 128³ if needed
+    }
 
     // Skip if no scene content (no geometry AND no volume)
     bool hasGeometry = _scene && _scene->TotalTriangles() > 0;
@@ -4803,6 +4811,51 @@ void SpectralRenderIop::_EnsureFrameRendered()
     // Volume already loaded at top of _EnsureFrameRendered
 
     // Build volume pointer array for multi-volume rendering
+    // Re-apply materials from VolMerge entries (prevents stale shader params)
+    if (!_volumes.empty() && _cachedVolMerge) {
+        int masterMaxRes = _GetMasterMaxRes();
+        auto entries = _cachedVolMerge->GetVolumes(int(outputContext().frame()), masterMaxRes);
+        // Collect materials from VolMerge inputs
+        std::vector<SpectralVolumeMaterial*> volMats;
+        for (int inp = 0; inp < _cachedVolMerge->inputs(); ++inp) {
+            Op* up = _cachedVolMerge->input(inp);
+            if (!up || up->node_disabled()) continue;
+            up->validate(true);
+            Op* cur = up;
+            for (int d = 0; d < 6 && cur; ++d) {
+                if (strcmp(cur->Class(), "SpectralVolumeMaterial") == 0) {
+                    volMats.push_back(static_cast<SpectralVolumeMaterial*>(cur));
+                    break;
+                }
+                cur = (cur->inputs() > 0) ? cur->input(0) : nullptr;
+            }
+        }
+        for (size_t vi = 0; vi < _volumes.size() && vi < entries.size(); ++vi) {
+            auto& e = entries[vi];
+            bool appliedMat = false;
+            if (e.vdbRead && e.vdbRead->inputs() > 0 && e.vdbRead->input(0)) {
+                Op* matOp = e.vdbRead->input(0);
+                if (matOp) matOp->validate(true);
+                Op* cur = matOp;
+                for (int d = 0; d < 4 && cur; ++d) {
+                    if (strcmp(cur->Class(), "SpectralVolumeMaterial") == 0) {
+                        _applyVolumeMaterialDirect(_volumes[vi],
+                            static_cast<SpectralVolumeMaterial*>(cur));
+                        appliedMat = true;
+                        break;
+                    }
+                    cur = (cur->inputs() > 0) ? cur->input(0) : nullptr;
+                }
+            }
+            if (!appliedMat) {
+                if ((int)vi < (int)volMats.size())
+                    _applyVolumeMaterialDirect(_volumes[vi], volMats[vi]);
+                else if (!volMats.empty())
+                    _applyVolumeMaterialDirect(_volumes[vi], volMats.back());
+            }
+        }
+    }
+
     std::vector<const pxr::SpectralVolume*> volPtrs;
     for (auto& v : _volumes) if (v) volPtrs.push_back(v.get());
     if (volPtrs.empty() && _volume) volPtrs.push_back(_volume.get());

@@ -42,8 +42,8 @@ PXR_NAMESPACE_USING_DIRECTIVE
 //   Flat RGBA output via engine() (Iop path).
 //   Deep output via doDeepEngine() (DeepOp path).
 //
-//   Input 0 (Scene): GeometryProviderI — optional
-//   Input 1 (Cam):   CameraOp          — optional
+//   Input 0 (Cam):   CameraOp          — optional (defaults to 24mm)
+//   Input 1 (Scene): GeometryProviderI — optional
 //   Input 2 (BG):    any Iop            — optional, sets resolution
 // ---------------------------------------------------------------------------
 using namespace DD::Image;
@@ -51,6 +51,7 @@ using namespace DD::Image;
 class SpectralEnvLight;
 class SpectralStudioLight;
 class SpectralVolumeMaterial;
+class SpectralVolMerge;
 
 class HDSPECTRAL_API SpectralRenderIop : public Iop, public DeepOp
 {
@@ -61,8 +62,8 @@ public:
     explicit SpectralRenderIop(Node* node);
     ~SpectralRenderIop() override;
 
-    // Input 0: Scene  (GeometryProviderI) — optional
-    // Input 1: Camera (CameraOp)          — optional
+    // Input 0: Camera (CameraOp)          — optional (defaults to 24mm)
+    // Input 1: Scene  (GeometryProviderI) — optional
     // Input 2: BG     (any Iop)           — optional, sets output resolution
     int  minimum_inputs()               const override { return 3; }
     int  maximum_inputs()               const override { return 3; }
@@ -356,6 +357,7 @@ private:
     // Cached light node pointers for 3D viewport drawing
     SpectralEnvLight*    _cachedEnvLight = nullptr;      // first, for GL preview
     SpectralStudioLight* _cachedStudioLight = nullptr;    // first, for GL preview
+    SpectralVolMerge*    _cachedVolMerge = nullptr;       // for material re-application
     std::vector<SpectralEnvLight*>    _allEnvLights;      // all, for additive rendering
     std::vector<SpectralStudioLight*> _allStudioLights;   // all, for additive rendering
     SpectralCamera                      _camera;

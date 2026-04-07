@@ -271,6 +271,92 @@ bool SpectralGPU::Initialize(const std::string& ptxSource)
 // ---------------------------------------------------------------------------
 bool SpectralGPU::BuildAccel(const SpectralScene& scene)
 {
+    // Skip full rebuild if geometry hasn't changed (volume-only scenes)
+    unsigned int newTriCount = scene.TotalTriangles();
+    if (_gasBuilt && newTriCount == _cachedSceneTriCount) {
+        const auto& lights = scene.GetLights();
+
+        // Checksum lights to skip re-upload when unchanged
+        unsigned int lightCheck = static_cast<unsigned int>(lights.size()) * 2654435761u;
+        for (size_t i = 0; i < lights.size(); ++i) {
+            union { float f; unsigned int u; } p;
+            p.f = lights[i].EffectiveIntensity(); lightCheck ^= p.u * (unsigned(i)*73856093u+1u);
+            p.f = lights[i].position[0]; lightCheck ^= p.u;
+            p.f = lights[i].color[0]; lightCheck ^= p.u * 19349663u;
+            p.f = lights[i].radius; lightCheck ^= p.u * 83492791u;
+        }
+        // Also checksum virtual light / SH state from dome lights
+        for (const auto& L : lights) {
+            if (L.type != pxr::SpectralLight::Type::Dome) continue;
+            union { float f; unsigned int u; } p;
+            p.f = L.envShadowSoftness; lightCheck ^= p.u * 49979693u;
+            if (L.envHasSH) { p.f = L.envSH[0][0]; lightCheck ^= p.u; }
+            lightCheck ^= static_cast<unsigned int>(L.envVirtualLights.size()) * 104729u;
+        }
+
+        bool lightsChanged = (lightCheck != _cachedLightChecksum);
+        if (lightsChanged) {
+            if (_d_lights) { cudaFree(reinterpret_cast<void*>(_d_lights)); _d_lights = 0; }
+            _lightCount = 0;
+            if (!lights.empty()) {
+                std::vector<spectral_gpu::GPULight> gpuLights(lights.size());
+                for (size_t i = 0; i < lights.size(); ++i) {
+                    gpuLights[i].type      = static_cast<int>(lights[i].type);
+                    gpuLights[i].position  = make_float3(lights[i].position[0], lights[i].position[1], lights[i].position[2]);
+                    gpuLights[i].direction = make_float3(lights[i].direction[0], lights[i].direction[1], lights[i].direction[2]);
+                    gpuLights[i].color     = make_float3(lights[i].color[0], lights[i].color[1], lights[i].color[2]);
+                    gpuLights[i].intensity = lights[i].EffectiveIntensity();
+                    gpuLights[i].colorTemperature = lights[i].colorTemperature;
+                    gpuLights[i].useColorTemp = lights[i].enableColorTemperature ? 1 : 0;
+                    gpuLights[i].radius    = lights[i].radius;
+                    gpuLights[i].width     = lights[i].width;
+                    gpuLights[i].height    = lights[i].height;
+                    gpuLights[i].cosConeAngle = lights[i]._cosConeAngle;
+                    gpuLights[i].cosPenumbra  = lights[i]._cosPenumbra;
+                }
+                size_t lightBytes = gpuLights.size() * sizeof(spectral_gpu::GPULight);
+                CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_lights), lightBytes));
+                CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_lights), gpuLights.data(),
+                                      lightBytes, cudaMemcpyHostToDevice));
+                _lightCount = static_cast<unsigned int>(gpuLights.size());
+            }
+            // Re-extract virtual lights + SH
+            _numVirtualLights = 0;
+            _hasEnvSH = false;
+            _envIntensityGPU = 1.f;
+            for (const auto& L : lights) {
+                if (L.type != pxr::SpectralLight::Type::Dome) continue;
+                int nVL = std::min(8, (int)L.envVirtualLights.size());
+                for (int i = 0; i < nVL && _numVirtualLights < 8; ++i) {
+                    auto& vl = L.envVirtualLights[i];
+                    _virtualLights[_numVirtualLights].dir[0] = vl.direction[0];
+                    _virtualLights[_numVirtualLights].dir[1] = vl.direction[1];
+                    _virtualLights[_numVirtualLights].dir[2] = vl.direction[2];
+                    _virtualLights[_numVirtualLights].color[0] = vl.color[0] * L.EffectiveIntensity();
+                    _virtualLights[_numVirtualLights].color[1] = vl.color[1] * L.EffectiveIntensity();
+                    _virtualLights[_numVirtualLights].color[2] = vl.color[2] * L.EffectiveIntensity();
+                    _virtualLights[_numVirtualLights].radius = L.envShadowSoftness * 50.f;
+                    ++_numVirtualLights;
+                }
+                if (L.envHasSH) {
+                    for (int b = 0; b < 4; ++b) {
+                        _envSH[b][0] = L.envSH[b][0] * L.EffectiveIntensity();
+                        _envSH[b][1] = L.envSH[b][1] * L.EffectiveIntensity();
+                        _envSH[b][2] = L.envSH[b][2] * L.EffectiveIntensity();
+                    }
+                    _hasEnvSH = true;
+                }
+                _envIntensityGPU = L.EffectiveIntensity();
+            }
+            _cachedLightChecksum = lightCheck;
+            fprintf(stderr, "SpectralGPU: GAS cached, uploaded %u lights\n", _lightCount);
+        } else {
+            fprintf(stderr, "SpectralGPU: GAS + lights cached\n");
+        }
+        return true;
+    }
+    _cachedSceneTriCount = newTriCount;
+
     _FreeAccel();
     if (_d_normals)     { cudaFree(reinterpret_cast<void*>(_d_normals));     _d_normals = 0; }
     if (_d_materialIds) { cudaFree(reinterpret_cast<void*>(_d_materialIds)); _d_materialIds = 0; }
@@ -558,6 +644,7 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
     _sbt.hitgroupRecordCount         = 1;
 
     fprintf(stderr, "SpectralGPU: built OptiX GAS for %u triangles\n", _triCount);
+    _gasBuilt = true;
     return true;
 }
 
@@ -685,42 +772,66 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
         gv.msApprox = volume->msApprox ? 1 : 0;
         gv.msTint = make_float3(volume->msTint[0], volume->msTint[1], volume->msTint[2]);
 
-        // Upload density grid
+        // Upload density grid — skip if data unchanged (shader-only changes)
         size_t densBytes = volume->density.size() * sizeof(float);
         auto& dv = _d_volumes[gi];
-        if (dv.cachedSize != densBytes) {
-            if (dv.d_density) cudaFree(reinterpret_cast<void*>(dv.d_density));
-            dv.d_density = 0;
-            CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&dv.d_density), densBytes));
-            dv.cachedSize = densBytes;
+
+        // Quick checksum: sample a few density values to detect data changes
+        // (pointer changes every frame because VolMerge creates new objects)
+        unsigned int dataCheck = volume->resX * 73856093u ^ volume->resY * 19349663u ^ volume->resZ * 83492791u;
+        if (!volume->density.empty()) {
+            size_t n = volume->density.size();
+            // Sample 8 spread-out values for fast fingerprint
+            for (int ci = 0; ci < 8; ++ci) {
+                size_t idx = (ci * n) / 8;
+                union { float f; unsigned int u; } pun;
+                pun.f = volume->density[idx];
+                dataCheck ^= pun.u * (ci * 2654435761u + 1u);
+            }
         }
-        CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(dv.d_density), volume->density.data(),
-                              densBytes, cudaMemcpyHostToDevice));
+        bool gridChanged = (dv.cachedResX != volume->resX ||
+                           dv.cachedResY != volume->resY ||
+                           dv.cachedResZ != volume->resZ ||
+                           dv.cachedChecksum != dataCheck);
+
+        if (gridChanged) {
+            if (dv.cachedSize != densBytes) {
+                if (dv.d_density) cudaFree(reinterpret_cast<void*>(dv.d_density));
+                dv.d_density = 0;
+                CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&dv.d_density), densBytes));
+                dv.cachedSize = densBytes;
+            }
+            CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(dv.d_density), volume->density.data(),
+                                  densBytes, cudaMemcpyHostToDevice));
+            dv.cachedResX = volume->resX;
+            dv.cachedResY = volume->resY;
+            dv.cachedResZ = volume->resZ;
+            dv.cachedChecksum = dataCheck;
+
+            // Temperature — only re-upload when grid changed
+            if (dv.d_temp) { cudaFree(reinterpret_cast<void*>(dv.d_temp)); dv.d_temp = 0; }
+            if (!volume->temperature.empty()) {
+                size_t tempBytes = volume->temperature.size() * sizeof(float);
+                CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&dv.d_temp), tempBytes));
+                CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(dv.d_temp), volume->temperature.data(),
+                                      tempBytes, cudaMemcpyHostToDevice));
+            }
+
+            // Flame — only re-upload when grid changed
+            if (dv.d_flame) { cudaFree(reinterpret_cast<void*>(dv.d_flame)); dv.d_flame = 0; }
+            if (!volume->flame.empty()) {
+                size_t flameBytes = volume->flame.size() * sizeof(float);
+                CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&dv.d_flame), flameBytes));
+                CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(dv.d_flame), volume->flame.data(),
+                                      flameBytes, cudaMemcpyHostToDevice));
+            }
+
+            fprintf(stderr, "SpectralGPU: volume[%d] uploaded %dx%dx%d (%.1f MB)\n",
+                    gi, gv.resX, gv.resY, gv.resZ, densBytes / (1024.f * 1024.f));
+        }
         gv.density = reinterpret_cast<float*>(dv.d_density);
-
-        // Temperature
-        gv.temperature = nullptr;
-        if (!volume->temperature.empty()) {
-            size_t tempBytes = volume->temperature.size() * sizeof(float);
-            if (dv.d_temp) cudaFree(reinterpret_cast<void*>(dv.d_temp));
-            dv.d_temp = 0;
-            CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&dv.d_temp), tempBytes));
-            CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(dv.d_temp), volume->temperature.data(),
-                                  tempBytes, cudaMemcpyHostToDevice));
-            gv.temperature = reinterpret_cast<float*>(dv.d_temp);
-        }
-
-        // Flame
-        gv.flame = nullptr;
-        if (!volume->flame.empty()) {
-            size_t flameBytes = volume->flame.size() * sizeof(float);
-            if (dv.d_flame) cudaFree(reinterpret_cast<void*>(dv.d_flame));
-            dv.d_flame = 0;
-            CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&dv.d_flame), flameBytes));
-            CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(dv.d_flame), volume->flame.data(),
-                                  flameBytes, cudaMemcpyHostToDevice));
-            gv.flame = reinterpret_cast<float*>(dv.d_flame);
-        }
+        gv.temperature = dv.d_temp ? reinterpret_cast<float*>(dv.d_temp) : nullptr;
+        gv.flame = dv.d_flame ? reinterpret_cast<float*>(dv.d_flame) : nullptr;
 
         // Also populate legacy single-volume fields for volume[0]
         if (gi == 0) {
@@ -751,8 +862,6 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
             launchParams.volOrigBboxMin = gv.origBboxMin; launchParams.volOrigBboxMax = gv.origBboxMax;
         }
 
-        fprintf(stderr, "SpectralGPU: volume[%d] uploaded %dx%dx%d (%.1f MB)\n",
-                gi, gv.resX, gv.resY, gv.resZ, densBytes / (1024.f * 1024.f));
         launchParams.numGpuVolumes = gi + 1;
     }
 
@@ -762,6 +871,8 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
         if (_d_volumes[vi].d_temp)    { cudaFree(reinterpret_cast<void*>(_d_volumes[vi].d_temp));    _d_volumes[vi].d_temp = 0; }
         if (_d_volumes[vi].d_flame)   { cudaFree(reinterpret_cast<void*>(_d_volumes[vi].d_flame));   _d_volumes[vi].d_flame = 0; }
         _d_volumes[vi].cachedSize = 0;
+        _d_volumes[vi].cachedChecksum = 0;
+        _d_volumes[vi].cachedResX = _d_volumes[vi].cachedResY = _d_volumes[vi].cachedResZ = 0;
     }
     _numDeviceVolumes = launchParams.numGpuVolumes;
 

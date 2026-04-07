@@ -942,14 +942,53 @@ static __forceinline__ __device__ void marchSingleVolume(
                 float shadowTrans=1.f;
                 if (vol.shadowSteps>0 && vol.shadowDensity>0.01f) {
                     float3 sDir=make_float3(-lDir.x,-lDir.y,-lDir.z);
-                    float sDt=bboxDiag/(float)vol.shadowSteps;
-                    for (int ss=1;ss<=vol.shadowSteps;++ss) {
-                        float spx=px+sDir.x*sDt*ss,spy=py+sDir.y*sDt*ss,spz=pz+sDir.z*sDt*ss;
+                    float voxelSz = fmaxf(fmaxf(
+                        (vol.bboxMax.x-vol.bboxMin.x)/vol.resX,
+                        (vol.bboxMax.y-vol.bboxMin.y)/vol.resY),
+                        (vol.bboxMax.z-vol.bboxMin.z)/vol.resZ);
+                    float sDt = voxelSz * fmaxf(1.f, 32.f / fmaxf(1.f, float(vol.shadowSteps)));
+                    unsigned int jSeed = seed + step*97u + li*53u;
+                    float jitter = hashRNG(jSeed) * sDt;
+                    for (int ss=0;ss<vol.shadowSteps;++ss) {
+                        float sT = sDt * (ss + 0.5f) + jitter;
+                        float spx=px+sDir.x*sT, spy=py+sDir.y*sT, spz=pz+sDir.z*sT;
                         float su,sv,sw;
                         worldToVolUV(vol, spx, spy, spz, su, sv, sw);
                         if(su<0||su>1||sv<0||sv>1||sw<0||sw>1) break;
-                        shadowTrans*=expf(-sampleDensity(vol,su,sv,sw)*vol.extinction*vol.shadowDensity*sDt);
+                        float sd = sampleDensity(vol,su,sv,sw) * vol.densityMult;
+                        if (sd < 1e-5f) continue;
+                        shadowTrans*=expf(-sd*vol.extinction*vol.shadowDensity*sDt);
                         if(shadowTrans<0.001f) break;
+                    }
+                    // Cross-volume shadows
+                    if (shadowTrans > 0.01f && params.numGpuVolumes > 1) {
+                        for (int ovi = 0; ovi < params.numGpuVolumes; ++ovi) {
+                            if (&params.gpuVolumes[ovi] == &vol) continue;
+                            const GPUVolume& ovol = params.gpuVolumes[ovi];
+                            if (!ovol.density) continue;
+                            float3 oInv=make_float3(1.f/(fabsf(sDir.x)>1e-8f?sDir.x:1e-8f),1.f/(fabsf(sDir.y)>1e-8f?sDir.y:1e-8f),1.f/(fabsf(sDir.z)>1e-8f?sDir.z:1e-8f));
+                            float3 ot0=make_float3((ovol.bboxMin.x-px)*oInv.x,(ovol.bboxMin.y-py)*oInv.y,(ovol.bboxMin.z-pz)*oInv.z);
+                            float3 ot1=make_float3((ovol.bboxMax.x-px)*oInv.x,(ovol.bboxMax.y-py)*oInv.y,(ovol.bboxMax.z-pz)*oInv.z);
+                            float otNear=fmaxf(fmaxf(fminf(ot0.x,ot1.x),fminf(ot0.y,ot1.y)),fminf(ot0.z,ot1.z));
+                            float otFar=fminf(fminf(fmaxf(ot0.x,ot1.x),fmaxf(ot0.y,ot1.y)),fmaxf(ot0.z,ot1.z));
+                            otNear=fmaxf(otNear,0.f);
+                            if (otNear >= otFar) continue;
+                            float oVoxel=fmaxf(fmaxf((ovol.bboxMax.x-ovol.bboxMin.x)/ovol.resX,(ovol.bboxMax.y-ovol.bboxMin.y)/ovol.resY),(ovol.bboxMax.z-ovol.bboxMin.z)/ovol.resZ);
+                            float oDt=oVoxel*2.f;
+                            int oSteps=min(16,int((otFar-otNear)/oDt)+1);
+                            for (int os=0;os<oSteps;++os) {
+                                float ot=otNear+os*oDt;
+                                float osx=px+sDir.x*ot,osy=py+sDir.y*ot,osz=pz+sDir.z*ot;
+                                float osu,osv,osw;
+                                worldToVolUV(ovol,osx,osy,osz,osu,osv,osw);
+                                if(osu<0||osu>1||osv<0||osv>1||osw<0||osw>1) continue;
+                                float od=sampleDensity(ovol,osu,osv,osw)*ovol.densityMult;
+                                if(od<1e-5f) continue;
+                                shadowTrans*=expf(-od*ovol.extinction*oDt);
+                                if(shadowTrans<0.001f) break;
+                            }
+                            if(shadowTrans<0.001f) break;
+                        }
                     }
                 }
 
@@ -1034,14 +1073,53 @@ static __forceinline__ __device__ void marchSingleVolume(
                 float shadowTrans=1.f;
                 if (vol.shadowSteps>0 && vol.shadowDensity>0.01f) {
                     float3 sDir=make_float3(-lDir.x,-lDir.y,-lDir.z);
-                    float sDt=bboxDiag/(float)vol.shadowSteps;
-                    for (int ss=1;ss<=vol.shadowSteps;++ss) {
-                        float spx=px+sDir.x*sDt*ss,spy=py+sDir.y*sDt*ss,spz=pz+sDir.z*sDt*ss;
+                    float voxelSz = fmaxf(fmaxf(
+                        (vol.bboxMax.x-vol.bboxMin.x)/vol.resX,
+                        (vol.bboxMax.y-vol.bboxMin.y)/vol.resY),
+                        (vol.bboxMax.z-vol.bboxMin.z)/vol.resZ);
+                    float sDt = voxelSz * fmaxf(1.f, 32.f / fmaxf(1.f, float(vol.shadowSteps)));
+                    unsigned int jSeed = seed + step*97u + (vli+100u)*53u;
+                    float jitter = hashRNG(jSeed) * sDt;
+                    for (int ss=0;ss<vol.shadowSteps;++ss) {
+                        float sT = sDt * (ss + 0.5f) + jitter;
+                        float spx=px+sDir.x*sT, spy=py+sDir.y*sT, spz=pz+sDir.z*sT;
                         float su,sv,sw;
                         worldToVolUV(vol, spx, spy, spz, su, sv, sw);
                         if(su<0||su>1||sv<0||sv>1||sw<0||sw>1) break;
-                        shadowTrans*=expf(-sampleDensity(vol,su,sv,sw)*vol.extinction*vol.shadowDensity*sDt);
+                        float sd = sampleDensity(vol,su,sv,sw) * vol.densityMult;
+                        if (sd < 1e-5f) continue;
+                        shadowTrans*=expf(-sd*vol.extinction*vol.shadowDensity*sDt);
                         if(shadowTrans<0.001f) break;
+                    }
+                    // Cross-volume shadows for virtual lights
+                    if (shadowTrans > 0.01f && params.numGpuVolumes > 1) {
+                        for (int ovi = 0; ovi < params.numGpuVolumes; ++ovi) {
+                            if (&params.gpuVolumes[ovi] == &vol) continue;
+                            const GPUVolume& ovol = params.gpuVolumes[ovi];
+                            if (!ovol.density) continue;
+                            float3 oInv=make_float3(1.f/(fabsf(sDir.x)>1e-8f?sDir.x:1e-8f),1.f/(fabsf(sDir.y)>1e-8f?sDir.y:1e-8f),1.f/(fabsf(sDir.z)>1e-8f?sDir.z:1e-8f));
+                            float3 ot0=make_float3((ovol.bboxMin.x-px)*oInv.x,(ovol.bboxMin.y-py)*oInv.y,(ovol.bboxMin.z-pz)*oInv.z);
+                            float3 ot1=make_float3((ovol.bboxMax.x-px)*oInv.x,(ovol.bboxMax.y-py)*oInv.y,(ovol.bboxMax.z-pz)*oInv.z);
+                            float otNear=fmaxf(fmaxf(fminf(ot0.x,ot1.x),fminf(ot0.y,ot1.y)),fminf(ot0.z,ot1.z));
+                            float otFar=fminf(fminf(fmaxf(ot0.x,ot1.x),fmaxf(ot0.y,ot1.y)),fmaxf(ot0.z,ot1.z));
+                            otNear=fmaxf(otNear,0.f);
+                            if (otNear >= otFar) continue;
+                            float oVoxel=fmaxf(fmaxf((ovol.bboxMax.x-ovol.bboxMin.x)/ovol.resX,(ovol.bboxMax.y-ovol.bboxMin.y)/ovol.resY),(ovol.bboxMax.z-ovol.bboxMin.z)/ovol.resZ);
+                            float oDt=oVoxel*2.f;
+                            int oSteps=min(16,int((otFar-otNear)/oDt)+1);
+                            for (int os=0;os<oSteps;++os) {
+                                float ot=otNear+os*oDt;
+                                float osx=px+sDir.x*ot,osy=py+sDir.y*ot,osz=pz+sDir.z*ot;
+                                float osu,osv,osw;
+                                worldToVolUV(ovol,osx,osy,osz,osu,osv,osw);
+                                if(osu<0||osu>1||osv<0||osv>1||osw<0||osw>1) continue;
+                                float od=sampleDensity(ovol,osu,osv,osw)*ovol.densityMult;
+                                if(od<1e-5f) continue;
+                                shadowTrans*=expf(-od*ovol.extinction*oDt);
+                                if(shadowTrans<0.001f) break;
+                            }
+                            if(shadowTrans<0.001f) break;
+                        }
                     }
                 }
 
