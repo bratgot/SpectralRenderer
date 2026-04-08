@@ -72,6 +72,8 @@ struct GPULight {
 struct CameraParams {
     float projInverse[16];
     float viewToWorld[16];
+    float viewToWorldClose[16]; // camera at shutter close (motion blur)
+    int   cameraMblur;          // 0 = off, 1 = on
     float fStop;            // 0 = pinhole
     float focusDistance;
     float focalLength;      // mm
@@ -128,6 +130,19 @@ struct GPUVolume {
     // Phase 14: multiple scattering approximation
     int     msApprox;
     float3  msTint;
+    // Phase 17: fire & explosions
+    float   flameOpacity;       // flame grid reduces density (0=none, 1=full burnaway)
+    float   flameTempMin;       // flame grid min temp (K) — default 1200
+    float   flameTempMax;       // flame grid max temp (K) — default 3500
+    float   coreGlow;           // dense core emission multiplier
+    float   coreTemp;           // dense core temperature (K) — default 4000
+    int     cherenkov;          // enable Cherenkov blue glow
+    float   cherenkovStrength;  // Cherenkov intensity
+    float   cherenkovThreshold; // density threshold for Cherenkov activation
+    // Grid mixer
+    float   densityMix;
+    float   tempMix;
+    float   flameMix;
 };
 
 struct LaunchParams {

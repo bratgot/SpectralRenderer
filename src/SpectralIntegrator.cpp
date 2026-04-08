@@ -438,6 +438,19 @@ void SpectralIntegrator::RenderFrame(
                                             continue;
                                         }
 
+                                        // Phase 17: flame opacity — fire burns away density
+                                        float flameVal = volume->SampleFlame(uv[0], uv[1], uv[2]) * volume->flameMix;
+                                        if (volume->flameOpacity > 0.01f && flameVal > 0.01f) {
+                                            density *= std::max(0.f, 1.f - flameVal * volume->flameOpacity);
+                                            if (density < 1e-5f) continue;
+                                        }
+
+                                        // Grid mixer: fade density
+                                        if (volume->densityMix < 0.99f) {
+                                            density *= volume->densityMix;
+                                            if (density < 1e-5f) continue;
+                                        }
+
                                         // Track distance to first dense voxel (for depth AOV)
                                         if (t < volFirstDenseT) volFirstDenseT = t;
 
@@ -651,7 +664,7 @@ void SpectralIntegrator::RenderFrame(
                                         // Emission RGB — bypasses absorption
                                         if (rmode==0||rmode==4||rmode==5||volume->emissionIntensity>0.01f) {
                                             GfVec3f emRGB(0.f);
-                                            float temp = volume->SampleTemperature(uv[0],uv[1],uv[2]);
+                                            float temp = volume->SampleTemperature(uv[0],uv[1],uv[2]) * volume->tempMix;
                                             if (temp > volume->tempMin) {
                                                 float tN = std::min((temp-volume->tempMin)/(volume->tempMax-volume->tempMin+1e-6f),1.f);
                                                 float T = volume->tempMin+tN*(volume->tempMax-volume->tempMin);
@@ -659,11 +672,24 @@ void SpectralIntegrator::RenderFrame(
                                                 if (T<=6600.f) { r=1; g=std::max(0.f,std::min(0.39f*std::log(t100)-0.63f,1.f)); b=std::max(0.f,std::min(0.54f*std::log(t100-10.f)-1.19f,1.f)); }
                                                 else { r=std::max(0.f,std::min(1.29f*std::pow(t100-60.f,-0.13f),1.f)); g=std::max(0.f,std::min(1.13f*std::pow(t100-60.f,-0.07f),1.f)); b=1; }
                                                 emRGB += GfVec3f(r,g,b)*(volume->emissionIntensity*tN); }
-                                            float fl = volume->SampleFlame(uv[0],uv[1],uv[2]);
-                                            if (fl>0.01f) {
-                                                float T2=1500.f+fl*2000.f, t100=T2/100.f;
-                                                float r=1,g=std::max(0.f,std::min(0.39f*std::log(t100)-0.63f,1.f)),b=std::max(0.f,std::min(0.54f*std::log(t100-10.f)-1.19f,1.f));
-                                                emRGB += GfVec3f(r,g,b)*(volume->flameIntensity*fl); }
+                                            // Phase 17: flame grid emission with artist temp range
+                                            if (flameVal>0.01f) {
+                                                float T2=volume->flameTempMin+flameVal*(volume->flameTempMax-volume->flameTempMin);
+                                                float t100=T2/100.f;
+                                                float r=1,g=std::max(0.f,std::min(0.39f*std::log(t100)-0.63f,1.f)),
+                                                      b=std::max(0.f,std::min(0.54f*std::log(t100-10.f)-1.19f,1.f));
+                                                emRGB += GfVec3f(r,g,b)*(volume->flameIntensity*flameVal); }
+                                            // Phase 17: dense core glow — hot interior emission
+                                            if (volume->coreGlow > 0.01f && density > 0.3f) {
+                                                float coreFrac = std::min((density - 0.3f) / 0.7f, 1.f);
+                                                float T3 = volume->coreTemp, t100=T3/100.f;
+                                                float r=1,g=std::max(0.f,std::min(0.39f*std::log(t100)-0.63f,1.f)),
+                                                      b=std::max(0.f,std::min(0.54f*std::log(t100-10.f)-1.19f,1.f));
+                                                emRGB += GfVec3f(r,g,b)*(volume->coreGlow*coreFrac*coreFrac); }
+                                            // Phase 17: Cherenkov radiation — blue glow at high density
+                                            if (volume->cherenkov && density > volume->cherenkovThreshold) {
+                                                float chFrac = std::min((density - volume->cherenkovThreshold) / (1.f - volume->cherenkovThreshold + 1e-6f), 1.f);
+                                                emRGB += GfVec3f(0.15f, 0.4f, 1.f) * (volume->cherenkovStrength * chFrac * chFrac); }
                                             volRGB += emRGB*(volTransmittance*density*dt*volume->intensity);
                                         }
                                         volTransmittance *= stepTrans;
@@ -1003,6 +1029,17 @@ GfRay SpectralIntegrator::_MakeRay(
 
     GfVec3d origin = cam.viewToWorld.Transform(nearPos);
     GfVec3d target = cam.viewToWorld.Transform(farPos);
+
+    // Camera motion blur: lerp between open and close camera positions
+    if (cam.cameraMblur) {
+        unsigned int mblurSeed = px * 73856093u ^ py * 19349663u;
+        double t = double(mblurSeed & 0xFFFFu) / 65535.0;
+        GfVec3d originClose = cam.viewToWorldClose.Transform(nearPos);
+        GfVec3d targetClose = cam.viewToWorldClose.Transform(farPos);
+        origin = origin * (1.0 - t) + originClose * t;
+        target = target * (1.0 - t) + targetClose * t;
+    }
+
     GfVec3d dir    = target - origin;
 
     // DOF: thin lens model

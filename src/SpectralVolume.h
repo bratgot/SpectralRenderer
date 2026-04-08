@@ -158,6 +158,21 @@ struct SpectralVolume {
     bool  msApprox       = true;
     GfVec3f msTint       = GfVec3f(1.f, 0.97f, 0.95f);
 
+    // Phase 17: fire & explosions
+    float flameOpacity     = 0.f;       // flame burns away density (0=none, 1=full)
+    float flameTempMin     = 1200.f;    // flame grid min temperature (K)
+    float flameTempMax     = 3500.f;    // flame grid max temperature (K)
+    float coreGlow         = 0.f;       // dense core emission multiplier
+    float coreTemp         = 4000.f;    // dense core temperature (K)
+    bool  cherenkov        = false;     // Cherenkov blue glow
+    float cherenkovStrength  = 1.f;     // Cherenkov intensity
+    float cherenkovThreshold = 0.5f;    // density threshold for activation
+
+    // Grid mixer
+    float densityMix       = 1.f;     // fade density grid (0=off, 1=full)
+    float tempMix          = 1.f;     // fade temperature grid
+    float flameMix         = 1.f;     // fade flame grid
+
     // Procedural detail noise (fBm)
     bool  noiseEnable    = false;
     bool  noiseNormalize = true;

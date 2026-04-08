@@ -136,7 +136,7 @@ private:
     int   _refractionBounces = 8;  // separate limit for glass paths
 
     // Built-in lighting rig
-    int    _skyPreset = 0;         // 0=off, 1=custom, 2+ presets
+    int    _skyPreset = 2;         // 0=off, 1=custom, 2=Clear Day, 3+ presets
     double _skyMix = 1.0;
     double _sunElevation = 45.0;
     double _sunAzimuth = 180.0;
@@ -181,7 +181,7 @@ private:
     double _vdbAnisotropy = 0.0;
     double _vdbStepSize = 0.0;       // 0 = auto
     int    _vdbMaxSteps = 256;
-    int    _vdbVolRes = 3;           // 0=1/8, 1=1/4, 2=1/2, 3=Full, 4=Native
+    int    _vdbVolRes = 0;           // 0=1/8, 1=1/4, 2=1/2, 3=Full, 4=Native
     const char* _vdbMemInfo = "";
     double _vdbEmissionIntensity = 2.0;
     double _vdbTempMin = 500.0;
@@ -263,6 +263,9 @@ private:
     pxr::GfVec3f _vdbSceneRotate = pxr::GfVec3f(0.f);
     pxr::GfVec3f _vdbSceneScale = pxr::GfVec3f(1.f);
     DD::Image::Hash _scnInputHash;  // detect upstream changes (GeoTransform etc.)
+    // Bbox lock: stabilize volume position across animated frames
+    bool _hasRefVolCenter = false;
+    pxr::GfVec3f _refVolCenter = pxr::GfVec3f(0.f);
     bool   _vdbIsPreviewRes = false;
     bool   _vdbIsMetadataOnly = false;  // true when only bbox loaded (fast scrub)
     int    _vdbLastLoadedFrame = -999;  // cached to avoid reload
@@ -328,6 +331,9 @@ private:
     bool  _motionBlur = false;
     int   _shutterPreset = 1;  // 0=Start,1=Centre,2=End,3=Custom
     int   _motionSamples = 3;
+    // Camera motion blur
+    bool  _cameraMblur = false;
+    int   _cameraMblurQuality = 4;  // extra samples for camera blur
 
     int   _progressiveSppDone = 0;      // samples accumulated so far
     bool  _denoise = false;             // OptiX AI denoiser

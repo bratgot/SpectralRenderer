@@ -324,14 +324,21 @@ const char* SpectralVDBRead::_GetDensityName() const
 {
     if (_densityOverride && strlen(_densityOverride) > 0) return _densityOverride;
     if (_densityGridIdx > 0) return kGridMenu[_densityGridIdx];
-    return nullptr;
+    return nullptr;  // (none) selected — no density grid
 }
 
 const char* SpectralVDBRead::_GetTempName() const
 {
     if (_tempOverride && strlen(_tempOverride) > 0) return _tempOverride;
     if (_tempGridIdx > 0) return kGridMenu[_tempGridIdx];
-    return nullptr;
+    return nullptr;  // (none) selected — no temp grid
+}
+
+const char* SpectralVDBRead::_GetFlameName() const
+{
+    if (_flameOverride && strlen(_flameOverride) > 0) return _flameOverride;
+    if (_flameGridIdx > 0) return kGridMenu[_flameGridIdx];
+    return nullptr;  // (none) selected — no flame grid
 }
 
 std::shared_ptr<pxr::SpectralVolume> SpectralVDBRead::GetVolume()                        { _LoadVDB(); return _volume; }
@@ -391,6 +398,11 @@ void SpectralVDBRead::knobs(Knob_Callback f)
 
     Bool_knob(f, &_autoSequence, "auto_sequence", "auto sequence");
     ClearFlags(f, Knob::STARTLINE);
+    Bool_knob(f, &_lockBbox, "lock_bbox", "lock bbox");
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "Lock world-space bounding box to first loaded frame.\n"
+               "Prevents volume shifting during animated sequences\n"
+               "where the active voxel region changes per frame.");
     Button(f, "reload", "Reload");
     ClearFlags(f, Knob::STARTLINE);
 
@@ -522,15 +534,24 @@ int SpectralVDBRead::knob_changed(Knob* k)
     if (k->is("detect_range"))   { _DetectFrameRange(); return 1; }
     if (k->is("reload")) {
         _loadedPath.clear(); _loadedMaxRes = 0; _volume.reset();
+        _hasRefBbox = false;  // re-capture bbox from fresh load
         _LoadVDB(); _UpdateVDBInfo();
         return 1;
     }
     if (k->is("file")) {
-        _loadedPath.clear(); _loadedMaxRes = 0; _UpdateVDBInfo();
+        _loadedPath.clear(); _loadedMaxRes = 0;
+        _hasRefBbox = false;  // new file = new reference bbox
+        _UpdateVDBInfo();
+        return 1;
+    }
+    if (k->is("lock_bbox")) {
+        _hasRefBbox = false;  // re-capture on next load
+        _loadedPath.clear(); _loadedMaxRes = 0;
         return 1;
     }
     if (k->is("auto_sequence")) {
         if (_autoSequence) {
+            // Turning ON: save current file as orig, replace digits with ####
             std::string p(_filePath ? _filePath : "");
             if (Knob* ok = knob("orig_file")) ok->set_text(p.c_str());
             if (!p.empty()) {
@@ -548,11 +569,19 @@ int SpectralVDBRead::knob_changed(Knob* k)
             }
             _DetectFrameRange();
         } else {
-            const char* orig = _origFile ? _origFile : "";
-            if (orig[0]) {
-                if (Knob* fk = knob("file")) fk->set_text(orig);
-                if (Knob* ok = knob("orig_file")) ok->set_text("");
+            // Turning OFF: resolve current frame to get the actual file path
+            int frame = int(outputContext().frame()) + _frameOffset;
+            std::string resolved = _resolveFramePath(frame);
+            if (!resolved.empty()) {
+                if (Knob* fk = knob("file")) fk->set_text(resolved.c_str());
+            } else {
+                // Fallback to orig file if resolve fails
+                const char* orig = _origFile ? _origFile : "";
+                if (orig[0]) {
+                    if (Knob* fk = knob("file")) fk->set_text(orig);
+                }
             }
+            if (Knob* ok = knob("orig_file")) ok->set_text("");
         }
         _loadedPath.clear(); _loadedMaxRes = 0; _UpdateVDBInfo();
         return 1;
@@ -790,12 +819,18 @@ void SpectralVDBRead::_LoadVDBAtFrame(int frame, int maxRes)
                       else frame=_firstFrame; break; }
         }
     }
+    // Skip if density grid is "(none)"
+    if (!_GetDensityName()) { _volume.reset(); return; }
+
     std::string resolved = _autoSequence ? _resolveFramePath(frame) : std::string(_filePath);
     if (resolved.empty()) return;
     int curRes = (_volume && _volume->IsValid()) ? std::max({_volume->resX, _volume->resY, _volume->resZ}) : 0;
     if (_volume && _volume->IsValid() && _loadedPath == resolved && _loadedMaxRes == maxRes) return;
     _volume = pxr::SpectralVDBLoader::Load(resolved.c_str(), _GetDensityName(), _GetTempName(), maxRes);
     if (_volume) {
+        // Clear temp/flame if those grids are set to "(none)"
+        if (!_GetTempName()) _volume->temperature.clear();
+        if (!_GetFlameName()) _volume->flame.clear();
         _loadedPath = resolved;
         _loadedMaxRes = maxRes;
         fprintf(stderr, "SpectralVDBRead: loaded %dx%dx%d (maxRes=%d)\n",
@@ -808,12 +843,15 @@ void SpectralVDBRead::_LoadVDB()
 {
 #ifdef SPECTRAL_HAS_VDB
     if (!_filePath || strlen(_filePath) == 0) { _volume.reset(); return; }
+    if (!_GetDensityName()) { _volume.reset(); return; }  // density = "(none)"
     int frame = _clampedFrame(); if (frame < 0) { _volume.reset(); return; }
     std::string resolved = _autoSequence ? _resolveFramePath(frame) : std::string(_filePath);
     if (resolved.empty()) return;
     if (_volume && _volume->IsValid() && _loadedPath == resolved) return;
-    _volume = pxr::SpectralVDBLoader::Load(resolved.c_str(), _GetDensityName(), _GetTempName());
+    _volume = pxr::SpectralVDBLoader::Load(resolved.c_str(), _GetDensityName(), _GetTempName(), GetMaxRes());
     if (_volume) {
+        if (!_GetTempName()) _volume->temperature.clear();
+        if (!_GetFlameName()) _volume->flame.clear();
         _loadedPath = resolved;
         _loadedMaxRes = -1;  // mark as preview/default — render path will reload at requested res
     }

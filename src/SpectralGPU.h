@@ -120,8 +120,8 @@ private:
         CUdeviceptr d_temp     = 0;
         CUdeviceptr d_flame    = 0;
         size_t      cachedSize = 0;
-        unsigned int cachedChecksum = 0;
-        int         cachedResX = 0, cachedResY = 0, cachedResZ = 0;
+        size_t      cachedTempSize = 0;
+        size_t      cachedFlameSize = 0;
     };
     DeviceVolume           _d_volumes[SPECTRAL_MAX_GPU_VOLUMES];
     int                    _numDeviceVolumes = 0;

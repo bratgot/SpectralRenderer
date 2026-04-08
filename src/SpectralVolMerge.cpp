@@ -166,6 +166,7 @@ std::vector<VolMergeEntry> SpectralVolMerge::GetVolumes(int frame, int maxRes)
         }
 
         if (vdbRead && !vdbRead->node_disabled()) {
+            vdbRead->validate(true);
             // Master maxRes caps per-node resolution (Phase 13)
             int nodeRes = vdbRead->GetMaxRes();
             int effectiveRes = std::min(maxRes, nodeRes);

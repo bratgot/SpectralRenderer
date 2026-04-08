@@ -982,6 +982,12 @@ void SpectralRenderIop::knobs(Knob_Callback f)
     ClearFlags(f, Knob::STARTLINE);
     Tooltip(f, "Time samples across shutter. 2 = fast. 3 = good. 5 = smooth.");
 
+    // ─── Camera Motion Blur (TODO) ─────────────────────────────────
+    Bool_knob(f, &_cameraMblur, "camera_mblur", "camera blur");
+    SetFlags(f, Knob::INVISIBLE);
+    Int_knob(f, &_cameraMblurQuality, "camera_mblur_quality", "quality");
+    SetFlags(f, Knob::INVISIBLE);
+
 }
 
 int SpectralRenderIop::knob_changed(Knob* k)
@@ -1371,6 +1377,7 @@ void SpectralRenderIop::_validate(bool forReal)
         _progressiveSppDone = 0;
         _vdbLastLoadedFrame = -999; // force VDB reload for new frame
         _volume.reset();
+        _volumes.clear();  // clear all volumes so VolMerge reloads
     }
     // ------------------------------------------------------------------
     // Determine output format:
@@ -1500,6 +1507,18 @@ void SpectralRenderIop::_validate(bool forReal)
             _vdbPreviewPoints.clear();
             scnChanged = true;
         }
+    } else if (_scnInputHash != Hash()) {
+        // scn input was connected, now disconnected — clear volumes
+        _scnInputHash = Hash();
+        _volumes.clear();
+        _volume.reset();
+        _cachedVolMerge = nullptr;
+        _hasRefVolCenter = false;
+        _vdbLastLoadedFrame = -999;
+        _frameReady.store(false);
+        _vdbPreviewDirty = true;
+        _vdbPreviewPoints.clear();
+        scnChanged = true;
     }
 
     if (forReal || scnChanged) {
@@ -3401,6 +3420,7 @@ void SpectralRenderIop::_BuildCameraFromInput()
     _camera.focalLength = static_cast<float>(cam->focal_length());
 
     _cameraFromInput = true;
+    _camera.cameraMblur = false;  // TODO: camera motion blur (needs proper axis chain evaluation)
 
     GfVec3d camPos = _camera.viewToWorld.ExtractTranslation();
     fprintf(stderr, "SpectralRender: camera from input at (%.2f, %.2f, %.2f)\n",
@@ -3466,6 +3486,15 @@ void SpectralRenderIop::append(Hash& hash)
     hash.append(outputContext().frame());
     hash.append(_vdbFrameOffset);
     if (_vdbFile) hash.append(_vdbFile);
+    hash.append((int)_volumes.size());
+    // Hash scn input connection + disabled state
+    Op* scn = (inputs() > 1) ? input(1) : nullptr;
+    if (scn) {
+        hash.append(scn->hash());
+        hash.append(scn->node_disabled() ? 1 : 0);
+    } else {
+        hash.append(0);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3499,29 +3528,18 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
 
     float kPi = 3.14159265f;
 
-    // ─── Volume point cloud + bbox (all volumes) ────────────────────
-    // Draw bbox wireframe for each volume in _volumes
+    // ─── Volume bbox + point cloud (all volumes) ────────────────────
     for (size_t vi = 0; vi < _volumes.size(); ++vi) {
         auto& vol = _volumes[vi];
         if (!vol || !vol->HasBbox()) continue;
 
-        glPushMatrix();
-        // Apply per-volume transform
-        if (vol->hasTransform) {
-            pxr::GfVec3f center = (vol->bboxMin + vol->bboxMax) * 0.5f;
-            glTranslatef(vol->translate[0], vol->translate[1], vol->translate[2]);
-            glTranslatef(center[0], center[1], center[2]);
-            glRotatef(vol->rotate[0], 1, 0, 0);
-            glRotatef(vol->rotate[1], 0, 1, 0);
-            glRotatef(vol->rotate[2], 0, 0, 1);
-            glScalef(vol->scale[0], vol->scale[1], vol->scale[2]);
-            glTranslatef(-center[0], -center[1], -center[2]);
-        }
+        // Use transformed bbox for wireframe (matches render)
+        pxr::GfVec3f bMin = vol->GetBboxMin();
+        pxr::GfVec3f bMax = vol->GetBboxMax();
 
         if (_vdbShowBbox) {
-            float x0=vol->bboxMin[0], y0=vol->bboxMin[1], z0=vol->bboxMin[2];
-            float x1=vol->bboxMax[0], y1=vol->bboxMax[1], z1=vol->bboxMax[2];
-            // Subtle grey wireframe
+            float x0=bMin[0], y0=bMin[1], z0=bMin[2];
+            float x1=bMax[0], y1=bMax[1], z1=bMax[2];
             float hue = float(vi) * 0.3f;
             glColor4f(0.4f+hue*0.2f, 0.6f, 0.4f+hue*0.1f, 0.35f);
             glLineWidth(1.f);
@@ -3535,98 +3553,70 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
             glEnd();
         }
 
-        glPopMatrix();
-    }
+        // Point cloud — budget split across volumes, skip during playback
+        if (_vdbShowPoints && !_vdbIsMetadataOnly && vol->IsValid()) {
+            if (_vdbPreviewDirty || _vdbPreviewPoints.empty()) {
+                _vdbPreviewPoints.clear(); _vdbMaxDensity = 1e-6f;
 
-    // Point cloud for primary volume (too expensive for all)
-    if (_volume && _volume->HasBbox() && _vdbShowPoints && !_vdbIsMetadataOnly) {
-        if (_vdbHasSceneXform) {
-            pxr::GfVec3f center = (_volume->bboxMin + _volume->bboxMax) * 0.5f;
-            glPushMatrix();
-            glTranslatef(_vdbSceneTranslate[0], _vdbSceneTranslate[1], _vdbSceneTranslate[2]);
-            glTranslatef(center[0], center[1], center[2]);
-            glRotatef(_vdbSceneRotate[0], 1, 0, 0);
-            glRotatef(_vdbSceneRotate[1], 0, 1, 0);
-            glRotatef(_vdbSceneRotate[2], 0, 0, 1);
-            glScalef(_vdbSceneScale[0], _vdbSceneScale[1], _vdbSceneScale[2]);
-            glTranslatef(-center[0], -center[1], -center[2]);
-        }
-
-    float co[8][3];
-    for (int i = 0; i < 8; ++i) {
-        co[i][0] = (i & 1) ? _volume->bboxMax[0] : _volume->bboxMin[0];
-        co[i][1] = (i & 2) ? _volume->bboxMax[1] : _volume->bboxMin[1];
-        co[i][2] = (i & 4) ? _volume->bboxMax[2] : _volume->bboxMin[2];
-    }
-    static const int edges[12][2] = {
-        {0,1},{2,3},{4,5},{6,7},{0,2},{1,3},{4,6},{5,7},{0,4},{1,5},{2,6},{3,7}
-    };
-
-    if (_vdbShowBbox) {
-        glLineWidth(1.5f); glColor3f(0, 1, 0);
-        glBegin(GL_LINES);
-        for (int e = 0; e < 12; ++e) { glVertex3fv(co[edges[e][0]]); glVertex3fv(co[edges[e][1]]); }
-        glEnd();
-    }
-
-    if (_vdbShowPoints && !_vdbIsMetadataOnly) {
-        if (_vdbPreviewDirty || _vdbPreviewPoints.empty()) {
-            _vdbPreviewPoints.clear(); _vdbMaxDensity = 1e-6f;
-            pxr::GfVec3f bMin = _volume->bboxMin, bSz = _volume->bboxMax - _volume->bboxMin;
-            int step = std::max(1, int(1.f / float(std::max(0.05, _vdbPointDensity))));
-            for (int iz = 0; iz < _volume->resZ; iz += step)
-                for (int iy = 0; iy < _volume->resY; iy += step)
-                    for (int ix = 0; ix < _volume->resX; ix += step) {
-                        float u = float(ix)/_volume->resX, v = float(iy)/_volume->resY, w = float(iz)/_volume->resZ;
-                        float d = _volume->SampleDensity(u, v, w);
-                        if (d < 0.01f) continue;
-                        if (d > _vdbMaxDensity) _vdbMaxDensity = d;
-                        VDBPreviewPoint pt; pt.x = bMin[0]+u*bSz[0]; pt.y = bMin[1]+v*bSz[1]; pt.z = bMin[2]+w*bSz[2]; pt.density = d;
-                        _vdbPreviewPoints.push_back(pt);
-                    }
-            _vdbPreviewDirty = false;
-        }
-        if (!_vdbPreviewPoints.empty()) {
-            glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-            glPointSize(float(_vdbPointSize)); glEnable(GL_POINT_SMOOTH);
-            float inv = 1.f / _vdbMaxDensity;
-            glBegin(GL_POINTS);
-            for (const auto& pt : _vdbPreviewPoints) {
-                float t = std::min(pt.density * inv, 1.f);
-                float r, g, b;
-                switch (_vdbRenderMode) {
-                    case 1: // Greyscale
-                        r = g = b = t;
-                        break;
-                    case 3: // Cool — blue → cyan → white
-                        r = std::max(0.f, std::min((t-.5f)*2.f, 1.f));
-                        g = std::max(0.f, std::min((t-.25f)*2.f, 1.f));
-                        b = std::min(t*2.f, 1.f);
-                        break;
-                    case 4: // Blackbody — red → orange → yellow
-                        r = std::min(t*2.f, 1.f);
-                        g = std::max(0.f, std::min((t-.3f)*2.f, 1.f));
-                        b = std::max(0.f, std::min((t-.7f)*3.f, 1.f));
-                        break;
-                    case 2: // Heat ramp
-                        r = std::min(t*3.f, 1.f);
-                        g = std::max(0.f, std::min((t-.33f)*3.f, 1.f));
-                        b = std::max(0.f, std::min((t-.66f)*3.f, 1.f));
-                        break;
-                    default: // Lit (0), Explosion (5) — tinted by scatter color
-                        r = t * _vdbScatterColor[0];
-                        g = t * _vdbScatterColor[1];
-                        b = t * _vdbScatterColor[2];
-                        break;
+                int maxPointsPerVol = std::max(100, 5000 / std::max(1, (int)_volumes.size()));
+                for (size_t vj = 0; vj < _volumes.size(); ++vj) {
+                    auto& v = _volumes[vj];
+                    if (!v || !v->IsValid()) continue;
+                    int totalVoxels = v->resX * v->resY * v->resZ;
+                    int step = std::max(1, (int)std::cbrt(double(totalVoxels) / maxPointsPerVol));
+                    pxr::GfVec3f vMin = v->bboxMin, vSz = v->bboxMax - v->bboxMin;
+                    for (int iz = 0; iz < v->resZ; iz += step)
+                        for (int iy = 0; iy < v->resY; iy += step)
+                            for (int ix = 0; ix < v->resX; ix += step) {
+                                float u = float(ix)/v->resX, uv = float(iy)/v->resY, w = float(iz)/v->resZ;
+                                float d = v->SampleDensity(u, uv, w);
+                                if (d < 0.01f) continue;
+                                if (d > _vdbMaxDensity) _vdbMaxDensity = d;
+                                // Transform point to world space
+                                pxr::GfVec3f localP(vMin[0]+u*vSz[0], vMin[1]+uv*vSz[1], vMin[2]+w*vSz[2]);
+                                pxr::GfVec3f worldP = v->hasTransform
+                                    ? (v->_center + pxr::GfVec3f(
+                                        v->_rotM[0]*(localP[0]-((v->bboxMin[0]+v->bboxMax[0])*0.5f))*v->scale[0] +
+                                        v->_rotM[1]*(localP[1]-((v->bboxMin[1]+v->bboxMax[1])*0.5f))*v->scale[1] +
+                                        v->_rotM[2]*(localP[2]-((v->bboxMin[2]+v->bboxMax[2])*0.5f))*v->scale[2],
+                                        v->_rotM[3]*(localP[0]-((v->bboxMin[0]+v->bboxMax[0])*0.5f))*v->scale[0] +
+                                        v->_rotM[4]*(localP[1]-((v->bboxMin[1]+v->bboxMax[1])*0.5f))*v->scale[1] +
+                                        v->_rotM[5]*(localP[2]-((v->bboxMin[2]+v->bboxMax[2])*0.5f))*v->scale[2],
+                                        v->_rotM[6]*(localP[0]-((v->bboxMin[0]+v->bboxMax[0])*0.5f))*v->scale[0] +
+                                        v->_rotM[7]*(localP[1]-((v->bboxMin[1]+v->bboxMax[1])*0.5f))*v->scale[1] +
+                                        v->_rotM[8]*(localP[2]-((v->bboxMin[2]+v->bboxMax[2])*0.5f))*v->scale[2]))
+                                    : localP;
+                                VDBPreviewPoint pt;
+                                pt.x = worldP[0]; pt.y = worldP[1]; pt.z = worldP[2];
+                                pt.density = d;
+                                _vdbPreviewPoints.push_back(pt);
+                            }
                 }
-                glColor4f(r, g, b, .15f+.85f*t);
-                glVertex3f(pt.x, pt.y, pt.z);
+                _vdbPreviewDirty = false;
             }
-            glEnd(); glDisable(GL_BLEND);
+            if (!_vdbPreviewPoints.empty()) {
+                glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+                glPointSize(float(_vdbPointSize)); glEnable(GL_POINT_SMOOTH);
+                float inv = 1.f / _vdbMaxDensity;
+                glBegin(GL_POINTS);
+                for (const auto& pt : _vdbPreviewPoints) {
+                    float t = std::min(pt.density * inv, 1.f);
+                    float r, g, b;
+                    switch (_vdbRenderMode) {
+                        case 1: r = g = b = t; break;
+                        case 3: r=std::max(0.f,std::min((t-.5f)*2.f,1.f)); g=std::max(0.f,std::min((t-.25f)*2.f,1.f)); b=std::min(t*2.f,1.f); break;
+                        case 4: r=std::min(t*2.f,1.f); g=std::max(0.f,std::min((t-.3f)*2.f,1.f)); b=std::max(0.f,std::min((t-.7f)*3.f,1.f)); break;
+                        case 2: r=std::min(t*3.f,1.f); g=std::max(0.f,std::min((t-.33f)*3.f,1.f)); b=std::max(0.f,std::min((t-.66f)*3.f,1.f)); break;
+                        default: r=t; g=t*0.9f; b=t*0.7f; break;
+                    }
+                    glColor4f(r, g, b, .15f+.85f*t);
+                    glVertex3f(pt.x, pt.y, pt.z);
+                }
+                glEnd(); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            }
+            break; // only build point cloud once (covers all volumes)
         }
     }
-    if (_vdbHasSceneXform) glPopMatrix();
-    } // end if(_volume && _vdbShowPoints)
 
     // ─── Light preview (subtle, professional) ────────────────────────
 
@@ -3930,41 +3920,52 @@ void SpectralRenderIop::_LoadVDB()
             int renderFrame = int(outputContext().frame());
             int masterMaxRes = _GetMasterMaxRes();
 
-            // For each VDBRead, find its GeoTransform by walking from GeoScene inputs
-            // (same approach as VolMerge — reads transform knobs directly)
+            // For each VDBRead, find its GeoTransform by walking from scn input
             struct VDBWithXform { SpectralVDBRead* vdb; Op* chainTop; };
             std::vector<VDBWithXform> vdbEntries;
-            for (int inp = 0; inp < (input(1) ? input(1)->inputs() : 0); ++inp) {
-                Op* up = input(1)->input(inp);
-                if (!up) continue;
-                Op* cur = up;
-                SpectralVDBRead* vdb = nullptr;
-                for (int d = 0; d < 4 && cur; ++d) {
-                    if (strcmp(cur->Class(), "SpectralVDBRead") == 0 && !cur->node_disabled()) {
-                        vdb = static_cast<SpectralVDBRead*>(cur);
-                        break;
+
+            // Walk from scn input itself (may be GeoTransform → VDBRead)
+            Op* scnOp = input(1);
+            if (scnOp) {
+                // Check scnOp and its chain for VDBReads
+                std::vector<Op*> toSearch;
+                toSearch.push_back(scnOp);
+                // Also check scnOp's inputs (for GeoScene-style multi-input)
+                for (int inp = 0; inp < scnOp->inputs(); ++inp)
+                    if (scnOp->input(inp)) toSearch.push_back(scnOp->input(inp));
+
+                for (Op* startOp : toSearch) {
+                    Op* cur = startOp;
+                    SpectralVDBRead* vdb = nullptr;
+                    for (int d = 0; d < 6 && cur; ++d) {
+                        if (strcmp(cur->Class(), "SpectralVDBRead") == 0 && !cur->node_disabled()) {
+                            vdb = static_cast<SpectralVDBRead*>(cur);
+                            break;
+                        }
+                        cur = (cur->inputs() > 0) ? cur->input(0) : nullptr;
                     }
-                    cur = (cur->inputs() > 0) ? cur->input(0) : nullptr;
+                    if (vdb) vdbEntries.push_back({vdb, startOp});
                 }
-                if (vdb) vdbEntries.push_back({vdb, up});
             }
-            // Fallback: use discovered vdbReads if GeoScene walk found nothing
+            // Fallback: use discovered vdbReads if chain walk found nothing
             if (vdbEntries.empty()) {
                 for (auto* vdb : vdbReads) vdbEntries.push_back({vdb, nullptr});
             }
 
             for (size_t vi = 0; vi < vdbEntries.size(); ++vi) {
                 auto& entry = vdbEntries[vi];
+                entry.vdb->validate(true);
                 int nodeRes = entry.vdb->GetMaxRes();
                 int effectiveRes = std::min(masterMaxRes, nodeRes);
                 auto vol = entry.vdb->GetVolumeAtFrame(renderFrame, effectiveRes);
                 if (vol && vol->IsValid()) {
                     _applyVolumeShading(vol, entry.vdb);
 
-                    // Read GeoTransform from the chain (walk from chainTop to VDBRead)
+                    // Read GeoTransform from the chain (walk from chainTop DOWN to VDBRead)
                     if (entry.chainTop) {
                         Op* cur = entry.chainTop;
-                        for (int d = 0; d < 4 && cur; ++d) {
+                        for (int d = 0; d < 6 && cur; ++d) {
+                            if (cur == entry.vdb) break;  // reached VDBRead, stop
                             if (strcmp(cur->Class(), "GeoTransform") == 0 ||
                                 strcmp(cur->Class(), "TransformGeo") == 0) {
                                 pxr::GfVec3f t(0), r(0), s(1);
@@ -3990,6 +3991,27 @@ void SpectralRenderIop::_LoadVDB()
                     }
 
                     _volumes.push_back(vol);
+
+                    // Bbox lock: stabilize world-space position across frames
+                    // Applied AFTER GeoTransform to avoid rotation amplification
+                    if (entry.vdb->GetLockBbox()) {
+                        pxr::GfVec3f curCenter = (vol->GetBboxMin() + vol->GetBboxMax()) * 0.5f;
+                        if (!_hasRefVolCenter) {
+                            _refVolCenter = curCenter;
+                            _hasRefVolCenter = true;
+                        } else {
+                            pxr::GfVec3f offset = _refVolCenter - curCenter;
+                            if (vol->hasTransform) {
+                                vol->xfBboxMin += offset;
+                                vol->xfBboxMax += offset;
+                                vol->_center += offset;
+                            } else {
+                                vol->bboxMin += offset;
+                                vol->bboxMax += offset;
+                            }
+                        }
+                    }
+
                     fprintf(stderr, "SpectralRender: vol[%d] %dx%dx%d bbox(%.1f,%.1f,%.1f)-(%.1f,%.1f,%.1f)\n",
                             (int)vi, vol->resX, vol->resY, vol->resZ,
                             vol->GetBboxMin()[0], vol->GetBboxMin()[1], vol->GetBboxMin()[2],
@@ -4008,6 +4030,15 @@ void SpectralRenderIop::_LoadVDB()
                     v->extinction, v->scattering, v->intensity, v->envIntensity, v->envDiffuse);
             }
             return;
+        }
+
+        // No VDBRead or VolMerge found in scn chain — clear stale volumes
+        if (_volumes.size() > 0 || _volume) {
+            _volumes.clear();
+            _volume.reset();
+            _vdbPreviewDirty = true;
+            _vdbPreviewPoints.clear();
+            fprintf(stderr, "SpectralRender: no volumes in scn chain — cleared\n");
         }
     }
 }
@@ -4120,6 +4151,19 @@ void SpectralRenderIop::_applyVolumeMaterialDirect(
         vol->noiseRoughness = float(mat->noiseRoughness);
         vol->msApprox = mat->msApprox;
         vol->msTint = pxr::GfVec3f(mat->msTint[0], mat->msTint[1], mat->msTint[2]);
+        // Phase 17: fire & explosions
+        vol->flameOpacity = float(mat->flameOpacity);
+        vol->flameTempMin = float(mat->flameTempMin);
+        vol->flameTempMax = float(mat->flameTempMax);
+        vol->coreGlow = float(mat->coreGlow);
+        vol->coreTemp = float(mat->coreTemp);
+        vol->cherenkov = mat->cherenkov;
+        vol->cherenkovStrength = float(mat->cherenkovStrength);
+        vol->cherenkovThreshold = float(mat->cherenkovThreshold);
+        // Grid mixer
+        vol->densityMix = float(mat->densityMix);
+        vol->tempMix = float(mat->tempMix);
+        vol->flameMix = float(mat->flameMix);
     }
     // Always from SpectralRender (rendering quality, not look)
     vol->stepSize = float(_vdbStepSize);
@@ -4210,6 +4254,19 @@ void SpectralRenderIop::_applyVolumeShading(std::shared_ptr<pxr::SpectralVolume>
         // Multiple scattering
         vol->msApprox = mat->msApprox;
         vol->msTint = pxr::GfVec3f(mat->msTint[0], mat->msTint[1], mat->msTint[2]);
+        // Phase 17: fire & explosions
+        vol->flameOpacity = float(mat->flameOpacity);
+        vol->flameTempMin = float(mat->flameTempMin);
+        vol->flameTempMax = float(mat->flameTempMax);
+        vol->coreGlow = float(mat->coreGlow);
+        vol->coreTemp = float(mat->coreTemp);
+        vol->cherenkov = mat->cherenkov;
+        vol->cherenkovStrength = float(mat->cherenkovStrength);
+        vol->cherenkovThreshold = float(mat->cherenkovThreshold);
+        // Grid mixer
+        vol->densityMix = float(mat->densityMix);
+        vol->tempMix = float(mat->tempMix);
+        vol->flameMix = float(mat->flameMix);
     } else {
         // Fall back to SpectralRender's own Volumes tab knobs
         vol->extinction = float(_vdbExtinction);
@@ -4709,8 +4766,11 @@ void SpectralRenderIop::_EnsureFrameRendered()
 
     // Skip if no scene content (no geometry AND no volume)
     bool hasGeometry = _scene && _scene->TotalTriangles() > 0;
-    bool hasVolume = _volume && _volume->IsValid();
+    bool hasVolume = !_volumes.empty() || (_volume && _volume->IsValid());
     if (!hasGeometry && !hasVolume) {
+        // Clear framebuffer to black/transparent so viewer updates
+        if (!_frameBuffer.empty())
+            std::fill(_frameBuffer.begin(), _frameBuffer.end(), 0.f);
         _frameReady.store(true);
         return;
     }
@@ -4778,6 +4838,10 @@ void SpectralRenderIop::_EnsureFrameRendered()
 
     // Progressive rendering: first pass is a fast preview
     int renderSpp = _samples;
+    // Camera motion blur: multiply samples for quality
+    if (_cameraMblur && _camera.cameraMblur) {
+        renderSpp = std::max(renderSpp, renderSpp * _cameraMblurQuality / 4);
+    }
     if (_progressive && _progressiveSppDone == 0 && _samples > 8) {
         renderSpp = 8;  // fast preview pass
     }
@@ -4811,10 +4875,33 @@ void SpectralRenderIop::_EnsureFrameRendered()
     // Volume already loaded at top of _EnsureFrameRendered
 
     // Build volume pointer array for multi-volume rendering
-    // Re-apply materials from VolMerge entries (prevents stale shader params)
+    // Re-load volumes at render resolution and re-apply materials
     if (!_volumes.empty() && _cachedVolMerge) {
         int masterMaxRes = _GetMasterMaxRes();
         auto entries = _cachedVolMerge->GetVolumes(int(outputContext().frame()), masterMaxRes);
+
+        // Replace _volumes with render-resolution volumes from VolMerge
+        _volumes.clear();
+        for (auto& e : entries) {
+            if (e.volume && e.volume->IsValid()) {
+                _volumes.push_back(e.volume);
+                // Bbox lock: stabilize position (post-transform)
+                if (e.vdbRead && e.vdbRead->GetLockBbox() && _hasRefVolCenter) {
+                    pxr::GfVec3f curCenter = (e.volume->GetBboxMin() + e.volume->GetBboxMax()) * 0.5f;
+                    pxr::GfVec3f offset = _refVolCenter - curCenter;
+                    if (e.volume->hasTransform) {
+                        e.volume->xfBboxMin += offset;
+                        e.volume->xfBboxMax += offset;
+                        e.volume->_center += offset;
+                    } else {
+                        e.volume->bboxMin += offset;
+                        e.volume->bboxMax += offset;
+                    }
+                }
+            }
+        }
+        _volume = _volumes.empty() ? nullptr : _volumes[0];
+
         // Collect materials from VolMerge inputs
         std::vector<SpectralVolumeMaterial*> volMats;
         for (int inp = 0; inp < _cachedVolMerge->inputs(); ++inp) {

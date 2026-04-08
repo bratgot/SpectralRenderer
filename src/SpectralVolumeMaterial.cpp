@@ -79,10 +79,26 @@ void SpectralVolumeMaterial::knobs(Knob_Callback f)
     Divider(f, "Preset");
     static const char* const presetNames[] = {
         "Custom",
+        // Smoke
+        "\xe2\x94\x80\xe2\x94\x80 Smoke \xe2\x94\x80\xe2\x94\x80",
         "Light Smoke", "Dense Smoke", "Industrial",
-        "Campfire", "Explosion", "Pyroclastic",
+        // Fire
+        "\xe2\x94\x80\xe2\x94\x80 Fire \xe2\x94\x80\xe2\x94\x80",
+        "Candle", "Campfire", "Torch", "Wildfire", "Explosion", "Pyroclastic",
+        // Nuclear
+        "\xe2\x94\x80\xe2\x94\x80 Nuclear \xe2\x94\x80\xe2\x94\x80",
+        "Little Boy", "Thermonuclear", "Rocket Engine",
+        // Fantasy
+        "\xe2\x94\x80\xe2\x94\x80 Fantasy \xe2\x94\x80\xe2\x94\x80",
+        "Wizard Fireball", "Plasma Orb", "Cherenkov Reactor",
+        // Clouds
+        "\xe2\x94\x80\xe2\x94\x80 Clouds \xe2\x94\x80\xe2\x94\x80",
         "Cumulus", "Cirrus", "Stratus", "Storm Cloud",
+        // Atmosphere
+        "\xe2\x94\x80\xe2\x94\x80 Atmosphere \xe2\x94\x80\xe2\x94\x80",
         "Fog", "Ground Mist", "Haze", "Dust Storm",
+        // Effects
+        "\xe2\x94\x80\xe2\x94\x80 Effects \xe2\x94\x80\xe2\x94\x80",
         "Nebula", "Underwater Caustic",
         nullptr
     };
@@ -91,6 +107,8 @@ void SpectralVolumeMaterial::knobs(Knob_Callback f)
                "Adjusting any parameter switches to Custom.\n\n"
                "Smoke \xe2\x80\x94 varying density and absorption\n"
                "Fire \xe2\x80\x94 blackbody emission with temperature grids\n"
+               "Nuclear \xe2\x80\x94 extreme temperature, core glow, shock wave\n"
+               "Fantasy \xe2\x80\x94 magical fire, plasma, Cherenkov\n"
                "Clouds \xe2\x80\x94 high albedo, Mie scattering, powder effect\n"
                "Atmosphere \xe2\x80\x94 fog, mist, haze, dust\n"
                "Effects \xe2\x80\x94 nebula, underwater caustic");
@@ -197,6 +215,51 @@ void SpectralVolumeMaterial::knobs(Knob_Callback f)
     Double_knob(f, &flameIntensity, "vol_flame_intensity", "flame");
     SetRange(f, 0, 20);
     Tooltip(f, "Flame grid brightness. Additive on top of temperature.");
+    Double_knob(f, &flameOpacity, "vol_flame_opacity", "burn");
+    ClearFlags(f, Knob::STARTLINE); SetRange(f, 0, 1);
+    Tooltip(f, "Flame burns away density.\n"
+               "0 = none (flame glows through smoke).\n"
+               "0.5 = partial burnaway.\n"
+               "1 = full (fire core is transparent).");
+    Double_knob(f, &flameTempMin, "vol_flame_temp_min", "flame temp");
+    SetRange(f, 500, 5000);
+    Tooltip(f, "Flame grid minimum temperature (K).\n"
+               "Maps flame=0 to this temperature.\n"
+               "1200 = embers. 1500 = candle.");
+    Double_knob(f, &flameTempMax, "vol_flame_temp_max", "");
+    ClearFlags(f, Knob::STARTLINE); SetRange(f, 1000, 10000);
+    Tooltip(f, "Flame grid maximum temperature (K).\n"
+               "Maps flame=1 to this temperature.\n"
+               "3500 = fire. 6500 = welding arc.");
+
+    Double_knob(f, &coreGlow, "vol_core_glow", "core glow");
+    SetRange(f, 0, 10);
+    Tooltip(f, "Dense core emission. Adds blackbody glow\n"
+               "in high-density regions (density > 0.3).\n"
+               "Good for explosion interiors.");
+    Double_knob(f, &coreTemp, "vol_core_temp", "");
+    ClearFlags(f, Knob::STARTLINE); SetRange(f, 1000, 10000);
+    Tooltip(f, "Core emission temperature (K).\n"
+               "4000 = warm orange. 6500 = white. 10000 = blue-white.");
+
+    BeginClosedGroup(f, "vol_cherenkov_grp", "Cherenkov radiation");
+    {
+        Text_knob(f,
+            "<font color='#777' size='-1'>"
+            "Blue glow from charged particles exceeding the speed of light<br>"
+            "in a medium (nuclear reactors, cosmic phenomena)."
+            "</font>"
+        );
+        Newline(f);
+        Bool_knob(f, &cherenkov, "vol_cherenkov", "enable");
+        Double_knob(f, &cherenkovStrength, "vol_cherenkov_strength", "strength");
+        ClearFlags(f, Knob::STARTLINE); SetRange(f, 0, 100); SetFlags(f, Knob::LOG_SLIDER);
+        Double_knob(f, &cherenkovThreshold, "vol_cherenkov_threshold", "threshold");
+        ClearFlags(f, Knob::STARTLINE); SetRange(f, 0.001, 1); SetFlags(f, Knob::LOG_SLIDER);
+        Tooltip(f, "Density threshold for Cherenkov activation.\n"
+                   "Lower = more widespread glow.");
+    }
+    EndGroup(f);
 
     // ─── Chromatic Extinction ───────────────────────────────────────
     BeginClosedGroup(f, "vol_chrom_grp", "Chromatic Extinction (cpu)");
@@ -282,6 +345,27 @@ void SpectralVolumeMaterial::knobs(Knob_Callback f)
     }
     EndGroup(f);
 
+    // ─── Grid Mixer ──────────────────────────────────────────────────
+    BeginClosedGroup(f, "vol_grid_mix_grp", "Grid Mixer");
+    {
+        Text_knob(f,
+            "<font color='#777' size='-1'>"
+            "Fade VDB grids on and off. 0 = disabled, 1 = full strength."
+            "</font>"
+        );
+        Newline(f);
+        Double_knob(f, &densityMix, "vol_density_mix", "density");
+        SetRange(f, 0, 1);
+        Tooltip(f, "Fade density grid.\n0 = no density (invisible).\n1 = full density.");
+        Double_knob(f, &tempMix, "vol_temp_mix", "temperature");
+        ClearFlags(f, Knob::STARTLINE); SetRange(f, 0, 1);
+        Tooltip(f, "Fade temperature grid.\n0 = no temperature emission.\n1 = full temperature.");
+        Double_knob(f, &flameMix, "vol_flame_mix", "flame");
+        ClearFlags(f, Knob::STARTLINE); SetRange(f, 0, 1);
+        Tooltip(f, "Fade flame grid.\n0 = no flame emission.\n1 = full flame.");
+    }
+    EndGroup(f);
+
     // ─── Multiple Scattering ────────────────────────────────────────
     BeginClosedGroup(f, "vol_ms_grp", "Multiple Scattering (cpu)");
     {
@@ -318,41 +402,91 @@ int SpectralVolumeMaterial::knob_changed(Knob* k)
 {
     if (k->is("vol_preset") && preset > 0) {
         struct P { double ext,scat,dens,gF,gB,lM,pow,emI,tMin,tMax,flI;
-                   float scR,scG,scB; int phase; double mieD; };
-        //                         ext  scat dens  gF    gB    lM   pow emI  tMin  tMax  flI   scR   scG   scB  ph  mie
+                   float scR,scG,scB; int phase; double mieD;
+                   double flOp,flTMin,flTMax,cGlow,cTemp; bool cher; double cherStr,cherThr; };
+        //                         ext  scat dens  gF    gB    lM   pow emI  tMin  tMax  flI   scR   scG   scB  ph  mie  flOp flTMin flTMax cGlow cTemp  cher cherStr cherThr
         static const P sp[] = {
-            {},
-            // Smoke
-            {1.5, 0.8, 1,   0.3, -0.1,  0.8,  0,  0,    0,    0,    0,  0.7f, 0.7f, 0.7f,  0, 0},
-            {4,   1.5, 1.5, 0.25,-0.15, 0.75, 0,  0,    0,    0,    0,  0.5f, 0.5f, 0.5f,  0, 0},
-            {6,   2,   2,   0.2, -0.1,  0.7,  0,  0,    0,    0,    0,  0.4f, 0.38f,0.35f, 0, 0},
-            // Fire
-            {1,   0.8, 1,   0.4, -0.15, 0.7,  1,  5,  800, 2500,   8,  1.f,  0.9f, 0.7f,  0, 0},
-            {2,   1.5, 1.2, 0.6, -0.25, 0.75, 3, 10,  300, 5000,  15,  1.f,  0.85f,0.6f,  0, 0},
-            {3,   2,   1.5, 0.7, -0.3,  0.8,  4, 15,  200, 8000,  20,  0.9f, 0.8f, 0.6f,  0, 0},
-            // Clouds (Mie)
-            {1.2, 1.1, 1,   0.85,-0.1,  0.85, 3,  0,    0,    0,    0,  1.f,  1.f,  1.f,   1, 8},
-            {0.4, 0.38,0.6, 0.75,-0.05, 0.9,  1,  0,    0,    0,    0,  1.f,  1.f,  1.f,   1, 1},
-            {1.8, 1.7, 1,   0.85,-0.1,  0.85, 2,  0,    0,    0,    0,  0.98f,0.98f,1.f,   1, 5},
-            {3,   2.8, 1.5, 0.87,-0.25, 0.8,  4,  0,    0,    0,    0,  0.9f, 0.9f, 0.92f, 1, 10},
-            // Atmosphere
-            {0.8, 0.7, 0.5, 0.6, -0.15, 0.85, 0,  0,    0,    0,    0,  0.92f,0.94f,0.97f, 1, 3},
-            {0.8, 0.75,0.3, 0.5, -0.1,  0.85, 0,  0,    0,    0,    0,  0.95f,0.96f,1.f,   1, 2},
-            {0.3, 0.28,0.2, 0.7, -0.05, 0.9,  0,  0,    0,    0,    0,  0.9f, 0.92f,0.98f, 1, 0.5},
-            {2.5, 1,   1.5, 0.4, -0.1,  0.6,  0,  0,    0,    0,    0,  0.85f,0.75f,0.6f,  0, 0},
-            // Effects
-            {0.8, 0.4, 0.8, 0.2,  0,    1,    0,  5, 2000,15000,   0,  0.6f, 0.4f, 1.f,   0, 0},
-            {0.5, 0.48,0.4, 0.85,-0.1,  0.9,  1,  0,    0,    0,    0,  0.7f, 0.9f, 1.f,   1, 4},
+            {}, // 0: Custom
+
+            {}, // 1: ── Smoke ──
+            // 2: Light Smoke — wispy, translucent
+            {1.5, 0.8, 1,   0.3, -0.1,  0.8,  0,  0,    0,    0,    0,  0.7f, 0.7f, 0.7f,  0, 0,    0, 1200,3500, 0, 4000, false,0,0},
+            // 3: Dense Smoke — thick, dark
+            {4,   1.5, 1.5, 0.25,-0.15, 0.75, 0,  0,    0,    0,    0,  0.5f, 0.5f, 0.5f,  0, 0,    0, 1200,3500, 0, 4000, false,0,0},
+            // 4: Industrial — sooty, warm tint
+            {6,   2,   2,   0.2, -0.1,  0.7,  0,  0,    0,    0,    0,  0.4f, 0.38f,0.35f, 0, 0,    0, 1200,3500, 0, 4000, false,0,0},
+
+            {}, // 5: ── Fire ──
+            // 6: Candle
+            {0.6, 0.4, 0.8, 0.35,-0.1,  0.75, 0.5, 3, 600, 1800,  4,  1.f,  0.95f,0.85f, 0, 0,   0.2, 900,1800, 0.5,1800, false,0,0},
+            // 7: Campfire
+            {1,   0.8, 1,   0.4, -0.15, 0.7,  1,  5,  800, 2500,   8,  1.f,  0.9f, 0.7f,  0, 0,   0.3,1200,2500, 1, 3000, false,0,0},
+            // 8: Torch
+            {1.2, 0.9, 1.2, 0.5, -0.15, 0.7,  1.5, 8, 700, 3000, 10,  1.f,  0.85f,0.6f,  0, 0,   0.4,1000,3000, 2, 3500, false,0,0},
+            // 9: Wildfire
+            {3,   1.5, 1.8, 0.5, -0.2,  0.7,  2, 12,  400, 4000,  15,  0.9f, 0.75f,0.5f,  0, 0,   0.5,1000,4000, 3, 4500, false,0,0},
+            // 10: Explosion
+            {2,   1.5, 1.2, 0.6, -0.25, 0.75, 3, 15,  300, 6000,  20,  1.f,  0.85f,0.6f,  0, 0,   0.6,1500,5000, 5, 6000, false,0,0},
+            // 11: Pyroclastic
+            {4,   2.5, 2,   0.7, -0.3,  0.8,  4, 20,  200, 8000,  25,  0.85f,0.7f, 0.5f,  0, 0,   0.8,1000,8000, 8, 7000, false,0,0},
+
+            {}, // 12: ── Nuclear ──
+            // 13: Little Boy
+            {5,   3,   2.5, 0.8, -0.3,  0.85, 5, 40,  500,15000,  30,  1.f,  0.9f, 0.7f,  0, 0,   0.9,2000,15000,15,10000,false,0,0},
+            // 14: Thermonuclear
+            {8,   4,   3,   0.85,-0.35, 0.9,  6, 80,  1000,50000, 50,  1.f,  0.95f,0.9f,  0, 0,   1.0,5000,50000,50,30000,false,0,0},
+            // 15: Rocket Engine
+            {2.5, 2,   1.5, 0.9, -0.1,  0.9,  2, 25,  800,4500,  20,  0.95f,0.9f, 0.8f,  0, 0,   0.7,1500,4500, 4, 5000, false,0,0},
+
+            {}, // 16: ── Fantasy ──
+            // 17: Wizard Fireball
+            {1.5, 1.2, 1,   0.5, -0.2,  0.7,  2, 20,  500,8000,  15,  0.7f, 0.4f, 1.f,   0, 0,   0.5,1500,8000, 8, 12000,false,0,0},
+            // 18: Plasma Orb
+            {1,   0.9, 0.8, 0.3, -0.05, 0.9,  1, 12, 3000,20000,  0,  0.4f, 0.6f, 1.f,   0, 0,   0.3,5000,20000,6, 15000,false,0,0},
+            // 19: Cherenkov Reactor
+            {0.8, 0.6, 0.6, 0.2,  0,    1,    0,  3, 2000,8000,   0,  0.3f, 0.5f, 0.9f,  0, 0,    0, 2000,8000, 1, 6000, true, 5, 0.3},
+
+            {}, // 20: ── Clouds ──
+            // 21: Cumulus
+            {1.2, 1.1, 1,   0.85,-0.1,  0.85, 3,  0,    0,    0,    0,  1.f,  1.f,  1.f,   1, 8,    0, 1200,3500, 0, 4000, false,0,0},
+            // 22: Cirrus
+            {0.4, 0.38,0.6, 0.75,-0.05, 0.9,  1,  0,    0,    0,    0,  1.f,  1.f,  1.f,   1, 1,    0, 1200,3500, 0, 4000, false,0,0},
+            // 23: Stratus
+            {1.8, 1.7, 1,   0.85,-0.1,  0.85, 2,  0,    0,    0,    0,  0.98f,0.98f,1.f,   1, 5,    0, 1200,3500, 0, 4000, false,0,0},
+            // 24: Storm Cloud
+            {3,   2.8, 1.5, 0.87,-0.25, 0.8,  4,  0,    0,    0,    0,  0.9f, 0.9f, 0.92f, 1, 10,   0, 1200,3500, 0, 4000, false,0,0},
+
+            {}, // 25: ── Atmosphere ──
+            // 26: Fog
+            {0.8, 0.7, 0.5, 0.6, -0.15, 0.85, 0,  0,    0,    0,    0,  0.92f,0.94f,0.97f, 1, 3,    0, 1200,3500, 0, 4000, false,0,0},
+            // 27: Ground Mist
+            {0.8, 0.75,0.3, 0.5, -0.1,  0.85, 0,  0,    0,    0,    0,  0.95f,0.96f,1.f,   1, 2,    0, 1200,3500, 0, 4000, false,0,0},
+            // 28: Haze
+            {0.3, 0.28,0.2, 0.7, -0.05, 0.9,  0,  0,    0,    0,    0,  0.9f, 0.92f,0.98f, 1, 0.5,  0, 1200,3500, 0, 4000, false,0,0},
+            // 29: Dust Storm
+            {2.5, 1,   1.5, 0.4, -0.1,  0.6,  0,  0,    0,    0,    0,  0.85f,0.75f,0.6f,  0, 0,    0, 1200,3500, 0, 4000, false,0,0},
+
+            {}, // 30: ── Effects ──
+            // 31: Nebula
+            {0.8, 0.4, 0.8, 0.2,  0,    1,    0,  5, 2000,15000,   0,  0.6f, 0.4f, 1.f,   0, 0,    0, 1200,3500, 0.5,8000, false,0,0},
+            // 32: Underwater Caustic
+            {0.5, 0.48,0.4, 0.85,-0.1,  0.9,  1,  0,    0,    0,    0,  0.7f, 0.9f, 1.f,   1, 4,    0, 1200,3500, 0, 4000, false,0,0},
         };
         int n = sizeof(sp)/sizeof(sp[0]);
         if (preset < n) {
             const auto& s = sp[preset];
+            // Skip section headers (empty entries)
+            if (s.ext == 0 && s.scat == 0 && s.dens == 0) return 1;
             extinction=s.ext; scattering=s.scat; densityMult=s.dens;
             gForward=s.gF; gBackward=s.gB; lobeMix=s.lM;
             powder=s.pow; emissionIntensity=s.emI;
             tempMin=s.tMin; tempMax=s.tMax; flameIntensity=s.flI;
             scatterColor[0]=s.scR; scatterColor[1]=s.scG; scatterColor[2]=s.scB;
             phaseMode=s.phase; mieDropletD=s.mieD;
+            // Phase 17: fire params
+            flameOpacity=s.flOp; flameTempMin=s.flTMin; flameTempMax=s.flTMax;
+            coreGlow=s.cGlow; coreTemp=s.cTemp;
+            cherenkov=s.cher; cherenkovStrength=s.cherStr; cherenkovThreshold=s.cherThr;
             // Fire presets enable blackbody
             useBlackbody = (s.emI > 0);
             // Push to knobs
@@ -375,6 +509,15 @@ int SpectralVolumeMaterial::knob_changed(Knob* k)
                 kn->set_value(scatterColor[1], 1);
                 kn->set_value(scatterColor[2], 2);
             }
+            // Phase 17 fire knobs
+            if (Knob* kn = knob("vol_flame_opacity"))    kn->set_value(flameOpacity);
+            if (Knob* kn = knob("vol_flame_temp_min"))   kn->set_value(flameTempMin);
+            if (Knob* kn = knob("vol_flame_temp_max"))   kn->set_value(flameTempMax);
+            if (Knob* kn = knob("vol_core_glow"))        kn->set_value(coreGlow);
+            if (Knob* kn = knob("vol_core_temp"))        kn->set_value(coreTemp);
+            if (Knob* kn = knob("vol_cherenkov"))        kn->set_value(cherenkov);
+            if (Knob* kn = knob("vol_cherenkov_strength")) kn->set_value(cherenkovStrength);
+            if (Knob* kn = knob("vol_cherenkov_threshold")) kn->set_value(cherenkovThreshold);
         }
         return 1;
     }

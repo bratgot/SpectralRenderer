@@ -78,5 +78,20 @@ public:
     bool   msApprox = true;
     float  msTint[3] = {1.f, 0.97f, 0.95f};
 
+    // --- Phase 17: Fire & Explosions ---
+    double flameOpacity     = 0.0;
+    double flameTempMin     = 1200.0;
+    double flameTempMax     = 3500.0;
+    double coreGlow         = 0.0;
+    double coreTemp         = 4000.0;
+    bool   cherenkov        = false;
+    double cherenkovStrength  = 1.0;
+    double cherenkovThreshold = 0.5;
+
+    // --- Grid Mixer ---
+    double densityMix      = 1.0;    // fade density grid (0=off, 1=full)
+    double tempMix         = 1.0;    // fade temperature grid (0=off, 1=full)
+    double flameMix        = 1.0;    // fade flame grid (0=off, 1=full)
+
     static void BlackbodyToRGB(float tempK, float& r, float& g, float& b);
 };

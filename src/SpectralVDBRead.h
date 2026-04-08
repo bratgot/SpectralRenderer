@@ -54,6 +54,7 @@ public:
     std::shared_ptr<pxr::SpectralVolume> GetVolumeAtFrame(int frame, int maxRes = 128);
     bool HasVolume();
     int GetMaxRes() const;
+    bool GetLockBbox() const { return _lockBbox; }
     std::string ResolvePathAtFrame(int frame) const { return _resolveFramePath(frame); }
 
     static DD::Image::Op* Build(Node* node) { return new SpectralVDBRead(node); }
@@ -95,6 +96,7 @@ private:
     const char* _colorOverride = "";
     const char* _GetDensityName() const;
     const char* _GetTempName() const;
+    const char* _GetFlameName() const;
 
     // Volume data
     std::shared_ptr<pxr::SpectralVolume> _volume;
@@ -111,7 +113,12 @@ private:
     float _densityThreshold = 0.01f;
     bool  _lit         = false;
     // Voxel Resolution
-    int   _voxelRes    = 3;  // 0=1/8, 1=1/4, 2=1/2, 3=Full, 4=Native
+    int   _voxelRes    = 0;  // 0=1/8, 1=1/4, 2=1/2, 3=Full, 4=Native
     const char* _memInfo = "";
     const char* _vdbInfo = "";
+
+    // Reference bbox — lock world-space position across animated frames
+    bool  _lockBbox = true;
+    bool  _hasRefBbox = false;
+    pxr::GfVec3f _refBboxCenter = pxr::GfVec3f(0.f);
 };

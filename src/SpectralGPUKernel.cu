@@ -64,6 +64,20 @@ static __forceinline__ __device__ void makeRay(
     float3 farPos  = make_float3(nx1/nw1, ny1/nw1, nz1/nw1);
     float3 worldNear = transformPoint(params.camera.viewToWorld, nearPos);
     float3 worldFar  = transformPoint(params.camera.viewToWorld, farPos);
+
+    // Camera motion blur: lerp between open and close camera positions
+    if (params.camera.cameraMblur) {
+        float t = hashRNG(seed + 99u);
+        float3 nearClose = transformPoint(params.camera.viewToWorldClose, nearPos);
+        float3 farClose  = transformPoint(params.camera.viewToWorldClose, farPos);
+        worldNear.x += (nearClose.x - worldNear.x) * t;
+        worldNear.y += (nearClose.y - worldNear.y) * t;
+        worldNear.z += (nearClose.z - worldNear.z) * t;
+        worldFar.x  += (farClose.x  - worldFar.x)  * t;
+        worldFar.y  += (farClose.y  - worldFar.y)  * t;
+        worldFar.z  += (farClose.z  - worldFar.z)  * t;
+    }
+
     origin = worldNear;
     dir = make_float3(worldFar.x-worldNear.x, worldFar.y-worldNear.y, worldFar.z-worldNear.z);
 
@@ -861,6 +875,19 @@ static __forceinline__ __device__ void marchSingleVolume(
 
         if (density < 1e-5f) { if (vol.adaptiveStep) t+=dt*3.f; continue; }
 
+        // Phase 17: flame opacity — fire burns away density
+        float flameVal = sampleFlame(vol, u, v, w) * vol.flameMix;
+        if (vol.flameOpacity > 0.01f && flameVal > 0.01f) {
+            density = fmaxf(0.f, density * (1.f - flameVal * vol.flameOpacity));
+            if (density < 1e-5f) continue;
+        }
+
+        // Grid mixer: fade density
+        if (vol.densityMix < 0.99f) {
+            density *= vol.densityMix;
+            if (density < 1e-5f) continue;
+        }
+
         float sigma_t = density * vol.extinction;
         // Phase 14: chromatic extinction — wavelength-dependent absorption
         if (vol.chromaticExtinction) {
@@ -1199,7 +1226,7 @@ static __forceinline__ __device__ void marchSingleVolume(
         // Emission
         if (rmode==4||rmode==5||vol.emissionIntensity>0.01f) {
             float3 emRGB=make_float3(0.f,0.f,0.f);
-            float temp2=sampleTemp(vol,u,v,w);
+            float temp2=sampleTemp(vol,u,v,w)*vol.tempMix;
             if (temp2>vol.tempMin) {
                 float tN2=fminf((temp2-vol.tempMin)/(vol.tempMax-vol.tempMin+1e-6f),1.f);
                 float T2=vol.tempMin+tN2*(vol.tempMax-vol.tempMin);
@@ -1212,14 +1239,30 @@ static __forceinline__ __device__ void marchSingleVolume(
                                   cg*vol.emissionIntensity*tN2,
                                   cb*vol.emissionIntensity*tN2);
             }
-            float fl2=sampleFlame(vol,u,v,w);
-            if(fl2>0.01f){
-                float T3=1500.f+fl2*2000.f,t100=T3/100.f;
+            // Phase 17: flame grid with artist temp range
+            if(flameVal>0.01f){
+                float T3=vol.flameTempMin+flameVal*(vol.flameTempMax-vol.flameTempMin);
+                float t100=T3/100.f;
                 float cr=1,cg=fmaxf(0.f,fminf(0.39f*logf(t100)-0.63f,1.f)),
                       cb=fmaxf(0.f,fminf(0.54f*logf(t100-10.f)-1.19f,1.f));
-                emRGB.x+=cr*vol.flameIntensity*fl2;
-                emRGB.y+=cg*vol.flameIntensity*fl2;
-                emRGB.z+=cb*vol.flameIntensity*fl2;
+                emRGB.x+=cr*vol.flameIntensity*flameVal;
+                emRGB.y+=cg*vol.flameIntensity*flameVal;
+                emRGB.z+=cb*vol.flameIntensity*flameVal;
+            }
+            // Phase 17: dense core glow
+            if (vol.coreGlow > 0.01f && density > 0.3f) {
+                float coreFrac = fminf((density - 0.3f) / 0.7f, 1.f);
+                float T4=vol.coreTemp, t100=T4/100.f;
+                float cr=1,cg=fmaxf(0.f,fminf(0.39f*logf(t100)-0.63f,1.f)),
+                      cb=fmaxf(0.f,fminf(0.54f*logf(t100-10.f)-1.19f,1.f));
+                float coreE = vol.coreGlow*coreFrac*coreFrac;
+                emRGB.x+=cr*coreE; emRGB.y+=cg*coreE; emRGB.z+=cb*coreE;
+            }
+            // Phase 17: Cherenkov radiation — blue glow at high density
+            if (vol.cherenkov && density > vol.cherenkovThreshold) {
+                float chFrac = fminf((density-vol.cherenkovThreshold)/(1.f-vol.cherenkovThreshold+1e-6f), 1.f);
+                float chE = vol.cherenkovStrength*chFrac*chFrac;
+                emRGB.x+=0.15f*chE; emRGB.y+=0.4f*chE; emRGB.z+=1.f*chE;
             }
             float emW=outTransmittance*density*dt*vol.intensity;
             outRGB.x+=emRGB.x*emW; outRGB.y+=emRGB.y*emW; outRGB.z+=emRGB.z*emW;

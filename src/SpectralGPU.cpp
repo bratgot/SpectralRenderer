@@ -771,64 +771,65 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
         gv.sigmaB = volume->sigmaB;
         gv.msApprox = volume->msApprox ? 1 : 0;
         gv.msTint = make_float3(volume->msTint[0], volume->msTint[1], volume->msTint[2]);
+        // Phase 17: fire & explosions
+        gv.flameOpacity = volume->flameOpacity;
+        gv.flameTempMin = volume->flameTempMin;
+        gv.flameTempMax = volume->flameTempMax;
+        gv.coreGlow = volume->coreGlow;
+        gv.coreTemp = volume->coreTemp;
+        gv.cherenkov = volume->cherenkov ? 1 : 0;
+        gv.cherenkovStrength = volume->cherenkovStrength;
+        gv.cherenkovThreshold = volume->cherenkovThreshold;
+        gv.densityMix = volume->densityMix;
+        gv.tempMix = volume->tempMix;
+        gv.flameMix = volume->flameMix;
 
-        // Upload density grid — skip if data unchanged (shader-only changes)
+        // Upload density grid — always upload data (animated sequences need fresh data)
+        // Only realloc VRAM when size changes (the malloc is expensive, memcpy is cheap)
         size_t densBytes = volume->density.size() * sizeof(float);
         auto& dv = _d_volumes[gi];
 
-        // Quick checksum: sample a few density values to detect data changes
-        // (pointer changes every frame because VolMerge creates new objects)
-        unsigned int dataCheck = volume->resX * 73856093u ^ volume->resY * 19349663u ^ volume->resZ * 83492791u;
-        if (!volume->density.empty()) {
-            size_t n = volume->density.size();
-            // Sample 8 spread-out values for fast fingerprint
-            for (int ci = 0; ci < 8; ++ci) {
-                size_t idx = (ci * n) / 8;
-                union { float f; unsigned int u; } pun;
-                pun.f = volume->density[idx];
-                dataCheck ^= pun.u * (ci * 2654435761u + 1u);
-            }
+        if (dv.cachedSize != densBytes) {
+            if (dv.d_density) cudaFree(reinterpret_cast<void*>(dv.d_density));
+            dv.d_density = 0;
+            CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&dv.d_density), densBytes));
+            dv.cachedSize = densBytes;
         }
-        bool gridChanged = (dv.cachedResX != volume->resX ||
-                           dv.cachedResY != volume->resY ||
-                           dv.cachedResZ != volume->resZ ||
-                           dv.cachedChecksum != dataCheck);
+        CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(dv.d_density), volume->density.data(),
+                              densBytes, cudaMemcpyHostToDevice));
 
-        if (gridChanged) {
-            if (dv.cachedSize != densBytes) {
-                if (dv.d_density) cudaFree(reinterpret_cast<void*>(dv.d_density));
-                dv.d_density = 0;
-                CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&dv.d_density), densBytes));
-                dv.cachedSize = densBytes;
+        // Temperature
+        {
+            size_t tempBytes = volume->temperature.empty() ? 0 : volume->temperature.size() * sizeof(float);
+            if (dv.d_temp && (tempBytes == 0 || tempBytes != dv.cachedTempSize)) {
+                cudaFree(reinterpret_cast<void*>(dv.d_temp)); dv.d_temp = 0; dv.cachedTempSize = 0;
             }
-            CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(dv.d_density), volume->density.data(),
-                                  densBytes, cudaMemcpyHostToDevice));
-            dv.cachedResX = volume->resX;
-            dv.cachedResY = volume->resY;
-            dv.cachedResZ = volume->resZ;
-            dv.cachedChecksum = dataCheck;
-
-            // Temperature — only re-upload when grid changed
-            if (dv.d_temp) { cudaFree(reinterpret_cast<void*>(dv.d_temp)); dv.d_temp = 0; }
-            if (!volume->temperature.empty()) {
-                size_t tempBytes = volume->temperature.size() * sizeof(float);
-                CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&dv.d_temp), tempBytes));
+            if (tempBytes > 0) {
+                if (!dv.d_temp) {
+                    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&dv.d_temp), tempBytes));
+                    dv.cachedTempSize = tempBytes;
+                }
                 CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(dv.d_temp), volume->temperature.data(),
                                       tempBytes, cudaMemcpyHostToDevice));
             }
+        }
 
-            // Flame — only re-upload when grid changed
-            if (dv.d_flame) { cudaFree(reinterpret_cast<void*>(dv.d_flame)); dv.d_flame = 0; }
-            if (!volume->flame.empty()) {
-                size_t flameBytes = volume->flame.size() * sizeof(float);
-                CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&dv.d_flame), flameBytes));
+        // Flame
+        {
+            size_t flameBytes = volume->flame.empty() ? 0 : volume->flame.size() * sizeof(float);
+            if (dv.d_flame && (flameBytes == 0 || flameBytes != dv.cachedFlameSize)) {
+                cudaFree(reinterpret_cast<void*>(dv.d_flame)); dv.d_flame = 0; dv.cachedFlameSize = 0;
+            }
+            if (flameBytes > 0) {
+                if (!dv.d_flame) {
+                    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&dv.d_flame), flameBytes));
+                    dv.cachedFlameSize = flameBytes;
+                }
                 CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(dv.d_flame), volume->flame.data(),
                                       flameBytes, cudaMemcpyHostToDevice));
             }
-
-            fprintf(stderr, "SpectralGPU: volume[%d] uploaded %dx%dx%d (%.1f MB)\n",
-                    gi, gv.resX, gv.resY, gv.resZ, densBytes / (1024.f * 1024.f));
         }
+
         gv.density = reinterpret_cast<float*>(dv.d_density);
         gv.temperature = dv.d_temp ? reinterpret_cast<float*>(dv.d_temp) : nullptr;
         gv.flame = dv.d_flame ? reinterpret_cast<float*>(dv.d_flame) : nullptr;
@@ -871,8 +872,8 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
         if (_d_volumes[vi].d_temp)    { cudaFree(reinterpret_cast<void*>(_d_volumes[vi].d_temp));    _d_volumes[vi].d_temp = 0; }
         if (_d_volumes[vi].d_flame)   { cudaFree(reinterpret_cast<void*>(_d_volumes[vi].d_flame));   _d_volumes[vi].d_flame = 0; }
         _d_volumes[vi].cachedSize = 0;
-        _d_volumes[vi].cachedChecksum = 0;
-        _d_volumes[vi].cachedResX = _d_volumes[vi].cachedResY = _d_volumes[vi].cachedResZ = 0;
+        _d_volumes[vi].cachedTempSize = 0;
+        _d_volumes[vi].cachedFlameSize = 0;
     }
     _numDeviceVolumes = launchParams.numGpuVolumes;
 
@@ -904,6 +905,11 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     launchParams.camera.fStop = camera.fStop;
     launchParams.camera.focusDistance = camera.focusDistance;
     launchParams.camera.focalLength = camera.focalLength;
+    // Camera motion blur
+    launchParams.camera.cameraMblur = camera.cameraMblur ? 1 : 0;
+    if (camera.cameraMblur) {
+        copyMatrixTransposed(camera.viewToWorldClose, launchParams.camera.viewToWorldClose);
+    }
 
     // Camera basis vectors for lens disk sampling
     pxr::GfVec3d right = camera.viewToWorld.TransformDir(pxr::GfVec3d(1, 0, 0));

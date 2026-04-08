@@ -48,6 +48,9 @@ PXR_NAMESPACE_OPEN_SCOPE
 struct SpectralCamera {
     GfMatrix4d viewToWorld;   // camera→world  (inverse of view matrix)
     GfMatrix4d projInverse;   // clip→view     (inverse of projection matrix)
+    // Camera motion blur: end-of-shutter camera position
+    GfMatrix4d viewToWorldClose; // camera→world at shutter close
+    bool       cameraMblur   = false;
     unsigned int imageWidth  = 1920;
     unsigned int imageHeight = 1080;
     double pixelAspect       = 1.0;   // pixel aspect ratio from format
