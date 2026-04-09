@@ -2269,7 +2269,9 @@ void SpectralIntegrator::RenderFrameGPU(
     int                   maxBounces,
     int                   colorSpace,
     const SpectralVolume* const* volumes,
-    int                   numVolumes)
+    int                   numVolumes,
+    StripCallback         stripCallback,
+    int                   numStrips)
 {
     // Phase 13: GPU handles multi-volume natively (up to 8)
     if (numVolumes > SPECTRAL_MAX_GPU_VOLUMES) {
@@ -2297,7 +2299,7 @@ void SpectralIntegrator::RenderFrameGPU(
 
     if (!gpu->Render(camera, camera.imageWidth, camera.imageHeight,
                      pixels, depthOut, spp, maxBounces, colorSpace,
-                     volumes, numVolumes)) {
+                     volumes, numVolumes, stripCallback, numStrips)) {
         fprintf(stderr, "SpectralIntegrator: GPU render failed, using CPU\n");
         RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces,
                     nullptr, nullptr, nullptr, nullptr, nullptr, 0.5f, colorSpace,

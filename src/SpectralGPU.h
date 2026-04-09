@@ -37,6 +37,7 @@ PXR_NAMESPACE_CLOSE_SCOPE
 
 #include <vector>
 #include <string>
+#include <functional>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -61,12 +62,16 @@ public:
     /// Render into host-side buffers.
     /// pixels: RGBA float, width*height*4 floats (pre-allocated)
     /// depth:  per-pixel depth, width*height floats (pre-allocated, can be null)
+    /// stripCallback: called after each strip renders with (y0, y1) range, null for full-frame
+    using StripCallback = std::function<void(int y0, int y1)>;
     bool Render(const SpectralCamera& camera,
                 unsigned int width, unsigned int height,
                 float* pixels, float* depth = nullptr,
                 int spp = 1, int maxBounces = 4, int colorSpace = 0,
                 const SpectralVolume* const* volumes = nullptr,
-                int numVolumes = 0);
+                int numVolumes = 0,
+                StripCallback stripCallback = nullptr,
+                int numStrips = 1);
 
     /// Denoise the framebuffer in-place on GPU, copy result to host pixels.
     bool Denoise(unsigned int width, unsigned int height, float* pixels);

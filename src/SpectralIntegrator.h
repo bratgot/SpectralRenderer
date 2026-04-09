@@ -140,6 +140,7 @@ public:
 
 #ifdef SPECTRAL_HAS_OPTIX
     /// GPU render path using OptiX.
+    using StripCallback = std::function<void(int y0, int y1)>;
     static void RenderFrameGPU(
         const SpectralScene& scene,
         const SpectralCamera& camera,
@@ -149,7 +150,9 @@ public:
         int maxBounces = 4,
         int colorSpace = 0,
         const SpectralVolume* const* volumes = nullptr,
-        int numVolumes = 0);
+        int numVolumes = 0,
+        StripCallback stripCallback = nullptr,
+        int numStrips = 1);
 
     static bool IsGPUAvailable();
     static void DenoiseGPU(unsigned int width, unsigned int height, float* pixels);

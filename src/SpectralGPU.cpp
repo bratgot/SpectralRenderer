@@ -727,7 +727,9 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
                           unsigned int width, unsigned int height,
                           float* pixels, float* depth, int spp, int maxBounces,
                           int colorSpace, const SpectralVolume* const* volumes,
-                          int numVolumes)
+                          int numVolumes,
+                          StripCallback stripCallback,
+                          int numStrips)
 {
     if (!_pipeline || !_gasHandle) return false;
     if (width == 0 || height == 0) return false;
@@ -767,7 +769,7 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     launchParams.spp         = spp;
     launchParams.maxBounces  = maxBounces;
     launchParams.colorSpace  = colorSpace;
-    launchParams.previewMode = (spp <= 2) ? 1 : 0;
+    launchParams.previewMode = (spp <= 8) ? 1 : 0;  // shadows only at high spp
     launchParams.normals     = reinterpret_cast<float3*>(_d_normals);
     launchParams.materialIds = reinterpret_cast<int*>(_d_materialIds);
     launchParams.triCount    = _triCount;
@@ -1053,32 +1055,68 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     launchParams.camera.forward[2] = float(fwd[2]);
 
     // Upload launch params
+    launchParams.yOffset = 0;
     CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_params), &launchParams,
                           sizeof(spectral_gpu::LaunchParams), cudaMemcpyHostToDevice));
 
-    // Launch
+    // Launch — strip-based for progressive viewer streaming
     auto tLaunchStart = std::chrono::high_resolution_clock::now();
-    OPTIX_CHECK(optixLaunch(
-        _pipeline, 0,
-        _d_params, sizeof(spectral_gpu::LaunchParams),
-        &_sbt,
-        width, height, 1));
 
-    CUDA_CHECK(cudaDeviceSynchronize());
+    int effectiveStrips = (stripCallback && numStrips > 1) ? numStrips : 1;
+    unsigned int stripHeight = (height + effectiveStrips - 1) / effectiveStrips;
+
+    for (int s = 0; s < effectiveStrips; ++s) {
+        unsigned int y0 = s * stripHeight;
+        unsigned int y1 = std::min(y0 + stripHeight, height);
+        unsigned int sh = y1 - y0;
+        if (sh == 0) break;
+
+        if (effectiveStrips > 1) {
+            launchParams.yOffset = y0;
+            CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_params), &launchParams,
+                                  sizeof(spectral_gpu::LaunchParams), cudaMemcpyHostToDevice));
+        }
+
+        OPTIX_CHECK(optixLaunch(
+            _pipeline, 0,
+            _d_params, sizeof(spectral_gpu::LaunchParams),
+            &_sbt,
+            width, sh, 1));
+
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        // Download this strip's pixels
+        size_t rowBytes = size_t(width) * sizeof(float4);
+        CUDA_CHECK(cudaMemcpy(pixels + y0 * width * 4,
+                              reinterpret_cast<char*>(_d_framebuffer) + y0 * rowBytes,
+                              sh * rowBytes,
+                              cudaMemcpyDeviceToHost));
+
+        if (depth) {
+            size_t depthRowBytes = size_t(width) * sizeof(float);
+            CUDA_CHECK(cudaMemcpy(depth + y0 * width,
+                                  reinterpret_cast<char*>(_d_depthbuffer) + y0 * depthRowBytes,
+                                  sh * depthRowBytes,
+                                  cudaMemcpyDeviceToHost));
+        }
+
+        if (stripCallback) stripCallback(y0, y1);
+    }
+
     auto tLaunchEnd = std::chrono::high_resolution_clock::now();
 
-    // Download framebuffer
-    CUDA_CHECK(cudaMemcpy(pixels,
-                          reinterpret_cast<void*>(_d_framebuffer),
-                          size_t(width) * height * sizeof(float4),
-                          cudaMemcpyDeviceToHost));
-
-    // Download depth
-    if (depth) {
-        CUDA_CHECK(cudaMemcpy(depth,
-                              reinterpret_cast<void*>(_d_depthbuffer),
-                              size_t(width) * height * sizeof(float),
+    // For single-strip (full frame), still need to download
+    if (effectiveStrips == 1) {
+        CUDA_CHECK(cudaMemcpy(pixels,
+                              reinterpret_cast<void*>(_d_framebuffer),
+                              size_t(width) * height * sizeof(float4),
                               cudaMemcpyDeviceToHost));
+        if (depth) {
+            CUDA_CHECK(cudaMemcpy(depth,
+                                  reinterpret_cast<void*>(_d_depthbuffer),
+                                  size_t(width) * height * sizeof(float),
+                                  cudaMemcpyDeviceToHost));
+        }
     }
 
     auto tDownloadEnd = std::chrono::high_resolution_clock::now();
@@ -1086,9 +1124,9 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
         auto msUpload   = std::chrono::duration_cast<std::chrono::milliseconds>(tVolUploadEnd - tVolUploadStart).count();
         auto msLaunch   = std::chrono::duration_cast<std::chrono::milliseconds>(tLaunchEnd - tLaunchStart).count();
         auto msDownload = std::chrono::duration_cast<std::chrono::milliseconds>(tDownloadEnd - tLaunchEnd).count();
-        fprintf(stderr, "SpectralGPU: timing — vol_upload=%lldms launch=%lldms download=%lldms (%dx%d %d vol%s)\n",
+        fprintf(stderr, "SpectralGPU: timing — vol_upload=%lldms launch=%lldms download=%lldms (%dx%d %d vol%s %d strips)\n",
                 msUpload, msLaunch, msDownload, width, height, launchParams.numGpuVolumes,
-                launchParams.previewMode ? " PREVIEW" : "");
+                launchParams.previewMode ? " PREVIEW" : "", effectiveStrips);
     }
 
     return true;

@@ -1319,10 +1319,11 @@ extern "C" __global__ void __raygen__spectral()
 {
     const uint3 idx = optixGetLaunchIndex();
     const uint3 dim = optixGetLaunchDimensions();
-    const unsigned int px=idx.x, py=idx.y;
-    const unsigned int pixIdx = py*dim.x+px;
+    const unsigned int px=idx.x, py_local=idx.y;
+    const unsigned int py = py_local + params.yOffset;  // absolute Y in full image
+    const unsigned int pixIdx = py*params.width+px;
     const int spp = params.spp;
-    const float W=float(dim.x), H=float(dim.y);
+    const float W=float(params.width), H=float(params.height);
 
     if (spp <= 1) {
         // Normal-as-colour (or volume density preview for spp=1)

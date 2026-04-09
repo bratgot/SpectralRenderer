@@ -150,6 +150,7 @@ struct LaunchParams {
     float*             depthbuffer;
     unsigned int       width;
     unsigned int       height;
+    unsigned int       yOffset;       // strip rendering: first Y row in this launch
 
     CameraParams       camera;
     OptixTraversableHandle traversable;

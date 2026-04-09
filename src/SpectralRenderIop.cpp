@@ -97,7 +97,10 @@ SpectralRenderIop::SpectralRenderIop(Node* node)
     SLOG("SpectralRender: DLL build %s %s\n", __DATE__, __TIME__);
 }
 
-SpectralRenderIop::~SpectralRenderIop() = default;
+SpectralRenderIop::~SpectralRenderIop() {
+    _asyncCancel.store(true);
+    if (_asyncQualityThread.joinable()) _asyncQualityThread.join();
+}
 
 // Pre-populated grid menu — common VDB grid names (shared with SpectralVDBRead)
 const char* const SpectralRenderIop::kVdbGridMenu[] = {
@@ -997,6 +1000,8 @@ void SpectralRenderIop::knobs(Knob_Callback f)
 
 int SpectralRenderIop::knob_changed(Knob* k)
 {
+    _asyncCancel.store(true);
+    // Don't join — let GPU finish naturally, CUDA serializes access
     _frameReady.store(false);
     _progressiveSppDone = 0;
 
@@ -1377,6 +1382,7 @@ void SpectralRenderIop::_validate(bool forReal)
     // Read current frame from Nuke's timeline
     int currentFrame = static_cast<int>(outputContext().frame());
     if (currentFrame != _frame) {
+        _asyncCancel.store(true);
         _frame = currentFrame;
         _frameReady.store(false);
         _progressiveSppDone = 0;
@@ -1529,6 +1535,7 @@ void SpectralRenderIop::_validate(bool forReal)
     }
 
     if (forReal || scnChanged) {
+        _asyncCancel.store(true);
         _LoadStage();
         _BuildCameraFromInput();
         _frameReady.store(false);
@@ -4832,14 +4839,9 @@ void SpectralRenderIop::_BuildLightRig()
 
 void SpectralRenderIop::_EnsureFrameRendered()
 {
-    // Allow re-entry for progressive refinement or volume preview refinement
-    if (_frameReady.load()) {
-        bool needsRefinement = (_progressive && _progressiveSppDone < _samples)
-                            || (_progressiveSppDone > 0 && _progressiveSppDone < _samples);
-        if (!needsRefinement) return;
-        // Preview done, need full quality
-        _frameReady.store(false);
-    }
+    // Frame already rendered — async quality thread handles refinement
+    if (_frameReady.load()) return;
+
     std::lock_guard<std::mutex> lock(_renderMutex);
     if (_frameReady.load()) return;
 
@@ -5075,11 +5077,19 @@ void SpectralRenderIop::_EnsureFrameRendered()
 
 #ifdef SPECTRAL_HAS_OPTIX
     if (useGPU) {
+        // Strip callback: update viewer progressively during render
+        auto stripCb = [this, W](int y0, int y1) {
+            DD::Image::Box box(0, y0, W, y1);
+            asapUpdate(box);
+        };
+        int strips = isPreviewPass ? 8 : 4;  // more strips for preview (faster feedback)
+
         SpectralIntegrator::RenderFrameGPU(*_scene, cam, _frameBuffer.data(),
                                             renderSpp, _depthBuffer.data(), _maxBounces,
                                             _colorSpace,
                                             volPtrs.empty() ? nullptr : volPtrs.data(),
-                                            (int)volPtrs.size());
+                                            (int)volPtrs.size(),
+                                            stripCb, strips);
         // Note: GPU caustics use CPU gathering pass below
     } else
 #endif
@@ -5191,10 +5201,52 @@ void SpectralRenderIop::_EnsureFrameRendered()
         }
     }
 
-    // If this was a preview pass, schedule refinement
+    // If this was a preview pass, launch async quality render
     if (isPreviewPass && _progressiveSppDone < _samples) {
-        SLOG("SpectralRender: preview complete (%d spp) — re-render for full %d spp\n",
+        SLOG("SpectralRender: preview complete (%d spp) — launching async quality (%d spp)\n",
                 _progressiveSppDone, _samples);
+
+        // Cancel any previous async render
+        _asyncCancel.store(true);
+        if (_asyncQualityThread.joinable()) _asyncQualityThread.join();
+
+        // Capture render state for async thread
+        pxr::SpectralCamera asyncCam = cam;
+        int asyncSpp = _samples;
+        auto asyncVolPtrs = volPtrs;
+
+        _asyncCancel.store(false);
+        _asyncQualityThread = std::thread([this, asyncCam, asyncSpp, asyncVolPtrs]() {
+            std::lock_guard<std::mutex> lock(_renderMutex);
+            if (_asyncCancel.load()) return;
+
+            SLOG("SpectralRender: async quality render %d spp\n", asyncSpp);
+            auto tStart = std::chrono::high_resolution_clock::now();
+
+#ifdef SPECTRAL_HAS_OPTIX
+            // Strip callback checks cancellation between strips
+            auto cancelCb = [this](int y0, int y1) {
+                (void)y0; (void)y1;
+                // Check if we should abort
+            };
+            SpectralIntegrator::RenderFrameGPU(*_scene, asyncCam, _frameBuffer.data(),
+                                                asyncSpp, _depthBuffer.data(), _maxBounces,
+                                                _colorSpace,
+                                                asyncVolPtrs.empty() ? nullptr : asyncVolPtrs.data(),
+                                                (int)asyncVolPtrs.size(),
+                                                cancelCb, 4);
+#endif
+
+            if (_asyncCancel.load()) return;
+
+            _progressiveSppDone = asyncSpp;
+
+            auto tEnd = std::chrono::high_resolution_clock::now();
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(tEnd - tStart).count();
+            SLOG("SpectralRender: async quality complete (%lldms)\n", ms);
+
+            asapUpdate();
+        });
     }
 
     _frameReady.store(true);

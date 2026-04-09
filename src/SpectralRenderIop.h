@@ -32,6 +32,7 @@ PXR_NAMESPACE_USING_DIRECTIVE
 #include <vector>
 #include <memory>
 #include <atomic>
+#include <thread>
 #include <chrono>
 #include <mutex>
 #include <string>
@@ -434,4 +435,6 @@ private:
     unsigned int        _fbFullHeight = 0;
     std::atomic<bool>   _frameReady { false };
     std::mutex          _renderMutex;
+    std::thread         _asyncQualityThread;
+    std::atomic<bool>   _asyncCancel { false };
 };
