@@ -4832,10 +4832,12 @@ void SpectralRenderIop::_BuildLightRig()
 
 void SpectralRenderIop::_EnsureFrameRendered()
 {
-    // Allow re-entry for progressive refinement
+    // Allow re-entry for progressive refinement or volume preview refinement
     if (_frameReady.load()) {
-        if (!_progressive || _progressiveSppDone >= _samples) return;
-        // Progressive: preview done, need full quality
+        bool needsRefinement = (_progressive && _progressiveSppDone < _samples)
+                            || (_progressiveSppDone > 0 && _progressiveSppDone < _samples);
+        if (!needsRefinement) return;
+        // Preview done, need full quality
         _frameReady.store(false);
     }
     std::lock_guard<std::mutex> lock(_renderMutex);
@@ -4925,12 +4927,20 @@ void SpectralRenderIop::_EnsureFrameRendered()
 
     // Progressive rendering: first pass is a fast preview
     int renderSpp = _samples;
+    bool isPreviewPass = false;
     // Camera motion blur: multiply samples for quality
     if (_cameraMblur && _camera.cameraMblur) {
         renderSpp = std::max(renderSpp, renderSpp * _cameraMblurQuality / 4);
     }
-    if (_progressive && _progressiveSppDone == 0 && _samples > 8) {
-        renderSpp = 8;  // fast preview pass
+    // Auto-preview: always render 1 spp first for volume scenes, then refine
+    bool hasVolumeScene = !_volumes.empty() || (_volume && _volume->IsValid());
+    if (hasVolumeScene && _progressiveSppDone == 0 && _samples > 1) {
+        renderSpp = 1;
+        isPreviewPass = true;
+    }
+    if (_progressive && _progressiveSppDone == 0 && _samples > 2) {
+        renderSpp = 1;  // fast preview pass — triggers GPU previewMode (no shadows, 2× step)
+        isPreviewPass = true;
     }
 
     // Determine render device
@@ -4944,7 +4954,7 @@ void SpectralRenderIop::_EnsureFrameRendered()
 #endif
 
     const char* deviceStr = useGPU ? "GPU" : "CPU";
-    const char* passStr = (_progressive && renderSpp < _samples) ? " [preview]" : "";
+    const char* passStr = isPreviewPass ? " [preview]" : "";
     if (W != fullW || H != fullH)
         SLOG("SpectralRender: rendering %dx%d (proxy of %dx%d), %zu tris, %d spp, device=%s%s\n",
                 W, H, fullW, fullH, _scene->TotalTriangles(), renderSpp, deviceStr, passStr);
@@ -5182,7 +5192,7 @@ void SpectralRenderIop::_EnsureFrameRendered()
     }
 
     // If this was a preview pass, schedule refinement
-    if (_progressive && _progressiveSppDone < _samples) {
+    if (isPreviewPass && _progressiveSppDone < _samples) {
         SLOG("SpectralRender: preview complete (%d spp) — re-render for full %d spp\n",
                 _progressiveSppDone, _samples);
     }

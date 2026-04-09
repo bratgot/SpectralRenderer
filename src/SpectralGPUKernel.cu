@@ -818,7 +818,9 @@ static __forceinline__ __device__ void marchSingleVolume(
     float voxelSize=fmaxf(fmaxf(bSize.x/vol.resX,bSize.y/vol.resY),bSize.z/vol.resZ);
     float q=fmaxf(1.f,vol.quality);
     float dt=(vol.stepSize>0.01f)?vol.stepSize:voxelSize/(q*q*0.25f);
-    int maxSteps=min(1024,int((tFar-tNear)/dt)+1);
+    // Preview mode: 2× step size for speed
+    if (params.previewMode) dt *= 2.f;
+    int maxSteps=min(params.previewMode ? 256 : 1024, int((tFar-tNear)/dt)+1);
 
     float jitterOff=vol.jitter?hashRNG(seed)*dt:0.f;
     float t=tNear+jitterOff;
@@ -831,8 +833,8 @@ static __forceinline__ __device__ void marchSingleVolume(
 
         float density = sampleDensity(vol, u, v, w);
 
-        // Procedural noise
-        if (vol.noiseEnable && density > 1e-6f) {
+        // Procedural noise (skip in preview mode)
+        if (!params.previewMode && vol.noiseEnable && density > 1e-6f) {
             float ns = vol.noiseScale / fmaxf(bboxDiag, 1e-4f);
             float n = gpuNoiseFBm(px*ns, py*ns, pz*ns,
                                    vol.noiseOctaves, vol.noiseRoughness);
@@ -933,7 +935,7 @@ static __forceinline__ __device__ void marchSingleVolume(
                 }
 
                 float shadowTrans=1.f;
-                if (vol.shadowSteps>0 && vol.shadowDensity>0.01f) {
+                if (!params.previewMode && vol.shadowSteps>0 && vol.shadowDensity>0.01f) {
                     float3 sDir=make_float3(-lDir.x,-lDir.y,-lDir.z);
                     float voxelSz = fmaxf(fmaxf(
                         (vol.bboxMax.x-vol.bboxMin.x)/vol.resX,
@@ -987,7 +989,7 @@ static __forceinline__ __device__ void marchSingleVolume(
 
                 // Geometry occlusion: one optixTrace per light (not per step)
                 // Check if opaque geometry blocks light reaching this volume point
-                if (shadowTrans > 0.01f && params.hasRealGeometry) {
+                if (!params.previewMode && shadowTrans > 0.01f && params.hasRealGeometry) {
                     float3 shadowDir = make_float3(-lDir.x, -lDir.y, -lDir.z);
                     float3 shadowOrig = make_float3(px+shadowDir.x*0.01f, py+shadowDir.y*0.01f, pz+shadowDir.z*0.01f);
                     unsigned int gp0=0,gp1=0,gp2=0,gp3=__float_as_uint(1e30f),gp4=0,gp5=0,gp6=0;
@@ -1064,7 +1066,7 @@ static __forceinline__ __device__ void marchSingleVolume(
 
                 // Shadow ray for virtual light
                 float shadowTrans=1.f;
-                if (vol.shadowSteps>0 && vol.shadowDensity>0.01f) {
+                if (!params.previewMode && vol.shadowSteps>0 && vol.shadowDensity>0.01f) {
                     float3 sDir=make_float3(-lDir.x,-lDir.y,-lDir.z);
                     float voxelSz = fmaxf(fmaxf(
                         (vol.bboxMax.x-vol.bboxMin.x)/vol.resX,
@@ -1117,7 +1119,7 @@ static __forceinline__ __device__ void marchSingleVolume(
                 }
 
                 // Geometry occlusion for virtual light
-                if (shadowTrans > 0.01f && params.hasRealGeometry) {
+                if (!params.previewMode && shadowTrans > 0.01f && params.hasRealGeometry) {
                     float3 shadowDir = make_float3(-lDir.x, -lDir.y, -lDir.z);
                     float3 shadowOrig = make_float3(px+shadowDir.x*0.01f, py+shadowDir.y*0.01f, pz+shadowDir.z*0.01f);
                     unsigned int gp0=0,gp1=0,gp2=0,gp3=__float_as_uint(1e30f),gp4=0,gp5=0,gp6=0;

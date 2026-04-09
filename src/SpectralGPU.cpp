@@ -754,7 +754,9 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     launchParams.height      = height;
     launchParams.traversable = _gasHandle;
     launchParams.spp         = spp;
+    launchParams.maxBounces  = maxBounces;
     launchParams.colorSpace  = colorSpace;
+    launchParams.previewMode = (spp <= 2) ? 1 : 0;
     launchParams.normals     = reinterpret_cast<float3*>(_d_normals);
     launchParams.materialIds = reinterpret_cast<int*>(_d_materialIds);
     launchParams.triCount    = _triCount;
@@ -764,7 +766,6 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
 
     launchParams.lights     = reinterpret_cast<spectral_gpu::GPULight*>(_d_lights);
     launchParams.lightCount = _lightCount;
-    launchParams.maxBounces = maxBounces;
     launchParams.uvs          = reinterpret_cast<float2*>(_d_uvs);
     launchParams.textures     = reinterpret_cast<spectral_gpu::GPUTexture*>(_d_textures);
     launchParams.textureCount = _textureCount;
@@ -1074,8 +1075,9 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
         auto msUpload   = std::chrono::duration_cast<std::chrono::milliseconds>(tVolUploadEnd - tVolUploadStart).count();
         auto msLaunch   = std::chrono::duration_cast<std::chrono::milliseconds>(tLaunchEnd - tLaunchStart).count();
         auto msDownload = std::chrono::duration_cast<std::chrono::milliseconds>(tDownloadEnd - tLaunchEnd).count();
-        fprintf(stderr, "SpectralGPU: timing — vol_upload=%lldms launch=%lldms download=%lldms (%dx%d %d vol)\n",
-                msUpload, msLaunch, msDownload, width, height, launchParams.numGpuVolumes);
+        fprintf(stderr, "SpectralGPU: timing — vol_upload=%lldms launch=%lldms download=%lldms (%dx%d %d vol%s)\n",
+                msUpload, msLaunch, msDownload, width, height, launchParams.numGpuVolumes,
+                launchParams.previewMode ? " PREVIEW" : "");
     }
 
     return true;
