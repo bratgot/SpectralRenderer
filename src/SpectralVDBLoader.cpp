@@ -9,8 +9,10 @@
 #include <openvdb/openvdb.h>
 #include <openvdb/io/File.h>
 #include <openvdb/tools/Interpolation.h>
+#include <openvdb/tools/Dense.h>
 #include <algorithm>
 #include <cstdio>
+#include <chrono>
 #include <mutex>
 #include <thread>
 #include <atomic>
@@ -155,9 +157,13 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::_LoadFromDisk(const char* fil
     bool densityOnly = (maxRes > 0 && maxRes <= 64);
 
     try {
+        auto tStart = std::chrono::high_resolution_clock::now();
+
         openvdb::initialize();
         openvdb::io::File file(filepath);
         file.open();
+
+        auto tOpen = std::chrono::high_resolution_clock::now();
 
         auto vol = std::make_shared<SpectralVolume>();
 
@@ -201,6 +207,8 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::_LoadFromDisk(const char* fil
 
         file.close();
 
+        auto tGrids = std::chrono::high_resolution_clock::now();
+
         if (!densityGrid) {
             fprintf(stderr, "SpectralVDB: no float grid found in %s\n", filepath);
             return nullptr;
@@ -222,9 +230,9 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::_LoadFromDisk(const char* fil
         } else {
             effectiveMax = maxRes;
         }
-        vol->resX = std::max(1, std::min(effectiveMax, int(dim.x() * effectiveMax / maxDim)));
-        vol->resY = std::max(1, std::min(effectiveMax, int(dim.y() * effectiveMax / maxDim)));
-        vol->resZ = std::max(1, std::min(effectiveMax, int(dim.z() * effectiveMax / maxDim)));
+        vol->resX = std::max(1, std::min(int(dim.x()), int(dim.x() * effectiveMax / maxDim)));
+        vol->resY = std::max(1, std::min(int(dim.y()), int(dim.y() * effectiveMax / maxDim)));
+        vol->resZ = std::max(1, std::min(int(dim.z()), int(dim.z() * effectiveMax / maxDim)));
 
         fprintf(stderr, "SpectralVDB: native VDB dims = %dx%dx%d, resampling to %dx%dx%d (maxRes=%d%s)\n",
                 dim.x(), dim.y(), dim.z(), vol->resX, vol->resY, vol->resZ, effectiveMax,
@@ -266,20 +274,32 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::_LoadFromDisk(const char* fil
 
         } else {
             // ── QUALITY RENDER PATH ────────────────────────────────────
+            bool isNativeRes = (vol->resX >= int(dim.x()) &&
+                                vol->resY >= int(dim.y()) &&
+                                vol->resZ >= int(dim.z()));
 
-            #pragma omp parallel for schedule(dynamic) if(totalVoxels > 10000)
-            for (int iz = 0; iz < rZ; ++iz) {
-                openvdb::tools::GridSampler<openvdb::FloatGrid, openvdb::tools::BoxSampler> localSampler(*densityGrid);
-                double w = double(iz) / double(rZ);
-                double wz = wMinZ + w * wRangeZ;
-                for (int iy = 0; iy < rY; ++iy) {
-                    double v = double(iy) / double(rY);
-                    double wy = wMinY + v * wRangeY;
-                    for (int ix = 0; ix < rX; ++ix) {
-                        double u = double(ix) / double(rX);
-                        openvdb::Vec3d worldPos(wMinX + u * wRangeX, wy, wz);
-                        openvdb::Vec3d idxPos = densityGrid->worldToIndex(worldPos);
-                        vol->density[iz * rY * rX + iy * rX + ix] = localSampler.isSample(idxPos);
+            if (isNativeRes) {
+                // NATIVE RESOLUTION — bulk tree copy, no interpolation
+                // copyToDense walks VDB tree structure directly: ~100× faster than BoxSampler
+                openvdb::tools::Dense<float, openvdb::tools::LayoutXYZ> denseGrid(bbox, vol->density.data());
+                openvdb::tools::copyToDense(*densityGrid, denseGrid);
+
+            } else {
+                // DOWNSAMPLED — PointSampler (nearest neighbor, 1 lookup vs BoxSampler's 8)
+                #pragma omp parallel for schedule(dynamic) if(totalVoxels > 10000)
+                for (int iz = 0; iz < rZ; ++iz) {
+                    openvdb::tools::GridSampler<openvdb::FloatGrid, openvdb::tools::PointSampler> localSampler(*densityGrid);
+                    double w = double(iz) / double(rZ);
+                    double wz = wMinZ + w * wRangeZ;
+                    for (int iy = 0; iy < rY; ++iy) {
+                        double v = double(iy) / double(rY);
+                        double wy = wMinY + v * wRangeY;
+                        for (int ix = 0; ix < rX; ++ix) {
+                            double u = double(ix) / double(rX);
+                            openvdb::Vec3d worldPos(wMinX + u * wRangeX, wy, wz);
+                            openvdb::Vec3d idxPos = densityGrid->worldToIndex(worldPos);
+                            vol->density[iz * rY * rX + iy * rX + ix] = localSampler.isSample(idxPos);
+                        }
                     }
                 }
             }
@@ -288,19 +308,27 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::_LoadFromDisk(const char* fil
         // Resample temperature (skip for preview)
         if (tempGrid && !densityOnly) {
             vol->temperature.resize(totalVoxels, 0.f);
-            #pragma omp parallel for schedule(dynamic) if(totalVoxels > 10000)
-            for (int iz = 0; iz < rZ; ++iz) {
-                openvdb::tools::GridSampler<openvdb::FloatGrid, openvdb::tools::BoxSampler> localSampler(*tempGrid);
-                double w = double(iz) / double(rZ);
-                double wz = wMinZ + w * wRangeZ;
-                for (int iy = 0; iy < rY; ++iy) {
-                    double v = double(iy) / double(rY);
-                    double wy = wMinY + v * wRangeY;
-                    for (int ix = 0; ix < rX; ++ix) {
-                        double u = double(ix) / double(rX);
-                        openvdb::Vec3d worldPos(wMinX + u * wRangeX, wy, wz);
-                        openvdb::Vec3d idxPos = tempGrid->worldToIndex(worldPos);
-                        vol->temperature[iz * rY * rX + iy * rX + ix] = localSampler.isSample(idxPos);
+            bool isNativeRes = (vol->resX >= int(dim.x()) &&
+                                vol->resY >= int(dim.y()) &&
+                                vol->resZ >= int(dim.z()));
+            if (isNativeRes) {
+                openvdb::tools::Dense<float, openvdb::tools::LayoutXYZ> denseGrid(bbox, vol->temperature.data());
+                openvdb::tools::copyToDense(*tempGrid, denseGrid);
+            } else {
+                #pragma omp parallel for schedule(dynamic) if(totalVoxels > 10000)
+                for (int iz = 0; iz < rZ; ++iz) {
+                    openvdb::tools::GridSampler<openvdb::FloatGrid, openvdb::tools::PointSampler> localSampler(*tempGrid);
+                    double w = double(iz) / double(rZ);
+                    double wz = wMinZ + w * wRangeZ;
+                    for (int iy = 0; iy < rY; ++iy) {
+                        double v = double(iy) / double(rY);
+                        double wy = wMinY + v * wRangeY;
+                        for (int ix = 0; ix < rX; ++ix) {
+                            double u = double(ix) / double(rX);
+                            openvdb::Vec3d worldPos(wMinX + u * wRangeX, wy, wz);
+                            openvdb::Vec3d idxPos = tempGrid->worldToIndex(worldPos);
+                            vol->temperature[iz * rY * rX + iy * rX + ix] = localSampler.isSample(idxPos);
+                        }
                     }
                 }
             }
@@ -309,28 +337,44 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::_LoadFromDisk(const char* fil
         // Resample flame (skip for preview)
         if (flameGrid && !densityOnly) {
             vol->flame.resize(totalVoxels, 0.f);
-            #pragma omp parallel for schedule(dynamic) if(totalVoxels > 10000)
-            for (int iz = 0; iz < rZ; ++iz) {
-                openvdb::tools::GridSampler<openvdb::FloatGrid, openvdb::tools::BoxSampler> localSampler(*flameGrid);
-                double w = double(iz) / double(rZ);
-                double wz = wMinZ + w * wRangeZ;
-                for (int iy = 0; iy < rY; ++iy) {
-                    double v = double(iy) / double(rY);
-                    double wy = wMinY + v * wRangeY;
-                    for (int ix = 0; ix < rX; ++ix) {
-                        double u = double(ix) / double(rX);
-                        openvdb::Vec3d worldPos(wMinX + u * wRangeX, wy, wz);
-                        openvdb::Vec3d idxPos = flameGrid->worldToIndex(worldPos);
-                        vol->flame[iz * rY * rX + iy * rX + ix] = localSampler.isSample(idxPos);
+            bool isNativeRes = (vol->resX >= int(dim.x()) &&
+                                vol->resY >= int(dim.y()) &&
+                                vol->resZ >= int(dim.z()));
+            if (isNativeRes) {
+                openvdb::tools::Dense<float, openvdb::tools::LayoutXYZ> denseGrid(bbox, vol->flame.data());
+                openvdb::tools::copyToDense(*flameGrid, denseGrid);
+            } else {
+                #pragma omp parallel for schedule(dynamic) if(totalVoxels > 10000)
+                for (int iz = 0; iz < rZ; ++iz) {
+                    openvdb::tools::GridSampler<openvdb::FloatGrid, openvdb::tools::PointSampler> localSampler(*flameGrid);
+                    double w = double(iz) / double(rZ);
+                    double wz = wMinZ + w * wRangeZ;
+                    for (int iy = 0; iy < rY; ++iy) {
+                        double v = double(iy) / double(rY);
+                        double wy = wMinY + v * wRangeY;
+                        for (int ix = 0; ix < rX; ++ix) {
+                            double u = double(ix) / double(rX);
+                            openvdb::Vec3d worldPos(wMinX + u * wRangeX, wy, wz);
+                            openvdb::Vec3d idxPos = flameGrid->worldToIndex(worldPos);
+                            vol->flame[iz * rY * rX + iy * rX + ix] = localSampler.isSample(idxPos);
+                        }
                     }
                 }
             }
         }
 
-        fprintf(stderr, "SpectralVDB: loaded '%s' — %dx%dx%d (bbox %.1f,%.1f,%.1f → %.1f,%.1f,%.1f)%s%s\n",
+        auto tResample = std::chrono::high_resolution_clock::now();
+        auto msOpen     = std::chrono::duration_cast<std::chrono::milliseconds>(tOpen - tStart).count();
+        auto msGrids    = std::chrono::duration_cast<std::chrono::milliseconds>(tGrids - tOpen).count();
+        auto msResample = std::chrono::duration_cast<std::chrono::milliseconds>(tResample - tGrids).count();
+        auto msTotal    = std::chrono::duration_cast<std::chrono::milliseconds>(tResample - tStart).count();
+
+        bool isNative = (vol->resX >= int(dim.x()) && vol->resY >= int(dim.y()) && vol->resZ >= int(dim.z()));
+
+        fprintf(stderr, "SpectralVDB: loaded '%s' — %dx%dx%d (open=%lldms grids=%lldms resample=%lldms total=%lldms) [%s]%s%s\n",
                 filepath, vol->resX, vol->resY, vol->resZ,
-                vol->bboxMin[0], vol->bboxMin[1], vol->bboxMin[2],
-                vol->bboxMax[0], vol->bboxMax[1], vol->bboxMax[2],
+                msOpen, msGrids, msResample, msTotal,
+                densityOnly ? "streaming" : (isNative ? "copyToDense" : "PointSampler"),
                 tempGrid && !densityOnly ? " +temperature" : "",
                 flameGrid && !densityOnly ? " +flame" : "");
 

@@ -59,6 +59,66 @@ using MissSbtRecord     = SbtRecord<spectral_gpu::MissData>;
 using HitGroupSbtRecord = SbtRecord<spectral_gpu::HitGroupData>;
 
 // ---------------------------------------------------------------------------
+// Helper: create CUDA 3D texture from float data
+// ---------------------------------------------------------------------------
+static bool _CreateVolumeTex3D(const float* data, int resX, int resY, int resZ,
+                                cudaArray_t& outArray, cudaTextureObject_t& outTex)
+{
+    // Allocate 3D array
+    cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<float>();
+    cudaExtent extent = make_cudaExtent(resX, resY, resZ);
+    cudaError_t err = cudaMalloc3DArray(&outArray, &channelDesc, extent);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "SpectralGPU: cudaMalloc3DArray failed: %s\n", cudaGetErrorString(err));
+        return false;
+    }
+
+    // Copy data to 3D array
+    cudaMemcpy3DParms copyParams = {};
+    copyParams.srcPtr = make_cudaPitchedPtr(
+        const_cast<float*>(data),
+        resX * sizeof(float),  // pitch
+        resX,                  // xsize
+        resY);                 // ysize
+    copyParams.dstArray = outArray;
+    copyParams.extent = extent;
+    copyParams.kind = cudaMemcpyHostToDevice;
+    err = cudaMemcpy3D(&copyParams);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "SpectralGPU: cudaMemcpy3D failed: %s\n", cudaGetErrorString(err));
+        cudaFreeArray(outArray); outArray = nullptr;
+        return false;
+    }
+
+    // Create texture object with hardware trilinear + clamp
+    cudaResourceDesc resDesc = {};
+    resDesc.resType = cudaResourceTypeArray;
+    resDesc.res.array.array = outArray;
+
+    cudaTextureDesc texDesc = {};
+    texDesc.addressMode[0] = cudaAddressModeClamp;
+    texDesc.addressMode[1] = cudaAddressModeClamp;
+    texDesc.addressMode[2] = cudaAddressModeClamp;
+    texDesc.filterMode = cudaFilterModeLinear;  // hardware trilinear!
+    texDesc.readMode = cudaReadModeElementType;
+    texDesc.normalizedCoords = 1;  // use [0,1] coordinates
+
+    err = cudaCreateTextureObject(&outTex, &resDesc, &texDesc, nullptr);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "SpectralGPU: cudaCreateTextureObject failed: %s\n", cudaGetErrorString(err));
+        cudaFreeArray(outArray); outArray = nullptr;
+        return false;
+    }
+    return true;
+}
+
+static void _DestroyVolumeTex3D(cudaArray_t& arr, cudaTextureObject_t& tex)
+{
+    if (tex) { cudaDestroyTextureObject(tex); tex = 0; }
+    if (arr) { cudaFreeArray(arr); arr = nullptr; }
+}
+
+// ---------------------------------------------------------------------------
 // Construction / destruction
 // ---------------------------------------------------------------------------
 SpectralGPU::SpectralGPU() = default;
@@ -714,9 +774,9 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     memset(launchParams.gpuVolumes, 0, sizeof(launchParams.gpuVolumes));
     // Legacy single-volume fields
     launchParams.hasVolume = 0;
-    launchParams.volumeDensity = nullptr;
-    launchParams.volumeTemperature = nullptr;
-    launchParams.volumeFlame = nullptr;
+    launchParams.volumeDensity = 0;
+    launchParams.volumeTemperature = 0;
+    launchParams.volumeFlame = 0;
 
     int nv = numVolumes;
     if (nv > SPECTRAL_MAX_GPU_VOLUMES) nv = SPECTRAL_MAX_GPU_VOLUMES;
@@ -784,62 +844,111 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
         gv.tempMix = volume->tempMix;
         gv.flameMix = volume->flameMix;
 
-        // Upload density grid — always upload data (animated sequences need fresh data)
-        // Only realloc VRAM when size changes (the malloc is expensive, memcpy is cheap)
-        size_t densBytes = volume->density.size() * sizeof(float);
+        // Upload density grid as 3D CUDA texture
+        // Only recreate texture when resolution changes (texture creation is expensive)
         auto& dv = _d_volumes[gi];
 
-        if (dv.cachedSize != densBytes) {
-            if (dv.d_density) cudaFree(reinterpret_cast<void*>(dv.d_density));
-            dv.d_density = 0;
-            CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&dv.d_density), densBytes));
-            dv.cachedSize = densBytes;
+        bool resChanged = (volume->resX != dv.cachedResX ||
+                           volume->resY != dv.cachedResY ||
+                           volume->resZ != dv.cachedResZ);
+
+        if (resChanged) {
+            _DestroyVolumeTex3D(dv.arr_density, dv.tex_density);
         }
-        CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(dv.d_density), volume->density.data(),
-                              densBytes, cudaMemcpyHostToDevice));
+        if (!dv.tex_density) {
+            if (!_CreateVolumeTex3D(volume->density.data(),
+                    volume->resX, volume->resY, volume->resZ,
+                    dv.arr_density, dv.tex_density)) {
+                fprintf(stderr, "SpectralGPU: failed to create density texture\n");
+                continue;
+            }
+            dv.cachedResX = volume->resX;
+            dv.cachedResY = volume->resY;
+            dv.cachedResZ = volume->resZ;
+        } else {
+            // Same resolution — update data in existing array
+            cudaMemcpy3DParms copyParams = {};
+            copyParams.srcPtr = make_cudaPitchedPtr(
+                const_cast<float*>(volume->density.data()),
+                volume->resX * sizeof(float), volume->resX, volume->resY);
+            copyParams.dstArray = dv.arr_density;
+            copyParams.extent = make_cudaExtent(volume->resX, volume->resY, volume->resZ);
+            copyParams.kind = cudaMemcpyHostToDevice;
+            cudaMemcpy3D(&copyParams);
+        }
 
         // Temperature
         {
-            size_t tempBytes = volume->temperature.empty() ? 0 : volume->temperature.size() * sizeof(float);
-            if (dv.d_temp && (tempBytes == 0 || tempBytes != dv.cachedTempSize)) {
-                cudaFree(reinterpret_cast<void*>(dv.d_temp)); dv.d_temp = 0; dv.cachedTempSize = 0;
+            bool hasTemp = !volume->temperature.empty();
+            bool tempResChanged = hasTemp && (volume->resX != dv.cachedTempResX ||
+                                              volume->resY != dv.cachedTempResY ||
+                                              volume->resZ != dv.cachedTempResZ);
+            if (!hasTemp || tempResChanged) {
+                _DestroyVolumeTex3D(dv.arr_temp, dv.tex_temp);
+                dv.cachedTempResX = dv.cachedTempResY = dv.cachedTempResZ = 0;
             }
-            if (tempBytes > 0) {
-                if (!dv.d_temp) {
-                    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&dv.d_temp), tempBytes));
-                    dv.cachedTempSize = tempBytes;
+            if (hasTemp) {
+                if (!dv.tex_temp) {
+                    _CreateVolumeTex3D(volume->temperature.data(),
+                        volume->resX, volume->resY, volume->resZ,
+                        dv.arr_temp, dv.tex_temp);
+                    dv.cachedTempResX = volume->resX;
+                    dv.cachedTempResY = volume->resY;
+                    dv.cachedTempResZ = volume->resZ;
+                } else {
+                    cudaMemcpy3DParms cp = {};
+                    cp.srcPtr = make_cudaPitchedPtr(
+                        const_cast<float*>(volume->temperature.data()),
+                        volume->resX * sizeof(float), volume->resX, volume->resY);
+                    cp.dstArray = dv.arr_temp;
+                    cp.extent = make_cudaExtent(volume->resX, volume->resY, volume->resZ);
+                    cp.kind = cudaMemcpyHostToDevice;
+                    cudaMemcpy3D(&cp);
                 }
-                CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(dv.d_temp), volume->temperature.data(),
-                                      tempBytes, cudaMemcpyHostToDevice));
             }
         }
 
         // Flame
         {
-            size_t flameBytes = volume->flame.empty() ? 0 : volume->flame.size() * sizeof(float);
-            if (dv.d_flame && (flameBytes == 0 || flameBytes != dv.cachedFlameSize)) {
-                cudaFree(reinterpret_cast<void*>(dv.d_flame)); dv.d_flame = 0; dv.cachedFlameSize = 0;
+            bool hasFlame = !volume->flame.empty();
+            bool flameResChanged = hasFlame && (volume->resX != dv.cachedFlameResX ||
+                                                volume->resY != dv.cachedFlameResY ||
+                                                volume->resZ != dv.cachedFlameResZ);
+            if (!hasFlame || flameResChanged) {
+                _DestroyVolumeTex3D(dv.arr_flame, dv.tex_flame);
+                dv.cachedFlameResX = dv.cachedFlameResY = dv.cachedFlameResZ = 0;
             }
-            if (flameBytes > 0) {
-                if (!dv.d_flame) {
-                    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&dv.d_flame), flameBytes));
-                    dv.cachedFlameSize = flameBytes;
+            if (hasFlame) {
+                if (!dv.tex_flame) {
+                    _CreateVolumeTex3D(volume->flame.data(),
+                        volume->resX, volume->resY, volume->resZ,
+                        dv.arr_flame, dv.tex_flame);
+                    dv.cachedFlameResX = volume->resX;
+                    dv.cachedFlameResY = volume->resY;
+                    dv.cachedFlameResZ = volume->resZ;
+                } else {
+                    cudaMemcpy3DParms cp = {};
+                    cp.srcPtr = make_cudaPitchedPtr(
+                        const_cast<float*>(volume->flame.data()),
+                        volume->resX * sizeof(float), volume->resX, volume->resY);
+                    cp.dstArray = dv.arr_flame;
+                    cp.extent = make_cudaExtent(volume->resX, volume->resY, volume->resZ);
+                    cp.kind = cudaMemcpyHostToDevice;
+                    cudaMemcpy3D(&cp);
                 }
-                CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(dv.d_flame), volume->flame.data(),
-                                      flameBytes, cudaMemcpyHostToDevice));
             }
         }
 
-        gv.density = reinterpret_cast<float*>(dv.d_density);
-        gv.temperature = dv.d_temp ? reinterpret_cast<float*>(dv.d_temp) : nullptr;
-        gv.flame = dv.d_flame ? reinterpret_cast<float*>(dv.d_flame) : nullptr;
+        gv.densityTex = dv.tex_density;
+        gv.temperatureTex = dv.tex_temp;
+        gv.flameTex = dv.tex_flame;
 
         // Also populate legacy single-volume fields for volume[0]
         if (gi == 0) {
             launchParams.hasVolume = 1;
-            launchParams.volumeDensity = gv.density;
-            launchParams.volumeTemperature = gv.temperature;
-            launchParams.volumeFlame = gv.flame;
+            launchParams.volumeDensity = gv.densityTex;
+            launchParams.volumeTemperature = gv.temperatureTex;
+            launchParams.volumeFlame = gv.flameTex;
             launchParams.volResX = gv.resX; launchParams.volResY = gv.resY; launchParams.volResZ = gv.resZ;
             launchParams.volBboxMin = gv.bboxMin; launchParams.volBboxMax = gv.bboxMax;
             launchParams.volExtinction = gv.extinction; launchParams.volScattering = gv.scattering;
@@ -868,12 +977,13 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
 
     // Free unused volume slots
     for (int vi = launchParams.numGpuVolumes; vi < _numDeviceVolumes; ++vi) {
-        if (_d_volumes[vi].d_density) { cudaFree(reinterpret_cast<void*>(_d_volumes[vi].d_density)); _d_volumes[vi].d_density = 0; }
-        if (_d_volumes[vi].d_temp)    { cudaFree(reinterpret_cast<void*>(_d_volumes[vi].d_temp));    _d_volumes[vi].d_temp = 0; }
-        if (_d_volumes[vi].d_flame)   { cudaFree(reinterpret_cast<void*>(_d_volumes[vi].d_flame));   _d_volumes[vi].d_flame = 0; }
-        _d_volumes[vi].cachedSize = 0;
-        _d_volumes[vi].cachedTempSize = 0;
-        _d_volumes[vi].cachedFlameSize = 0;
+        _DestroyVolumeTex3D(_d_volumes[vi].arr_density, _d_volumes[vi].tex_density);
+        _DestroyVolumeTex3D(_d_volumes[vi].arr_temp, _d_volumes[vi].tex_temp);
+        _DestroyVolumeTex3D(_d_volumes[vi].arr_flame, _d_volumes[vi].tex_flame);
+        _d_volumes[vi].cachedResX = _d_volumes[vi].cachedResY = _d_volumes[vi].cachedResZ = 0;
+        _d_volumes[vi].cachedTempResX = _d_volumes[vi].cachedTempResY = _d_volumes[vi].cachedTempResZ = 0;
+        _d_volumes[vi].cachedFlameResX = _d_volumes[vi].cachedFlameResY = _d_volumes[vi].cachedFlameResZ = 0;
+        _d_volumes[vi].dataHash = 0;
     }
     _numDeviceVolumes = launchParams.numGpuVolumes;
 

@@ -85,9 +85,9 @@ struct CameraParams {
 #define SPECTRAL_MAX_GPU_VOLUMES 8
 
 struct GPUVolume {
-    float*  density;          // device ptr
-    float*  temperature;      // device ptr (null if none)
-    float*  flame;            // device ptr (null if none)
+    cudaTextureObject_t densityTex;      // 3D texture (hardware trilinear)
+    cudaTextureObject_t temperatureTex;  // 3D texture (0 if none)
+    cudaTextureObject_t flameTex;        // 3D texture (0 if none)
     int     resX, resY, resZ;
     float3  bboxMin, bboxMax;
     float   extinction;
@@ -178,9 +178,9 @@ struct LaunchParams {
 
     int                blueNoise;        // 1 = R2 sampling, 0 = random
 
-    // Volume data (VDB grid uploaded to GPU)
-    float*             volumeDensity;     // 3D density grid (resX*resY*resZ)
-    float*             volumeTemperature; // 3D temperature grid (optional, null if none)
+    // Volume data (VDB grid uploaded as 3D CUDA texture)
+    cudaTextureObject_t volumeDensity;     // 3D density texture
+    cudaTextureObject_t volumeTemperature; // 3D temperature texture (0 if none)
     int                volResX, volResY, volResZ;
     float3             volBboxMin, volBboxMax;
     float              volExtinction;
@@ -206,7 +206,7 @@ struct LaunchParams {
     int                volRenderMode;     // 0=Lit,1=Grey,2=Heat,3=Cool,4=BB,5=Expl
     float              volIntensity;
     float              volFlameIntensity;
-    float*             volumeFlame;       // 3D flame grid (optional)
+    cudaTextureObject_t volumeFlame;       // 3D flame texture (0 if none)
     // Noise
     int                volNoiseEnable;
     float              volNoiseScale;

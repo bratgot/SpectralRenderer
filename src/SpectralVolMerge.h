@@ -50,10 +50,19 @@ public:
 
     struct PreviewPoint { float x, y, z, r, g, b; };
 
+    struct VolumeDisplayInfo {
+        std::string filePath;
+        std::string densityField;
+        std::string tempField;
+        std::string flameField;
+        float tx, ty, tz;   // translate
+    };
+
 private:
     class Engine;
     int _volCount = 0;
     int _curFrame = -999;
+    int _displayMode = 1;  // 0=points, 1=volume
     bool _validating = false;
     SpectralEnvLight*    _envLight = nullptr;
     SpectralStudioLight* _studioLight = nullptr;

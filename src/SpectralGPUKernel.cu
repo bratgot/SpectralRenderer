@@ -598,7 +598,7 @@ static __forceinline__ __device__ float shadeHit(
                 if (params.numGpuVolumes > 0 && shadowTransmit > 0.01f) {
                     for (int vi = 0; vi < params.numGpuVolumes; ++vi) {
                         const GPUVolume& svol = params.gpuVolumes[vi];
-                        if (!svol.density) continue;
+                        if (!svol.densityTex) continue;
 
                         // Ray-AABB for shadow ray
                         float3 sInvDir = make_float3(
@@ -694,58 +694,24 @@ static __forceinline__ __device__ float shadeHit(
 // GPU Volume ray marching — Beer-Lambert + HG phase + emission
 // ---------------------------------------------------------------------------
 
-// Per-volume sampling functions (Phase 13 multi-volume)
+// Per-volume sampling functions — CUDA 3D texture with hardware trilinear
+// Normalized coordinates [0,1], clamped at borders, hardware-interpolated.
+// Each tex3D replaces 8 global memory reads + 7 lerps with a single texture fetch.
 static __forceinline__ __device__ float sampleDensity(const spectral_gpu::GPUVolume& vol, float u, float v, float w)
 {
-    if (u<0.f||u>1.f||v<0.f||v>1.f||w<0.f||w>1.f) return 0.f;
-    float fx=u*(vol.resX-1), fy=v*(vol.resY-1), fz=w*(vol.resZ-1);
-    int x0=max(0,min(int(fx),vol.resX-2));
-    int y0=max(0,min(int(fy),vol.resY-2));
-    int z0=max(0,min(int(fz),vol.resZ-2));
-    float dx=fx-x0, dy=fy-y0, dz=fz-z0;
-    int x1=x0+1, y1=y0+1, z1=z0+1;
-    int sY=vol.resX, sZ=vol.resY*vol.resX;
-    float c000=vol.density[z0*sZ+y0*sY+x0], c100=vol.density[z0*sZ+y0*sY+x1];
-    float c010=vol.density[z0*sZ+y1*sY+x0], c110=vol.density[z0*sZ+y1*sY+x1];
-    float c001=vol.density[z1*sZ+y0*sY+x0], c101=vol.density[z1*sZ+y0*sY+x1];
-    float c011=vol.density[z1*sZ+y1*sY+x0], c111=vol.density[z1*sZ+y1*sY+x1];
-    float c00=c000*(1-dx)+c100*dx, c10=c010*(1-dx)+c110*dx;
-    float c01=c001*(1-dx)+c101*dx, c11=c011*(1-dx)+c111*dx;
-    return ((c00*(1-dy)+c10*dy)*(1-dz)+(c01*(1-dy)+c11*dy)*dz)*vol.densityMult;
+    return tex3D<float>(vol.densityTex, u, v, w) * vol.densityMult;
 }
 
 static __forceinline__ __device__ float sampleTemp(const spectral_gpu::GPUVolume& vol, float u, float v, float w)
 {
-    if (!vol.temperature) return 0.f;
-    if (u<0.f||u>1.f||v<0.f||v>1.f||w<0.f||w>1.f) return 0.f;
-    float fx=u*(vol.resX-1), fy=v*(vol.resY-1), fz=w*(vol.resZ-1);
-    int x0=max(0,min(int(fx),vol.resX-2)),y0=max(0,min(int(fy),vol.resY-2)),z0=max(0,min(int(fz),vol.resZ-2));
-    float dx=fx-x0,dy=fy-y0,dz=fz-z0;
-    int x1=x0+1,y1=y0+1,z1=z0+1,sY=vol.resX,sZ=vol.resY*vol.resX;
-    float c000=vol.temperature[z0*sZ+y0*sY+x0],c100=vol.temperature[z0*sZ+y0*sY+x1];
-    float c010=vol.temperature[z0*sZ+y1*sY+x0],c110=vol.temperature[z0*sZ+y1*sY+x1];
-    float c001=vol.temperature[z1*sZ+y0*sY+x0],c101=vol.temperature[z1*sZ+y0*sY+x1];
-    float c011=vol.temperature[z1*sZ+y1*sY+x0],c111=vol.temperature[z1*sZ+y1*sY+x1];
-    float c00=c000*(1-dx)+c100*dx,c10=c010*(1-dx)+c110*dx;
-    float c01=c001*(1-dx)+c101*dx,c11=c011*(1-dx)+c111*dx;
-    return (c00*(1-dy)+c10*dy)*(1-dz)+(c01*(1-dy)+c11*dy)*dz;
+    if (!vol.temperatureTex) return 0.f;
+    return tex3D<float>(vol.temperatureTex, u, v, w);
 }
 
 static __forceinline__ __device__ float sampleFlame(const spectral_gpu::GPUVolume& vol, float u, float v, float w)
 {
-    if (!vol.flame) return 0.f;
-    if (u<0.f||u>1.f||v<0.f||v>1.f||w<0.f||w>1.f) return 0.f;
-    float fx=u*(vol.resX-1), fy=v*(vol.resY-1), fz=w*(vol.resZ-1);
-    int x0=max(0,min(int(fx),vol.resX-2)),y0=max(0,min(int(fy),vol.resY-2)),z0=max(0,min(int(fz),vol.resZ-2));
-    float dx=fx-x0,dy=fy-y0,dz=fz-z0;
-    int x1=x0+1,y1=y0+1,z1=z0+1,sY=vol.resX,sZ=vol.resY*vol.resX;
-    float c000=vol.flame[z0*sZ+y0*sY+x0],c100=vol.flame[z0*sZ+y0*sY+x1];
-    float c010=vol.flame[z0*sZ+y1*sY+x0],c110=vol.flame[z0*sZ+y1*sY+x1];
-    float c001=vol.flame[z1*sZ+y0*sY+x0],c101=vol.flame[z1*sZ+y0*sY+x1];
-    float c011=vol.flame[z1*sZ+y1*sY+x0],c111=vol.flame[z1*sZ+y1*sY+x1];
-    float c00=c000*(1-dx)+c100*dx,c10=c010*(1-dx)+c110*dx;
-    float c01=c001*(1-dx)+c101*dx,c11=c011*(1-dx)+c111*dx;
-    return (c00*(1-dy)+c10*dy)*(1-dz)+(c01*(1-dy)+c11*dy)*dz;
+    if (!vol.flameTex) return 0.f;
+    return tex3D<float>(vol.flameTex, u, v, w);
 }
 
 static __forceinline__ __device__ void worldToVolUV(
@@ -992,7 +958,7 @@ static __forceinline__ __device__ void marchSingleVolume(
                         for (int ovi = 0; ovi < params.numGpuVolumes; ++ovi) {
                             if (&params.gpuVolumes[ovi] == &vol) continue;
                             const GPUVolume& ovol = params.gpuVolumes[ovi];
-                            if (!ovol.density) continue;
+                            if (!ovol.densityTex) continue;
                             float3 oInv=make_float3(1.f/(fabsf(sDir.x)>1e-8f?sDir.x:1e-8f),1.f/(fabsf(sDir.y)>1e-8f?sDir.y:1e-8f),1.f/(fabsf(sDir.z)>1e-8f?sDir.z:1e-8f));
                             float3 ot0=make_float3((ovol.bboxMin.x-px)*oInv.x,(ovol.bboxMin.y-py)*oInv.y,(ovol.bboxMin.z-pz)*oInv.z);
                             float3 ot1=make_float3((ovol.bboxMax.x-px)*oInv.x,(ovol.bboxMax.y-py)*oInv.y,(ovol.bboxMax.z-pz)*oInv.z);
@@ -1123,7 +1089,7 @@ static __forceinline__ __device__ void marchSingleVolume(
                         for (int ovi = 0; ovi < params.numGpuVolumes; ++ovi) {
                             if (&params.gpuVolumes[ovi] == &vol) continue;
                             const GPUVolume& ovol = params.gpuVolumes[ovi];
-                            if (!ovol.density) continue;
+                            if (!ovol.densityTex) continue;
                             float3 oInv=make_float3(1.f/(fabsf(sDir.x)>1e-8f?sDir.x:1e-8f),1.f/(fabsf(sDir.y)>1e-8f?sDir.y:1e-8f),1.f/(fabsf(sDir.z)>1e-8f?sDir.z:1e-8f));
                             float3 ot0=make_float3((ovol.bboxMin.x-px)*oInv.x,(ovol.bboxMin.y-py)*oInv.y,(ovol.bboxMin.z-pz)*oInv.z);
                             float3 ot1=make_float3((ovol.bboxMax.x-px)*oInv.x,(ovol.bboxMax.y-py)*oInv.y,(ovol.bboxMax.z-pz)*oInv.z);
@@ -1283,7 +1249,7 @@ static __forceinline__ __device__ void marchVolume(
 
     for (int vi = 0; vi < params.numGpuVolumes; ++vi) {
         const spectral_gpu::GPUVolume& vol = params.gpuVolumes[vi];
-        if (!vol.density) continue;
+        if (!vol.densityTex) continue;
 
         float3 volRGB = make_float3(0.f, 0.f, 0.f);
         float volTrans = 1.f;
@@ -1309,7 +1275,7 @@ static __forceinline__ __device__ float volumeFirstDenseT(float3 ro, float3 rdRa
 
     for (int vi = 0; vi < params.numGpuVolumes; ++vi) {
         const spectral_gpu::GPUVolume& vol = params.gpuVolumes[vi];
-        if (!vol.density) continue;
+        if (!vol.densityTex) continue;
         float3 invDir = make_float3(
             1.f/(fabsf(rd.x)>1e-8f?rd.x:1e-8f),
             1.f/(fabsf(rd.y)>1e-8f?rd.y:1e-8f),

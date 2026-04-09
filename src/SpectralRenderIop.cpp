@@ -3286,11 +3286,11 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
 
             if (densityFile.empty()) continue;
 
-            auto vol = pxr::SpectralVDBLoader::Load(
+            // Metadata-only load (~1ms) — just get bbox for transforms.
+            // Actual voxel data is loaded in _EnsureFrameRendered at render resolution.
+            auto vol = pxr::SpectralVDBLoader::LoadMetadataOnly(
                 densityFile.c_str(),
-                densityField.c_str(),
-                tempField.empty() ? nullptr : tempField.c_str(),
-                masterMaxRes);
+                densityField.c_str());
 
             if (!vol || !vol->IsValid()) continue;
 
@@ -3563,8 +3563,12 @@ void SpectralRenderIop::build_handles(ViewerContext* ctx)
     if (ctx->transform_mode() == VIEWER_2D) return;
     if (node_disabled()) return;
 
-    // Upstream Hydra/USD rendering doesn't propagate through Iop build_handles.
-    // SpectralRender draws its own GL preview instead (local 3D preview checkbox).
+    // Propagate scn input (input 1) so Hydra sees upstream Volume/Geo prims
+    // This enables HdStorm fog rendering when VDBRead is in volume display mode
+    Op* scn = (inputs() > 1) ? input(1) : nullptr;
+    if (scn) scn->build_handles(ctx);
+
+    // Local GL preview (point cloud + bbox + env light dome)
     if (_vdb3dPreview) {
         bool hasVolume = !_volumes.empty() || (_volume && _volume->HasBbox());
         bool hasLights = _cachedEnvLight || _cachedStudioLight;
@@ -4958,8 +4962,10 @@ void SpectralRenderIop::_EnsureFrameRendered()
     // Build volume pointer array for multi-volume rendering
     // Re-load volumes at render resolution and re-apply materials
     if (!_volumes.empty() && _cachedVolMerge) {
+        auto tVolStart = std::chrono::high_resolution_clock::now();
         int masterMaxRes = _GetMasterMaxRes();
         auto entries = _cachedVolMerge->GetVolumes(int(outputContext().frame()), masterMaxRes);
+        auto tVolLoad = std::chrono::high_resolution_clock::now();
 
         // Replace _volumes with render-resolution volumes from VolMerge
         _volumes.clear();
@@ -4982,6 +4988,13 @@ void SpectralRenderIop::_EnsureFrameRendered()
             }
         }
         _volume = _volumes.empty() ? nullptr : _volumes[0];
+        {
+            auto tVolEnd = std::chrono::high_resolution_clock::now();
+            auto msLoad = std::chrono::duration_cast<std::chrono::milliseconds>(tVolLoad - tVolStart).count();
+            auto msTotal = std::chrono::duration_cast<std::chrono::milliseconds>(tVolEnd - tVolStart).count();
+            SLOG("SpectralRender: VolMerge reload — vdb_load=%lldms materials=%lldms total=%lldms (%d vols)\n",
+                 msLoad, msTotal - msLoad, msTotal, (int)_volumes.size());
+        }
 
         // Collect materials from VolMerge inputs
         std::vector<SpectralVolumeMaterial*> volMats;
@@ -5045,6 +5058,8 @@ void SpectralRenderIop::_EnsureFrameRendered()
     std::vector<const pxr::SpectralVolume*> volPtrs;
     for (auto& v : _volumes) if (v) volPtrs.push_back(v.get());
     if (volPtrs.empty() && _volume) volPtrs.push_back(_volume.get());
+
+    auto tGpuStart = std::chrono::high_resolution_clock::now();
 
 #ifdef SPECTRAL_HAS_OPTIX
     if (useGPU) {
@@ -5172,7 +5187,11 @@ void SpectralRenderIop::_EnsureFrameRendered()
 
     _frameReady.store(true);
 
-    SLOG("SpectralRender: render complete\n");
+    {
+        auto tEnd = std::chrono::high_resolution_clock::now();
+        auto msGpu = std::chrono::duration_cast<std::chrono::milliseconds>(tEnd - tGpuStart).count();
+        SLOG("SpectralRender: render complete (gpu+cpu=%lldms)\n", msGpu);
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -141,14 +141,31 @@ void SpectralVDBRead::Engine::createPrims(GeomSceneContext& context,
             }
         }
 
-        // Create field relationships only if they don't already exist
-        Relationship existingRel;
-        if (!volPrim.getRelationship(Token("field:density"), existingRel))
-            volPrim.createRelationship(Token("field:density")).addTarget(densityFieldPath);
-        if (hasTemp && !volPrim.getRelationship(Token("field:temperature"), existingRel))
-            volPrim.createRelationship(Token("field:temperature")).addTarget(tempFieldPath);
-        if (hasFlame && !volPrim.getRelationship(Token("field:flame"), existingRel))
-            volPrim.createRelationship(Token("field:flame")).addTarget(flameFieldPath);
+        // Set field relationships — setTarget if exists, create if not
+        {
+            Relationship rel;
+            if (volPrim.getRelationship(Token("field:density"), rel)) {
+                rel.setTarget(densityFieldPath);
+            } else {
+                volPrim.createRelationship(Token("field:density")).setTarget(densityFieldPath);
+            }
+        }
+        if (hasTemp) {
+            Relationship rel;
+            if (volPrim.getRelationship(Token("field:temperature"), rel)) {
+                rel.setTarget(tempFieldPath);
+            } else {
+                volPrim.createRelationship(Token("field:temperature")).setTarget(tempFieldPath);
+            }
+        }
+        if (hasFlame) {
+            Relationship rel;
+            if (volPrim.getRelationship(Token("field:flame"), rel)) {
+                rel.setTarget(flameFieldPath);
+            } else {
+                volPrim.createRelationship(Token("field:flame")).setTarget(flameFieldPath);
+            }
+        }
 
         fprintf(stderr, "SpectralVDBRead: volume mode — %s field=%s%s%s\n",
                 resolvedPath.c_str(), fieldName.c_str(),
@@ -478,12 +495,11 @@ void SpectralVDBRead::knobs(Knob_Callback f)
     Text_knob(f, "<font color='#888' size='-1'>OpenVDB volume reader for SpectralRender</font>");
 
     Divider(f, "File");
-    File_knob(f, &_filePath, "file", "file");
+    File_knob(f, &_filePath, "file", "");
     Tooltip(f, "OpenVDB volume file (.vdb).\nSupports #### frame padding.");
     KnobModifiesAttribValues(f);
 
     Bool_knob(f, &_autoSequence, "auto_sequence", "auto sequence");
-    ClearFlags(f, Knob::STARTLINE);
     Bool_knob(f, &_lockBbox, "lock_bbox", "lock bbox");
     ClearFlags(f, Knob::STARTLINE);
     Tooltip(f, "Lock world-space bounding box to first loaded frame.\n"

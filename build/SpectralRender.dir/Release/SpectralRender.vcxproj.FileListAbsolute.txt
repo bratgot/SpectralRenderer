@@ -1,6 +1,6 @@
+C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralRender\tbb12.dll
 C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralRender\openvdb.dll
 C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralRender\Imath-3_2.dll
-C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralRender\tbb12.dll
 C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralRender\blosc.dll
 C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralRender\zlib1.dll
 C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralRender\zstd.dll

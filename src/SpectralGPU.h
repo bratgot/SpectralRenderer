@@ -114,17 +114,26 @@ private:
     std::vector<CUdeviceptr> _d_texPixels;         // per-texture pixel data
     CUdeviceptr            _d_params       = 0;
 
-    // Multi-volume device buffers (Phase 13)
+    // Multi-volume device buffers (Phase 13) — CUDA 3D textures
     struct DeviceVolume {
-        CUdeviceptr d_density  = 0;
-        CUdeviceptr d_temp     = 0;
-        CUdeviceptr d_flame    = 0;
-        size_t      cachedSize = 0;
-        size_t      cachedTempSize = 0;
-        size_t      cachedFlameSize = 0;
+        cudaArray_t           arr_density  = nullptr;
+        cudaArray_t           arr_temp     = nullptr;
+        cudaArray_t           arr_flame    = nullptr;
+        cudaTextureObject_t   tex_density  = 0;
+        cudaTextureObject_t   tex_temp     = 0;
+        cudaTextureObject_t   tex_flame    = 0;
+        int                   cachedResX = 0, cachedResY = 0, cachedResZ = 0;
+        int                   cachedTempResX = 0, cachedTempResY = 0, cachedTempResZ = 0;
+        int                   cachedFlameResX = 0, cachedFlameResY = 0, cachedFlameResZ = 0;
+        uint64_t              dataHash   = 0;
     };
     DeviceVolume           _d_volumes[SPECTRAL_MAX_GPU_VOLUMES];
     int                    _numDeviceVolumes = 0;
+
+    // Async volume upload (pinned staging + dedicated stream)
+    CUstream               _uploadStream   = nullptr;
+    void*                  _pinnedStaging  = nullptr;
+    size_t                 _pinnedSize     = 0;
 
     // Legacy single-volume (kept for cleanup)
     CUdeviceptr            _d_volumeDensity = 0;

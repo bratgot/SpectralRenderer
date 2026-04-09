@@ -9,6 +9,7 @@
 #include <DDImage/gl.h>
 #include <cmath>
 #include "usg/geom/PointsPrim.h"
+#include "usg/geom/AssetPath.h"
 
 using namespace DD::Image;
 using namespace fdk;
@@ -20,6 +21,7 @@ const GeomOp::Description SpectralVolMerge::description(CLASS, buildVolMerge);
 
 // Static shared preview data — survives Op recreation
 static std::vector<SpectralVolMerge::PreviewPoint> s_previewPoints;
+static std::vector<SpectralVolMerge::VolumeDisplayInfo> s_volumeInfos;
 static int s_previewFrame = -999;
 
 // Static pointer for Engine→VolMerge access (set in constructor)
@@ -36,16 +38,123 @@ public:
         if (!layer) return;
 
         SpectralVolMerge* volMerge = s_lastVolMerge;
-        if (!volMerge) {
-            fprintf(stderr, "VolMerge::createPrims: s_lastVolMerge=NULL\n");
-            return;
-        }
+        if (!volMerge) return;
 
         // Read frame knob — creates Engine dependency for per-frame invalidation
         TimeValue firstTime = fdk::defaultTimeValue();
         for (const TimeValue& t : context.processTimes()) { firstTime = t; break; }
         int frame = knob("vm_cur_frame").get<int>(firstTime);
 
+        // Read display mode
+        int displayMode = 0;
+        try { displayMode = knob("display_mode").get<int>(firstTime); } catch(...) {}
+
+        // ═══════════════════════════════════════════════════════════════
+        // VOLUME MODE — create UsdVol prims from cached volume info
+        // ═══════════════════════════════════════════════════════════════
+        if (displayMode == 1) {
+            auto& volInfos = s_volumeInfos;
+
+            // First-time fallback: build volume info if cache empty
+            if (volInfos.empty() && volMerge) {
+                for (int i = 0; i < volMerge->inputs(); ++i) {
+                    Op* op = volMerge->input(i);
+                    if (op) op->validate(true);
+                }
+                auto entries = volMerge->GetVolumes(int(firstTime), 32);
+                for (auto& entry : entries) {
+                    if (!entry.vdbRead || !entry.volume || !entry.volume->IsValid()) continue;
+                    SpectralVolMerge::VolumeDisplayInfo vdi;
+                    vdi.filePath = entry.vdbRead->ResolvePathAtFrame(int(firstTime));
+                    if (Knob* dk = entry.vdbRead->knob("density_override")) {
+                        const char* t = dk->get_text();
+                        vdi.densityField = (t && strlen(t) > 0) ? t : "density";
+                    } else { vdi.densityField = "density"; }
+                    if (Knob* tk = entry.vdbRead->knob("temp_override")) {
+                        const char* t = tk->get_text();
+                        if (t && strlen(t) > 0 && strcmp(t, "(none)") != 0) vdi.tempField = t;
+                    }
+                    if (Knob* fk = entry.vdbRead->knob("flame_override")) {
+                        const char* t = fk->get_text();
+                        if (t && strlen(t) > 0 && strcmp(t, "(none)") != 0) vdi.flameField = t;
+                    }
+                    vdi.tx = entry.volume->translate[0];
+                    vdi.ty = entry.volume->translate[1];
+                    vdi.tz = entry.volume->translate[2];
+                    if (!vdi.filePath.empty()) volInfos.push_back(vdi);
+                }
+            }
+
+            for (size_t vi = 0; vi < volInfos.size(); ++vi) {
+                auto& vdi = volInfos[vi];
+                if (vdi.filePath.empty() || vdi.densityField == "(none)") continue;
+
+                // Unique child path per volume
+                std::string volName = "vol" + std::to_string(vi);
+                Path volPath = path.appendChild(volName);
+                Prim volPrim = layer->definePrim(volPath, Token("Volume"));
+
+                // Density field
+                Path densPath = volPath.appendChild("density");
+                Prim densPrim = layer->definePrim(densPath, Token("OpenVDBAsset"));
+
+                // Temperature field
+                Path tempPath = volPath.appendChild("temperature");
+                Prim tempPrim;
+                bool hasTemp = !vdi.tempField.empty();
+                if (hasTemp) tempPrim = layer->definePrim(tempPath, Token("OpenVDBAsset"));
+
+                // Flame field
+                Path flamePath = volPath.appendChild("flame");
+                Prim flamePrim;
+                bool hasFlame = !vdi.flameField.empty();
+                if (hasFlame) flamePrim = layer->definePrim(flamePath, Token("OpenVDBAsset"));
+
+                for (const TimeValue& time : context.processTimes()) {
+                    densPrim.setAttr(Token("filePath"), AssetPath(vdi.filePath), time);
+                    densPrim.setAttr(Token("fieldName"), Token(vdi.densityField), time);
+
+                    if (hasTemp && tempPrim.isDefined()) {
+                        tempPrim.setAttr(Token("filePath"), AssetPath(vdi.filePath), time);
+                        tempPrim.setAttr(Token("fieldName"), Token(vdi.tempField), time);
+                    }
+                    if (hasFlame && flamePrim.isDefined()) {
+                        flamePrim.setAttr(Token("filePath"), AssetPath(vdi.filePath), time);
+                        flamePrim.setAttr(Token("fieldName"), Token(vdi.flameField), time);
+                    }
+                }
+
+                // Relationships
+                Relationship densRel;
+                if (!volPrim.getRelationship(Token("field:density"), densRel))
+                    volPrim.createRelationship(Token("field:density")).setTarget(densPath);
+                if (hasTemp) {
+                    Relationship tempRel;
+                    if (!volPrim.getRelationship(Token("field:temperature"), tempRel))
+                        volPrim.createRelationship(Token("field:temperature")).setTarget(tempPath);
+                }
+                if (hasFlame) {
+                    Relationship flameRel;
+                    if (!volPrim.getRelationship(Token("field:flame"), flameRel))
+                        volPrim.createRelationship(Token("field:flame")).setTarget(flamePath);
+                }
+            }
+
+            // Dummy prim if no volumes
+            if (volInfos.empty()) {
+                PointsPrim prim = PointsPrim::defineInLayer(layer, path);
+                for (const TimeValue& time : context.processTimes()) {
+                    Vec3fArray pts(1, Vec3f(0,0,0));
+                    FloatArray wids(1, 0.001f);
+                    prim.setPoints(pts, time); prim.setWidths(wids, time);
+                }
+            }
+            return;
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // POINTS MODE — existing point cloud from cached preview data
+        // ═══════════════════════════════════════════════════════════════
         auto& cached = s_previewPoints;
 
         // First-time fallback: if static cache empty, build directly
@@ -70,7 +179,6 @@ public:
                     if(!vol->hasTransform)return p;
                     pxr::GfVec3f s(p[0]*vol->scale[0],p[1]*vol->scale[1],p[2]*vol->scale[2]);
                     return vol->translate+pxr::GfVec3f(rm[0]*s[0]+rm[1]*s[1]+rm[2]*s[2],rm[3]*s[0]+rm[4]*s[1]+rm[5]*s[2],rm[6]*s[0]+rm[7]*s[1]+rm[8]*s[2]);};
-                // Bbox edges
                 pxr::GfVec3f corners[8];
                 for(int c=0;c<8;++c) corners[c]=xf(pxr::GfVec3f((c&1)?vol->bboxMax[0]:vol->bboxMin[0],(c&2)?vol->bboxMax[1]:vol->bboxMin[1],(c&4)?vol->bboxMax[2]:vol->bboxMin[2]));
                 static const int edges[12][2]={{0,1},{2,3},{4,5},{6,7},{0,2},{1,3},{4,6},{5,7},{0,4},{1,5},{2,6},{3,7}};
@@ -161,6 +269,13 @@ void SpectralVolMerge::knobs(Knob_Callback f)
     Divider(f, "");
     Int_knob(f, &_volCount, "vol_count", "volumes found");
     SetFlags(f, Knob::DISABLED | Knob::NO_ANIMATION);
+
+    static const char* displayModes[] = {"points", "volume", nullptr};
+    Enumeration_knob(f, &_displayMode, displayModes, "display_mode", "display");
+    KnobModifiesAttribValues(f);
+    Tooltip(f, "points: density point cloud\n"
+               "volume: HdStorm fog rendering");
+
     Int_knob(f, &_curFrame, "vm_cur_frame", "");
     SetFlags(f, Knob::INVISIBLE);
 
@@ -193,10 +308,33 @@ void SpectralVolMerge::_validate(bool forReal)
     // Build into temp — don't clear _previewPoints until new data ready
     // (createPrims may run at any time and reads _previewPoints)
     std::vector<PreviewPoint> newPoints;
+    std::vector<VolumeDisplayInfo> newVolInfos;
     auto entries = GetVolumes(frame, 32);
     for (size_t vi = 0; vi < entries.size(); ++vi) {
         auto& vol = entries[vi].volume;
         if (!vol || !vol->IsValid()) continue;
+
+        // Collect volume display info for volume mode
+        if (entries[vi].vdbRead) {
+            VolumeDisplayInfo vdi;
+            vdi.filePath = entries[vi].vdbRead->ResolvePathAtFrame(frame);
+            // Read field names from VDBRead knobs
+            if (Knob* dk = entries[vi].vdbRead->knob("density_override")) {
+                const char* t = dk->get_text();
+                vdi.densityField = (t && strlen(t) > 0) ? t : "density";
+            } else { vdi.densityField = "density"; }
+            if (Knob* tk = entries[vi].vdbRead->knob("temp_override")) {
+                const char* t = tk->get_text();
+                if (t && strlen(t) > 0 && strcmp(t, "(none)") != 0) vdi.tempField = t;
+            }
+            if (Knob* fk = entries[vi].vdbRead->knob("flame_override")) {
+                const char* t = fk->get_text();
+                if (t && strlen(t) > 0 && strcmp(t, "(none)") != 0) vdi.flameField = t;
+            }
+            vdi.tx = vol->translate[0]; vdi.ty = vol->translate[1]; vdi.tz = vol->translate[2];
+            if (!vdi.filePath.empty())
+                newVolInfos.push_back(vdi);
+        }
 
         pxr::GfVec3f bMin = vol->bboxMin, bSz = vol->bboxMax - vol->bboxMin;
         int total = vol->resX * vol->resY * vol->resZ;
@@ -258,6 +396,9 @@ void SpectralVolMerge::_validate(bool forReal)
     // Only swap if we got data (protect against re-entrant empty results)
     if (!newPoints.empty()) {
         s_previewPoints.swap(newPoints);
+    }
+    if (!newVolInfos.empty()) {
+        s_volumeInfos.swap(newVolInfos);
     }
     _curFrame = frame;
 
