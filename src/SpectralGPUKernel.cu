@@ -1333,6 +1333,16 @@ extern "C" __global__ void __raygen__spectral()
         optixTrace(params.traversable, origin, dir, 1e-4f,1e30f,0.f,
                    OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0, p0,p1,p2,p3,p4,p5,p6);
 
+        // SER: reorder threads by ray direction for volume march coherence
+        // Quantize direction to 16-bit hash — groups warps marching similar paths
+        // TODO: re-enable after OptiX 9 stability verified
+        /*{
+            unsigned int dh = (unsigned int)((dir.x*0.5f+0.5f)*63.f) 
+                            | ((unsigned int)((dir.y*0.5f+0.5f)*63.f) << 6)
+                            | ((unsigned int)((dir.z*0.5f+0.5f)*15.f) << 12);
+            optixReorder(dh, 16);
+        }*/
+
         float r = __uint_as_float(p0);
         float g = __uint_as_float(p1);
         float b = __uint_as_float(p2);
@@ -1404,6 +1414,15 @@ extern "C" __global__ void __raygen__spectral()
             unsigned int p0=0,p1=0,p2=0,p3=__float_as_uint(1e30f),p4=0,p5=0,p6=0;
             optixTrace(params.traversable, origin, dir, 1e-4f,1e30f,0.f,
                        OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0, p0,p1,p2,p3,p4,p5,p6);
+
+            // SER: reorder by direction for volume-only rays
+            // TODO: re-enable after OptiX 9 stability verified
+            /*if (params.numGpuVolumes > 0 && p4 == 0u) {
+                unsigned int dh = (unsigned int)((dir.x*0.5f+0.5f)*63.f) 
+                                | ((unsigned int)((dir.y*0.5f+0.5f)*63.f) << 6)
+                                | ((unsigned int)((dir.z*0.5f+0.5f)*15.f) << 12);
+                optixReorder(dh, 16);
+            }*/
 
             float depth = __uint_as_float(p3);
             bool isHit = (p4 > 0u);

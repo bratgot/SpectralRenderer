@@ -9,7 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # CUDA + OptiX
 # ---------------------------------------------------------------------------
 set(CUDA_TOOLKIT_ROOT "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6" CACHE PATH "CUDA toolkit")
-set(OPTIX_ROOT "C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.1.0" CACHE PATH "OptiX SDK")
+set(OPTIX_ROOT "C:/ProgramData/NVIDIA Corporation/OptiX SDK 9.0.0" CACHE PATH "OptiX SDK")
 
 set(HAS_OPTIX FALSE)
 if(EXISTS "${OPTIX_ROOT}/include/optix.h" AND EXISTS "${CUDA_TOOLKIT_ROOT}/bin/nvcc.exe")

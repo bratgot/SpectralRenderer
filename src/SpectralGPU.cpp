@@ -190,6 +190,8 @@ bool SpectralGPU::Initialize(const std::string& ptxSource)
 
     // OptiX init
     OPTIX_CHECK(optixInit());
+    fprintf(stderr, "SpectralGPU: OptiX SDK %d.%d.%d\n",
+            OPTIX_VERSION / 10000, (OPTIX_VERSION % 10000) / 100, OPTIX_VERSION % 100);
 
     OptixDeviceContextOptions ctxOptions = {};
     ctxOptions.logCallbackFunction = _OptixLogCallback;
@@ -209,6 +211,15 @@ bool SpectralGPU::Initialize(const std::string& ptxSource)
     }
 
     fprintf(stderr, "SpectralGPU: OptiX context created\n");
+
+    // Check SER support
+    unsigned int serFlags = 0;
+    optixDeviceContextGetProperty(_optixContext,
+        OPTIX_DEVICE_PROPERTY_SHADER_EXECUTION_REORDERING,
+        &serFlags, sizeof(serFlags));
+    fprintf(stderr, "SpectralGPU: SER support: %s\n",
+            (serFlags & OPTIX_DEVICE_PROPERTY_SHADER_EXECUTION_REORDERING_FLAG_STANDARD)
+            ? "YES (standard)" : "NO (will be no-op)");
 
     // Module
     OptixModuleCompileOptions moduleOptions = {};
