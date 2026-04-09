@@ -3,10 +3,12 @@
 
 #include "SpectralVDBRead.h"
 #include "usg/geom/PointsPrim.h"
+#include "usg/geom/AssetPath.h"
 #include "ndk/geo/utils/MeshUtils.h"
 
 #include <algorithm>
 #include <cmath>
+#include <set>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -69,11 +71,95 @@ void SpectralVDBRead::Engine::createPrims(GeomSceneContext& context,
     float pointSize  = knob("point_size").get<float>(firstTime);
     float threshold  = knob("density_threshold").get<float>(firstTime);
     bool  lit        = knob("lit").get<bool>(firstTime);
+    int   displayMode = knob("display_mode").get<int>(firstTime);
 
     previewRes = std::max(4, std::min(previewRes, 256));
     maxPoints  = std::max(10, maxPoints);
     pointSize  = std::max(0.01f, pointSize);
-    float densityCap = 50.0f; // cull outlier points with extreme density
+
+    // ═══════════════════════════════════════════════════════════════════
+    // VOLUME MODE — create UsdVol::Volume + OpenVDBAsset prims
+    // HdStorm renders these natively as translucent fog
+    // ═══════════════════════════════════════════════════════════════════
+    if (displayMode == 1) {
+        // Resolve file path for current time
+        std::string resolvedPath = filePath;
+        if (autoSeq && filePath.find('#') != std::string::npos) {
+            int frame = int(firstTime) + frameOffset;
+            frame = std::max(firstFrame, std::min(frame, lastFrame));
+            resolvedPath = _resolveFrame(filePath, frame);
+        }
+        if (resolvedPath.empty()) return;
+
+        // Determine field names
+        std::string fieldName = densityName.empty() ? "density" : densityName;
+        if (fieldName == "(none)") return;
+
+        std::string tempKnob, flameKnob;
+        try { tempKnob = knob("temp_override").get<std::string>(firstTime); } catch(...) {}
+        try { flameKnob = knob("flame_override").get<std::string>(firstTime); } catch(...) {}
+        bool hasTemp = !tempKnob.empty() && tempKnob != "(none)";
+        bool hasFlame = !flameKnob.empty() && flameKnob != "(none)";
+
+        // Create Volume prim
+        Prim volPrim = defineLayer->definePrim(path, Token("Volume"));
+
+        // --- Density field ---
+        Path densityFieldPath = path.appendChild("density");
+        Prim densityFieldPrim = defineLayer->definePrim(densityFieldPath, Token("OpenVDBAsset"));
+
+        // --- Temperature field ---
+        Path tempFieldPath = path.appendChild("temperature");
+        Prim tempFieldPrim;
+        if (hasTemp)
+            tempFieldPrim = defineLayer->definePrim(tempFieldPath, Token("OpenVDBAsset"));
+
+        // --- Flame field ---
+        Path flameFieldPath = path.appendChild("flame");
+        Prim flameFieldPrim;
+        if (hasFlame)
+            flameFieldPrim = defineLayer->definePrim(flameFieldPath, Token("OpenVDBAsset"));
+
+        for (const TimeValue& time : context.processTimes()) {
+            std::string timePath = filePath;
+            if (autoSeq && filePath.find('#') != std::string::npos) {
+                int frame = int(time) + frameOffset;
+                frame = std::max(firstFrame, std::min(frame, lastFrame));
+                timePath = _resolveFrame(filePath, frame);
+            }
+
+            densityFieldPrim.setAttr(Token("filePath"), AssetPath(timePath), time);
+            densityFieldPrim.setAttr(Token("fieldName"), Token(fieldName), time);
+
+            if (hasTemp && tempFieldPrim.isDefined()) {
+                tempFieldPrim.setAttr(Token("filePath"), AssetPath(timePath), time);
+                tempFieldPrim.setAttr(Token("fieldName"), Token(tempKnob), time);
+            }
+            if (hasFlame && flameFieldPrim.isDefined()) {
+                flameFieldPrim.setAttr(Token("filePath"), AssetPath(timePath), time);
+                flameFieldPrim.setAttr(Token("fieldName"), Token(flameKnob), time);
+            }
+        }
+
+        // Create field relationships only if they don't already exist
+        Relationship existingRel;
+        if (!volPrim.getRelationship(Token("field:density"), existingRel))
+            volPrim.createRelationship(Token("field:density")).addTarget(densityFieldPath);
+        if (hasTemp && !volPrim.getRelationship(Token("field:temperature"), existingRel))
+            volPrim.createRelationship(Token("field:temperature")).addTarget(tempFieldPath);
+        if (hasFlame && !volPrim.getRelationship(Token("field:flame"), existingRel))
+            volPrim.createRelationship(Token("field:flame")).addTarget(flameFieldPath);
+
+        fprintf(stderr, "SpectralVDBRead: volume mode — %s field=%s%s%s\n",
+                resolvedPath.c_str(), fieldName.c_str(),
+                hasTemp ? " +temp" : "", hasFlame ? " +flame" : "");
+        return;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // POINTS MODE — existing point cloud display
+    // ═══════════════════════════════════════════════════════════════════
+    float densityCap = 50.0f;
 
     // Define single PointsPrim (density points + bbox edges all in one)
     PointsPrim prim = PointsPrim::defineInLayer(defineLayer, path);
@@ -484,6 +570,12 @@ void SpectralVDBRead::knobs(Knob_Callback f)
 
     Divider(f, "Preview");
 
+    static const char* displayModes[] = {"points", "volume", nullptr};
+    Enumeration_knob(f, &_displayMode, displayModes, "display_mode", "display");
+    KnobModifiesAttribValues(f);
+    Tooltip(f, "points: density point cloud (fast)\n"
+               "volume: HdStorm fog rendering (quality)");
+
     Int_knob(f, &_previewRes, "preview_res", "resolution");
     SetRange(f, 8, 128);
     KnobModifiesAttribValues(f);
@@ -593,7 +685,7 @@ int SpectralVDBRead::knob_changed(Knob* k)
     }
     if (k->is("show_bbox") || k->is("preview_res") || k->is("max_points") ||
         k->is("point_size") || k->is("density_threshold") || k->is("bbox_color") ||
-        k->is("lit")) {
+        k->is("lit") || k->is("display_mode")) {
         return 1;
     }
     if (k->is("voxel_res")) {
@@ -835,6 +927,14 @@ void SpectralVDBRead::_LoadVDBAtFrame(int frame, int maxRes)
         _loadedMaxRes = maxRes;
         fprintf(stderr, "SpectralVDBRead: loaded %dx%dx%d (maxRes=%d)\n",
                 _volume->resX, _volume->resY, _volume->resZ, maxRes);
+
+        // Prefetch neighboring frames in background
+        if (_autoSequence && _filePath) {
+            pxr::SpectralVDBLoader::PrefetchNeighbors(
+                resolved.c_str(), _GetDensityName(), _GetTempName(),
+                frame, maxRes, std::string(_filePath),
+                _firstFrame, _lastFrame);
+        }
     }
 #endif
 }
@@ -853,7 +953,15 @@ void SpectralVDBRead::_LoadVDB()
         if (!_GetTempName()) _volume->temperature.clear();
         if (!_GetFlameName()) _volume->flame.clear();
         _loadedPath = resolved;
-        _loadedMaxRes = -1;  // mark as preview/default — render path will reload at requested res
+        _loadedMaxRes = -1;
+
+        // Prefetch neighboring frames in background
+        if (_autoSequence && _filePath) {
+            pxr::SpectralVDBLoader::PrefetchNeighbors(
+                resolved.c_str(), _GetDensityName(), _GetTempName(),
+                frame, GetMaxRes(), std::string(_filePath),
+                _firstFrame, _lastFrame);
+        }
     }
 #endif
 }

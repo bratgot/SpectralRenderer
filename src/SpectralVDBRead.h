@@ -112,6 +112,7 @@ private:
     float _pointSize   = 2.0f;
     float _densityThreshold = 0.01f;
     bool  _lit         = false;
+    int   _displayMode = 1;  // 0=points, 1=volume (Storm fog)
     // Voxel Resolution
     int   _voxelRes    = 0;  // 0=1/8, 1=1/4, 2=1/2, 3=Full, 4=Native
     const char* _memInfo = "";

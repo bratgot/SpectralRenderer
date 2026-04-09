@@ -3242,50 +3242,101 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
     // ------------------------------------------------------------------
     // Detect USD Volume prims (OpenVDBAsset) in the stage
     // ------------------------------------------------------------------
-    // Detect volume prims in the USD stage:
-    //   1. Standard UsdVol::Volume + OpenVDBAsset field prims  
-    //   2. (SpectralVDBRead volumes found via input chain in _LoadVDB)
-    // ------------------------------------------------------------------
 #ifdef SPECTRAL_HAS_VDB
-    if (!_volume || !_volume->IsValid()) {
+    if (_volumes.empty()) {  // Only scan USD volumes if no SpectralVDBRead volumes found
+        int masterMaxRes = _GetMasterMaxRes();
         for (const auto& prim : stage->Traverse()) {
             if (!prim.IsA<UsdVolVolume>()) continue;
 
             UsdVolVolume volumePrim(prim);
             if (!volumePrim) continue;
 
-            std::string densityPath, tempPath;
+            std::string densityFile, tempFile, flameFile;
+            std::string densityField, tempField, flameField;
+
             for (const auto& child : prim.GetChildren()) {
                 if (!child.IsA<UsdVolOpenVDBAsset>()) continue;
                 UsdVolOpenVDBAsset asset(child);
                 if (!asset) continue;
 
                 SdfAssetPath filePath;
-                asset.GetFilePathAttr().Get(&filePath);
+                asset.GetFilePathAttr().Get(&filePath, timeCode);
                 TfToken fieldName;
-                asset.GetFieldNameAttr().Get(&fieldName);
+                asset.GetFieldNameAttr().Get(&fieldName, timeCode);
 
                 std::string resolvedFile = filePath.GetResolvedPath();
                 if (resolvedFile.empty()) resolvedFile = filePath.GetAssetPath();
 
-                if (fieldName == "density" || fieldName == "smoke" || fieldName == "soot") {
-                    densityPath = resolvedFile;
-                } else if (fieldName == "temperature" || fieldName == "temp" || fieldName == "heat") {
-                    tempPath = resolvedFile;
+                std::string fn = fieldName.GetString();
+                if (fn == "density" || fn == "smoke" || fn == "soot" || fn == "scatter") {
+                    densityFile = resolvedFile;
+                    densityField = fn;
+                } else if (fn == "temperature" || fn == "temp" || fn == "heat") {
+                    tempFile = resolvedFile;
+                    tempField = fn;
+                } else if (fn == "flame" || fn == "flames" || fn == "fire" || fn == "fuel") {
+                    flameFile = resolvedFile;
+                    flameField = fn;
+                } else if (densityFile.empty()) {
+                    // First unknown field as density fallback
+                    densityFile = resolvedFile;
+                    densityField = fn;
                 }
             }
 
-            if (!densityPath.empty()) {
-                const char* tempArg = tempPath.empty() ? nullptr : "temperature";
-                _volume = pxr::SpectralVDBLoader::Load(densityPath.c_str(), "density", tempArg);
-                if (_volume && _volume->IsValid()) {
-                    _applyVolumeShading(_volume);
-                    SLOG("SpectralRender: loaded USD Volume prim %s (%dx%dx%d)\n",
-                            prim.GetPath().GetText(), _volume->resX, _volume->resY, _volume->resZ);
-                    break;
-                }
+            if (densityFile.empty()) continue;
+
+            auto vol = pxr::SpectralVDBLoader::Load(
+                densityFile.c_str(),
+                densityField.c_str(),
+                tempField.empty() ? nullptr : tempField.c_str(),
+                masterMaxRes);
+
+            if (!vol || !vol->IsValid()) continue;
+
+            // Apply world transform from USD stage
+            GfMatrix4d xf = xfCache.GetLocalToWorldTransform(prim);
+            GfVec3d trans = xf.ExtractTranslation();
+            // Extract rotation (ZXY) and scale from matrix
+            vol->translate = GfVec3f(float(trans[0]), float(trans[1]), float(trans[2]));
+
+            // Extract scale from column lengths
+            GfVec3d col0(xf[0][0], xf[1][0], xf[2][0]);
+            GfVec3d col1(xf[0][1], xf[1][1], xf[2][1]);
+            GfVec3d col2(xf[0][2], xf[1][2], xf[2][2]);
+            float scx = float(col0.GetLength());
+            float scy = float(col1.GetLength());
+            float scz = float(col2.GetLength());
+            vol->scale = GfVec3f(scx, scy, scz);
+
+            // Extract rotation from normalized columns
+            if (scx > 1e-6f && scy > 1e-6f && scz > 1e-6f) {
+                float ry = std::asin(std::clamp(float(xf[0][2]) / scx, -1.f, 1.f));
+                float cy = std::cos(ry);
+                float rx = (std::abs(cy) > 1e-4f)
+                    ? std::atan2(-float(xf[1][2]) / scy, float(xf[2][2]) / scz)
+                    : 0.f;
+                float rz = (std::abs(cy) > 1e-4f)
+                    ? std::atan2(-float(xf[0][1]) / scx, float(xf[0][0]) / scx)
+                    : 0.f;
+                vol->rotate = GfVec3f(rx * 180.f / 3.14159265f,
+                                      ry * 180.f / 3.14159265f,
+                                      rz * 180.f / 3.14159265f);
             }
+
+            vol->BuildTransform();
+            _applyVolumeShading(vol);
+            _volumes.push_back(vol);
+
+            SLOG("SpectralRender: USD Volume '%s' → %s (%dx%dx%d) T=(%.1f,%.1f,%.1f)%s%s\n",
+                prim.GetPath().GetText(), densityFile.c_str(),
+                vol->resX, vol->resY, vol->resZ,
+                vol->translate[0], vol->translate[1], vol->translate[2],
+                !tempField.empty() ? " +temp" : "",
+                !flameField.empty() ? " +flame" : "");
         }
+        if (!_volumes.empty())
+            _volume = _volumes[0];
     }
 #endif
 

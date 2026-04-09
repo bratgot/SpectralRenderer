@@ -11,8 +11,45 @@
 #include <openvdb/tools/Interpolation.h>
 #include <algorithm>
 #include <cstdio>
+#include <mutex>
+#include <thread>
+#include <atomic>
 
 PXR_NAMESPACE_OPEN_SCOPE
+
+// --- LRU Cache statics (function-local to avoid init order issues) ---
+SpectralVDBLoader::CacheList& SpectralVDBLoader::_cacheList() { static CacheList s; return s; }
+SpectralVDBLoader::CacheMap& SpectralVDBLoader::_cacheMap() { static CacheMap s; return s; }
+std::mutex& SpectralVDBLoader::_cacheMutex() { static std::mutex s; return s; }
+int& SpectralVDBLoader::_maxCacheEntries() { static int s = 64; return s; }
+int& SpectralVDBLoader::_cacheHits() { static int s = 0; return s; }
+int& SpectralVDBLoader::_cacheMisses() { static int s = 0; return s; }
+
+void SpectralVDBLoader::ClearCache() {
+    std::lock_guard<std::mutex> lock(_cacheMutex());
+    _cacheList().clear();
+    _cacheMap().clear();
+    _cacheHits() = 0;
+    _cacheMisses() = 0;
+}
+
+void SpectralVDBLoader::SetCacheSize(int maxEntries) {
+    std::lock_guard<std::mutex> lock(_cacheMutex());
+    _maxCacheEntries() = std::max(1, maxEntries);
+    // Evict if over new limit
+    while ((int)_cacheList().size() > _maxCacheEntries()) {
+        auto& back = _cacheList().back();
+        _cacheMap().erase(back.first);
+        _cacheList().pop_back();
+    }
+}
+
+void SpectralVDBLoader::GetCacheStats(int& hits, int& misses, int& entries) {
+    std::lock_guard<std::mutex> lock(_cacheMutex());
+    hits = _cacheHits();
+    misses = _cacheMisses();
+    entries = (int)_cacheList().size();
+}
 
 // Grid name matching tables (same heuristics as VDBmarcher)
 static bool _matchName(const std::string& n, const char** list) {
@@ -68,6 +105,55 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::Load(const char* filepath,
 {
     if (!filepath || strlen(filepath) == 0) return nullptr;
 
+    CacheKey key;
+    key.filepath = filepath;
+    key.densityGrid = densityGridName ? densityGridName : "";
+    key.tempGrid = tempGridName ? tempGridName : "";
+    key.maxRes = maxRes;
+
+    {
+        std::lock_guard<std::mutex> lock(_cacheMutex());
+        auto it = _cacheMap().find(key);
+        if (it != _cacheMap().end()) {
+            // Cache hit — move to front (most recently used)
+            _cacheList().splice(_cacheList().begin(), _cacheList(), it->second);
+            _cacheHits()++;
+            return it->second->second;
+        }
+    }
+
+    // Cache miss — load from disk
+    auto vol = _LoadFromDisk(filepath, densityGridName, tempGridName, maxRes);
+    if (!vol) {
+        _cacheMisses()++;
+        return nullptr;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(_cacheMutex());
+        _cacheMisses()++;
+        // Insert at front
+        _cacheList().push_front({key, vol});
+        _cacheMap()[key] = _cacheList().begin();
+        // Evict oldest if over limit
+        while ((int)_cacheList().size() > _maxCacheEntries()) {
+            auto& back = _cacheList().back();
+            _cacheMap().erase(back.first);
+            _cacheList().pop_back();
+        }
+    }
+
+    return vol;
+}
+
+std::shared_ptr<SpectralVolume> SpectralVDBLoader::_LoadFromDisk(const char* filepath,
+    const char* densityGridName, const char* tempGridName, int maxRes)
+{
+    if (!filepath || strlen(filepath) == 0) return nullptr;
+
+    // Preview loads (low res) skip temp/flame for speed
+    bool densityOnly = (maxRes > 0 && maxRes <= 64);
+
     try {
         openvdb::initialize();
         openvdb::io::File file(filepath);
@@ -75,33 +161,29 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::Load(const char* filepath,
 
         auto vol = std::make_shared<SpectralVolume>();
 
-        // Find grids by name (override) or auto-detect
         openvdb::FloatGrid::Ptr densityGrid;
         openvdb::FloatGrid::Ptr tempGrid;
         openvdb::FloatGrid::Ptr flameGrid;
         std::string wantDensity = (densityGridName && strlen(densityGridName) > 0) ? densityGridName : "";
         std::string wantTemp = (tempGridName && strlen(tempGridName) > 0) ? tempGridName : "";
-
-        // Skip loading if density is explicitly "(none)"
         if (wantDensity == "(none)") wantDensity = "";
 
-        // Find grids — only read the ones we need, skip the rest
         for (auto it = file.beginName(); it != file.endName(); ++it) {
             std::string name = *it;
 
-            // Check if this grid name matches what we want BEFORE reading it
             bool isDensity = false, isTemp = false, isFlame = false;
             if (!densityGrid) {
                 if (!wantDensity.empty() && name == wantDensity) isDensity = true;
                 else if (wantDensity.empty() && _matchName(name, kDensityNames)) isDensity = true;
             }
-            if (!tempGrid) {
-                if (!wantTemp.empty() && name == wantTemp) isTemp = true;
-                else if (wantTemp.empty() && _matchName(name, kTempNames)) isTemp = true;
+            if (!densityOnly) {
+                if (!tempGrid) {
+                    if (!wantTemp.empty() && name == wantTemp) isTemp = true;
+                    else if (wantTemp.empty() && _matchName(name, kTempNames)) isTemp = true;
+                }
+                if (!flameGrid && _matchName(name, kFlameNames)) isFlame = true;
             }
-            if (!flameGrid && _matchName(name, kFlameNames)) isFlame = true;
 
-            // Only read grid from disk if we actually need it
             if (isDensity || isTemp || isFlame || (!densityGrid && wantDensity.empty())) {
                 auto base = file.readGrid(name);
                 auto fg = openvdb::gridPtrCast<openvdb::FloatGrid>(base);
@@ -110,8 +192,11 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::Load(const char* filepath,
                 if (isDensity) densityGrid = fg;
                 else if (isTemp) tempGrid = fg;
                 else if (isFlame) flameGrid = fg;
-                else if (!densityGrid) densityGrid = fg; // first float as fallback
+                else if (!densityGrid) densityGrid = fg;
             }
+
+            // Early exit once we have density (skip remaining grids for preview)
+            if (densityOnly && densityGrid) break;
         }
 
         file.close();
@@ -121,19 +206,16 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::Load(const char* filepath,
             return nullptr;
         }
 
-        // Get world-space bounding box
         auto bbox = densityGrid->evalActiveVoxelBoundingBox();
         auto wMin = densityGrid->indexToWorld(bbox.min());
         auto wMax = densityGrid->indexToWorld(bbox.max());
         vol->bboxMin = GfVec3f(float(wMin.x()), float(wMin.y()), float(wMin.z()));
         vol->bboxMax = GfVec3f(float(wMax.x()), float(wMax.y()), float(wMax.z()));
 
-        // Resample to uniform grid
         auto dim = bbox.dim();
         float maxDim = float(std::max({dim.x(), dim.y(), dim.z()}));
         if (maxDim < 1) maxDim = 1;
 
-        // maxRes <= 0 means "native" — use actual VDB dimensions (capped at 1024)
         int effectiveMax;
         if (maxRes <= 0) {
             effectiveMax = std::min(1024, int(maxDim));
@@ -144,69 +226,102 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::Load(const char* filepath,
         vol->resY = std::max(1, std::min(effectiveMax, int(dim.y() * effectiveMax / maxDim)));
         vol->resZ = std::max(1, std::min(effectiveMax, int(dim.z() * effectiveMax / maxDim)));
 
-        fprintf(stderr, "SpectralVDB: native VDB dims = %dx%dx%d, resampling to %dx%dx%d (maxRes=%d)\n",
-                dim.x(), dim.y(), dim.z(), vol->resX, vol->resY, vol->resZ, effectiveMax);
+        fprintf(stderr, "SpectralVDB: native VDB dims = %dx%dx%d, resampling to %dx%dx%d (maxRes=%d%s)\n",
+                dim.x(), dim.y(), dim.z(), vol->resX, vol->resY, vol->resZ, effectiveMax,
+                densityOnly ? " density-only" : "");
 
         size_t totalVoxels = size_t(vol->resX) * vol->resY * vol->resZ;
         vol->density.resize(totalVoxels, 0.f);
 
-        // Sample density grid into uniform buffer
-        openvdb::tools::GridSampler<openvdb::FloatGrid, openvdb::tools::BoxSampler> sampler(*densityGrid);
+        int rX=vol->resX, rY=vol->resY, rZ=vol->resZ;
+        double wMinX=wMin.x(), wMinY=wMin.y(), wMinZ=wMin.z();
+        double wRangeX=wMax.x()-wMin.x(), wRangeY=wMax.y()-wMin.y(), wRangeZ=wMax.z()-wMin.z();
 
-        for (int iz = 0; iz < vol->resZ; ++iz) {
-            for (int iy = 0; iy < vol->resY; ++iy) {
-                for (int ix = 0; ix < vol->resX; ++ix) {
-                    float u = float(ix) / float(vol->resX);
-                    float v = float(iy) / float(vol->resY);
-                    float w = float(iz) / float(vol->resZ);
-                    openvdb::Vec3d worldPos(
-                        wMin.x() + u * (wMax.x() - wMin.x()),
-                        wMin.y() + v * (wMax.y() - wMin.y()),
-                        wMin.z() + w * (wMax.z() - wMin.z()));
-                    openvdb::Vec3d idxPos = densityGrid->worldToIndex(worldPos);
-                    float val = sampler.isSample(idxPos);
-                    vol->density[iz * vol->resY * vol->resX + iy * vol->resX + ix] = val;
-                }
+        if (densityOnly) {
+            // ── FAST PREVIEW PATH ──────────────────────────────────────
+            // Iterate active voxels directly (walks VDB tree efficiently,
+            // skips empty space, no interpolation, no systematic traversal).
+            // Maps VDB index coords → our uniform grid coords.
+            size_t activeCount = densityGrid->activeVoxelCount();
+            int stride = std::max(1, int(activeCount / (totalVoxels * 2)));
+            auto bboxMin_idx = bbox.min();
+            float dimX = std::max(1.f, float(dim.x()));
+            float dimY = std::max(1.f, float(dim.y()));
+            float dimZ = std::max(1.f, float(dim.z()));
+            int count = 0;
+            for (auto iter = densityGrid->cbeginValueOn(); iter; ++iter) {
+                if (count++ % stride != 0) continue;
+                auto coord = iter.getCoord();
+                float u = float(coord.x() - bboxMin_idx.x()) / dimX;
+                float v = float(coord.y() - bboxMin_idx.y()) / dimY;
+                float w = float(coord.z() - bboxMin_idx.z()) / dimZ;
+                int ix = std::max(0, std::min(rX-1, int(u * rX)));
+                int iy = std::max(0, std::min(rY-1, int(v * rY)));
+                int iz = std::max(0, std::min(rZ-1, int(w * rZ)));
+                float val = iter.getValue();
+                // Max-merge: multiple VDB voxels may map to same output cell
+                float& dst = vol->density[iz * rY * rX + iy * rX + ix];
+                if (val > dst) dst = val;
             }
-        }
 
-        // Sample temperature grid if present
-        if (tempGrid) {
-            vol->temperature.resize(totalVoxels, 0.f);
-            openvdb::tools::GridSampler<openvdb::FloatGrid, openvdb::tools::BoxSampler> tSampler(*tempGrid);
-            for (int iz = 0; iz < vol->resZ; ++iz) {
-                for (int iy = 0; iy < vol->resY; ++iy) {
-                    for (int ix = 0; ix < vol->resX; ++ix) {
-                        float u = float(ix) / float(vol->resX);
-                        float v = float(iy) / float(vol->resY);
-                        float w = float(iz) / float(vol->resZ);
-                        openvdb::Vec3d worldPos(
-                            wMin.x() + u * (wMax.x() - wMin.x()),
-                            wMin.y() + v * (wMax.y() - wMin.y()),
-                            wMin.z() + w * (wMax.z() - wMin.z()));
-                        openvdb::Vec3d idxPos = tempGrid->worldToIndex(worldPos);
-                        vol->temperature[iz * vol->resY * vol->resX + iy * vol->resX + ix] = tSampler.isSample(idxPos);
+        } else {
+            // ── QUALITY RENDER PATH ────────────────────────────────────
+
+            #pragma omp parallel for schedule(dynamic) if(totalVoxels > 10000)
+            for (int iz = 0; iz < rZ; ++iz) {
+                openvdb::tools::GridSampler<openvdb::FloatGrid, openvdb::tools::BoxSampler> localSampler(*densityGrid);
+                double w = double(iz) / double(rZ);
+                double wz = wMinZ + w * wRangeZ;
+                for (int iy = 0; iy < rY; ++iy) {
+                    double v = double(iy) / double(rY);
+                    double wy = wMinY + v * wRangeY;
+                    for (int ix = 0; ix < rX; ++ix) {
+                        double u = double(ix) / double(rX);
+                        openvdb::Vec3d worldPos(wMinX + u * wRangeX, wy, wz);
+                        openvdb::Vec3d idxPos = densityGrid->worldToIndex(worldPos);
+                        vol->density[iz * rY * rX + iy * rX + ix] = localSampler.isSample(idxPos);
                     }
                 }
             }
         }
 
-        // Sample flame grid if present
-        if (flameGrid) {
+        // Resample temperature (skip for preview)
+        if (tempGrid && !densityOnly) {
+            vol->temperature.resize(totalVoxels, 0.f);
+            #pragma omp parallel for schedule(dynamic) if(totalVoxels > 10000)
+            for (int iz = 0; iz < rZ; ++iz) {
+                openvdb::tools::GridSampler<openvdb::FloatGrid, openvdb::tools::BoxSampler> localSampler(*tempGrid);
+                double w = double(iz) / double(rZ);
+                double wz = wMinZ + w * wRangeZ;
+                for (int iy = 0; iy < rY; ++iy) {
+                    double v = double(iy) / double(rY);
+                    double wy = wMinY + v * wRangeY;
+                    for (int ix = 0; ix < rX; ++ix) {
+                        double u = double(ix) / double(rX);
+                        openvdb::Vec3d worldPos(wMinX + u * wRangeX, wy, wz);
+                        openvdb::Vec3d idxPos = tempGrid->worldToIndex(worldPos);
+                        vol->temperature[iz * rY * rX + iy * rX + ix] = localSampler.isSample(idxPos);
+                    }
+                }
+            }
+        }
+
+        // Resample flame (skip for preview)
+        if (flameGrid && !densityOnly) {
             vol->flame.resize(totalVoxels, 0.f);
-            openvdb::tools::GridSampler<openvdb::FloatGrid, openvdb::tools::BoxSampler> fSampler(*flameGrid);
-            for (int iz = 0; iz < vol->resZ; ++iz) {
-                for (int iy = 0; iy < vol->resY; ++iy) {
-                    for (int ix = 0; ix < vol->resX; ++ix) {
-                        float u = float(ix) / float(vol->resX);
-                        float v = float(iy) / float(vol->resY);
-                        float w = float(iz) / float(vol->resZ);
-                        openvdb::Vec3d worldPos(
-                            wMin.x() + u * (wMax.x() - wMin.x()),
-                            wMin.y() + v * (wMax.y() - wMin.y()),
-                            wMin.z() + w * (wMax.z() - wMin.z()));
+            #pragma omp parallel for schedule(dynamic) if(totalVoxels > 10000)
+            for (int iz = 0; iz < rZ; ++iz) {
+                openvdb::tools::GridSampler<openvdb::FloatGrid, openvdb::tools::BoxSampler> localSampler(*flameGrid);
+                double w = double(iz) / double(rZ);
+                double wz = wMinZ + w * wRangeZ;
+                for (int iy = 0; iy < rY; ++iy) {
+                    double v = double(iy) / double(rY);
+                    double wy = wMinY + v * wRangeY;
+                    for (int ix = 0; ix < rX; ++ix) {
+                        double u = double(ix) / double(rX);
+                        openvdb::Vec3d worldPos(wMinX + u * wRangeX, wy, wz);
                         openvdb::Vec3d idxPos = flameGrid->worldToIndex(worldPos);
-                        vol->flame[iz * vol->resY * vol->resX + iy * vol->resX + ix] = fSampler.isSample(idxPos);
+                        vol->flame[iz * rY * rX + iy * rX + ix] = localSampler.isSample(idxPos);
                     }
                 }
             }
@@ -216,14 +331,88 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::Load(const char* filepath,
                 filepath, vol->resX, vol->resY, vol->resZ,
                 vol->bboxMin[0], vol->bboxMin[1], vol->bboxMin[2],
                 vol->bboxMax[0], vol->bboxMax[1], vol->bboxMax[2],
-                tempGrid ? " +temperature" : "",
-                flameGrid ? " +flame" : "");
+                tempGrid && !densityOnly ? " +temperature" : "",
+                flameGrid && !densityOnly ? " +flame" : "");
 
         return vol;
     } catch (const std::exception& e) {
         fprintf(stderr, "SpectralVDB: error loading '%s': %s\n", filepath, e.what());
         return nullptr;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Prefetch — background thread loads neighboring frames into cache
+// ---------------------------------------------------------------------------
+static std::thread s_prefetchThread;
+static std::atomic<bool> s_prefetchRunning{false};
+static std::atomic<bool> s_prefetchCancel{false};
+
+static std::string _resolvePattern(const std::string& pattern, int frame)
+{
+    std::string result = pattern;
+    // Find longest run of '#' and replace with zero-padded frame number
+    size_t hashStart = result.find('#');
+    if (hashStart == std::string::npos) return result;
+    size_t hashEnd = hashStart;
+    while (hashEnd < result.size() && result[hashEnd] == '#') ++hashEnd;
+    int pad = int(hashEnd - hashStart);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%0*d", pad, frame);
+    result.replace(hashStart, hashEnd - hashStart, buf);
+    return result;
+}
+
+void SpectralVDBLoader::PrefetchNeighbors(const char* filepath,
+    const char* densityGrid, const char* tempGrid,
+    int currentFrame, int maxRes,
+    const std::string& framePattern, int firstFrame, int lastFrame)
+{
+    // Cancel any running prefetch
+    s_prefetchCancel.store(true);
+    if (s_prefetchThread.joinable()) {
+        s_prefetchThread.join();
+    }
+    s_prefetchCancel.store(false);
+
+    // Don't prefetch if no pattern
+    if (framePattern.empty() || framePattern.find('#') == std::string::npos) return;
+
+    std::string pattern = framePattern;
+    std::string dGrid = densityGrid ? densityGrid : "";
+    std::string tGrid = tempGrid ? tempGrid : "";
+
+    s_prefetchRunning.store(true);
+    s_prefetchThread = std::thread([=]() {
+        // Prefetch N+1, N-1, N+2, N-2, N+3, N-3 (interleaved for scrub in either direction)
+        int offsets[] = {1, -1, 2, -2, 3, -3, 4, -4};
+        for (int off : offsets) {
+            if (s_prefetchCancel.load()) break;
+            int f = currentFrame + off;
+            if (f < firstFrame || f > lastFrame) continue;
+
+            std::string resolved = _resolvePattern(pattern, f);
+
+            // Check if already cached
+            CacheKey key;
+            key.filepath = resolved;
+            key.densityGrid = dGrid;
+            key.tempGrid = tGrid;
+            key.maxRes = maxRes;
+            {
+                std::lock_guard<std::mutex> lock(_cacheMutex());
+                if (_cacheMap().find(key) != _cacheMap().end()) continue; // already cached
+            }
+
+            // Load into cache via normal Load path
+            Load(resolved.c_str(),
+                 dGrid.empty() ? nullptr : dGrid.c_str(),
+                 tGrid.empty() ? nullptr : tGrid.c_str(),
+                 maxRes);
+        }
+        s_prefetchRunning.store(false);
+    });
+    s_prefetchThread.detach();
 }
 
 // ---------------------------------------------------------------------------
