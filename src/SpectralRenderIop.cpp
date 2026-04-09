@@ -4841,6 +4841,8 @@ void SpectralRenderIop::_EnsureFrameRendered()
     std::lock_guard<std::mutex> lock(_renderMutex);
     if (_frameReady.load()) return;
 
+    auto tEnsureStart = std::chrono::high_resolution_clock::now();
+
     // Load volume — upgrade to full 128³ for render if currently at 64³ preview
     _LoadVDB();          // ensures volume is loaded (may be 64³ preview)
     // Only upgrade resolution for single-VDB path (VolMerge handles its own resolution)
@@ -5190,7 +5192,8 @@ void SpectralRenderIop::_EnsureFrameRendered()
     {
         auto tEnd = std::chrono::high_resolution_clock::now();
         auto msGpu = std::chrono::duration_cast<std::chrono::milliseconds>(tEnd - tGpuStart).count();
-        SLOG("SpectralRender: render complete (gpu+cpu=%lldms)\n", msGpu);
+        auto msTotal = std::chrono::duration_cast<std::chrono::milliseconds>(tEnd - tEnsureStart).count();
+        SLOG("SpectralRender: render complete (render=%lldms total=%lldms)\n", msGpu, msTotal);
     }
 }
 

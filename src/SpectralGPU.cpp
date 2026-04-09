@@ -10,6 +10,7 @@
 #include <cuda_runtime.h>
 #include <cstdlib>
 #include <cstdio>
+#include <chrono>
 
 #include <cstdio>
 #include <cstring>
@@ -770,6 +771,7 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     launchParams.blueNoise    = camera.blueNoise ? 1 : 0;
 
     // Multi-volume upload (Phase 13)
+    auto tVolUploadStart = std::chrono::high_resolution_clock::now();
     launchParams.numGpuVolumes = 0;
     memset(launchParams.gpuVolumes, 0, sizeof(launchParams.gpuVolumes));
     // Legacy single-volume fields
@@ -987,6 +989,8 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     }
     _numDeviceVolumes = launchParams.numGpuVolumes;
 
+    auto tVolUploadEnd = std::chrono::high_resolution_clock::now();
+
     // Upload HDRI virtual lights + SH for GPU volume lighting
     launchParams.numVirtualLights = _numVirtualLights;
     for (int i = 0; i < _numVirtualLights; ++i) {
@@ -1041,6 +1045,7 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
                           sizeof(spectral_gpu::LaunchParams), cudaMemcpyHostToDevice));
 
     // Launch
+    auto tLaunchStart = std::chrono::high_resolution_clock::now();
     OPTIX_CHECK(optixLaunch(
         _pipeline, 0,
         _d_params, sizeof(spectral_gpu::LaunchParams),
@@ -1048,6 +1053,7 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
         width, height, 1));
 
     CUDA_CHECK(cudaDeviceSynchronize());
+    auto tLaunchEnd = std::chrono::high_resolution_clock::now();
 
     // Download framebuffer
     CUDA_CHECK(cudaMemcpy(pixels,
@@ -1061,6 +1067,15 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
                               reinterpret_cast<void*>(_d_depthbuffer),
                               size_t(width) * height * sizeof(float),
                               cudaMemcpyDeviceToHost));
+    }
+
+    auto tDownloadEnd = std::chrono::high_resolution_clock::now();
+    {
+        auto msUpload   = std::chrono::duration_cast<std::chrono::milliseconds>(tVolUploadEnd - tVolUploadStart).count();
+        auto msLaunch   = std::chrono::duration_cast<std::chrono::milliseconds>(tLaunchEnd - tLaunchStart).count();
+        auto msDownload = std::chrono::duration_cast<std::chrono::milliseconds>(tDownloadEnd - tLaunchEnd).count();
+        fprintf(stderr, "SpectralGPU: timing — vol_upload=%lldms launch=%lldms download=%lldms (%dx%d %d vol)\n",
+                msUpload, msLaunch, msDownload, width, height, launchParams.numGpuVolumes);
     }
 
     return true;
