@@ -1001,7 +1001,7 @@ void SpectralRenderIop::knobs(Knob_Callback f)
 int SpectralRenderIop::knob_changed(Knob* k)
 {
     _asyncCancel.store(true);
-    // Don't join — let GPU finish naturally, CUDA serializes access
+    if (_asyncQualityThread.joinable()) _asyncQualityThread.join();
     _frameReady.store(false);
     _progressiveSppDone = 0;
 
@@ -1383,6 +1383,7 @@ void SpectralRenderIop::_validate(bool forReal)
     int currentFrame = static_cast<int>(outputContext().frame());
     if (currentFrame != _frame) {
         _asyncCancel.store(true);
+        if (_asyncQualityThread.joinable()) _asyncQualityThread.join();
         _frame = currentFrame;
         _frameReady.store(false);
         _progressiveSppDone = 0;
@@ -1536,6 +1537,7 @@ void SpectralRenderIop::_validate(bool forReal)
 
     if (forReal || scnChanged) {
         _asyncCancel.store(true);
+        if (_asyncQualityThread.joinable()) _asyncQualityThread.join();
         _LoadStage();
         _BuildCameraFromInput();
         _frameReady.store(false);
@@ -4978,6 +4980,8 @@ void SpectralRenderIop::_EnsureFrameRendered()
     if (!_volumes.empty() && _cachedVolMerge) {
         auto tVolStart = std::chrono::high_resolution_clock::now();
         int masterMaxRes = _GetMasterMaxRes();
+        // Preview pass: use 256³ max for fast VDB load, quality pass uses full res
+        if (isPreviewPass && masterMaxRes > 256) masterMaxRes = 256;
         auto entries = _cachedVolMerge->GetVolumes(int(outputContext().frame()), masterMaxRes);
         auto tVolLoad = std::chrono::high_resolution_clock::now();
 

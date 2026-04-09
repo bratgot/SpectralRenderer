@@ -199,15 +199,15 @@ static __forceinline__ __device__ float3 shadeNormal(float3 n)
 static __forceinline__ __device__ float blackbodyNorm(float lambda_nm, float temp)
 {
     if (temp < 100.f) return 0.f;
-    double lm = lambda_nm * 1e-9;
-    double h=6.62607015e-34, c=2.99792458e8, k=1.380649e-23;
-    double x = (h*c)/(lm*k*temp);
-    if (x > 500.0) return 0.f;
-    double B = (2.0*h*c*c)/(lm*lm*lm*lm*lm) / (exp(x)-1.0);
-    double peakL = 2.898e-3/temp;
-    double xp = (h*c)/(peakL*k*temp);
-    double Bp = (2.0*h*c*c)/(peakL*peakL*peakL*peakL*peakL) / (exp(xp)-1.0);
-    return Bp > 0.0 ? float(B/Bp) : 0.f;
+    // hc/k in nm·K = 14387768.775
+    float x = 14387768.f / (lambda_nm * temp);
+    if (x > 80.f) return 0.f;  // underflow guard
+    // Wien peak: peakL = 2898000/T nm,  xp = hc/(peakL*k*T) ≈ 4.96511
+    float peakL = 2898000.f / temp;
+    float ratio = peakL / lambda_nm;
+    float r5 = ratio * ratio * ratio * ratio * ratio;
+    // exp(4.96511)-1 = 142.327
+    return r5 * 142.327f / (expf(x) - 1.f);
 }
 
 static __forceinline__ __device__ float lightEmission(const GPULight& light, float lambda)
@@ -1331,18 +1331,12 @@ extern "C" __global__ void __raygen__spectral()
         unsigned int dofSeed = pixIdx * 7919u;
         makeRay(px+0.5f, py+0.5f, W, H, origin, dir, dofSeed);
         unsigned int p0=0,p1=0,p2=0,p3=__float_as_uint(1e30f),p4=0,p5=0,p6=0;
-        optixTrace(params.traversable, origin, dir, 1e-4f,1e30f,0.f,
-                   OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0, p0,p1,p2,p3,p4,p5,p6);
 
-        // SER: reorder threads by ray direction for volume march coherence
-        // Quantize direction to 16-bit hash — groups warps marching similar paths
-        // TODO: re-enable after OptiX 9 stability verified
-        /*{
-            unsigned int dh = (unsigned int)((dir.x*0.5f+0.5f)*63.f) 
-                            | ((unsigned int)((dir.y*0.5f+0.5f)*63.f) << 6)
-                            | ((unsigned int)((dir.z*0.5f+0.5f)*15.f) << 12);
-            optixReorder(dh, 16);
-        }*/
+        // Hit Object API: traverse → reorder → invoke (SER for volume coherence)
+        optixTraverse(params.traversable, origin, dir, 1e-4f,1e30f,0.f,
+                      OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0);
+        optixReorder();
+        optixInvoke(p0,p1,p2,p3,p4,p5,p6);
 
         float r = __uint_as_float(p0);
         float g = __uint_as_float(p1);
@@ -1411,19 +1405,12 @@ extern "C" __global__ void __raygen__spectral()
             float3 origin, dir;
             makeRay(px+jx, py+jy, W, H, origin, dir, seed + 50u);
 
-            // Primary ray
+            // Primary ray — Hit Object API for SER
             unsigned int p0=0,p1=0,p2=0,p3=__float_as_uint(1e30f),p4=0,p5=0,p6=0;
-            optixTrace(params.traversable, origin, dir, 1e-4f,1e30f,0.f,
-                       OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0, p0,p1,p2,p3,p4,p5,p6);
-
-            // SER: reorder by direction for volume-only rays
-            // TODO: re-enable after OptiX 9 stability verified
-            /*if (params.numGpuVolumes > 0 && p4 == 0u) {
-                unsigned int dh = (unsigned int)((dir.x*0.5f+0.5f)*63.f) 
-                                | ((unsigned int)((dir.y*0.5f+0.5f)*63.f) << 6)
-                                | ((unsigned int)((dir.z*0.5f+0.5f)*15.f) << 12);
-                optixReorder(dh, 16);
-            }*/
+            optixTraverse(params.traversable, origin, dir, 1e-4f,1e30f,0.f,
+                          OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0);
+            optixReorder();
+            optixInvoke(p0,p1,p2,p3,p4,p5,p6);
 
             float depth = __uint_as_float(p3);
             bool isHit = (p4 > 0u);
