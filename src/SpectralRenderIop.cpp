@@ -1,5 +1,10 @@
 #include "SpectralRenderIop.h"
 #include "SpectralSurfaceOp.h"
+#include <chrono>
+
+// Debug logging — suppress during scrub for performance
+static bool s_spectralLogEnabled = true;
+#define SLOG(...) do { if (s_spectralLogEnabled) fprintf(stderr, __VA_ARGS__); } while(0)
 
 #ifdef SPECTRAL_HAS_OSD
 #include "SpectralSubdiv.h"
@@ -89,7 +94,7 @@ SpectralRenderIop::SpectralRenderIop(Node* node)
     , _scene(std::make_unique<pxr::SpectralScene>())
 {
     // 3 inputs: scene, cam, bg (set by min/max_inputs)
-    fprintf(stderr, "SpectralRender: DLL build %s %s\n", __DATE__, __TIME__);
+    SLOG("SpectralRender: DLL build %s %s\n", __DATE__, __TIME__);
 }
 
 SpectralRenderIop::~SpectralRenderIop() = default;
@@ -1204,7 +1209,7 @@ int SpectralRenderIop::knob_changed(Knob* k)
         }
         if (knob("sun_elevation")) knob("sun_elevation")->set_value(_sunElevation);
         if (knob("sun_azimuth")) knob("sun_azimuth")->set_value(_sunAzimuth);
-        fprintf(stderr, "SpectralRender: sun position — elev=%.1f° az=%.1f° (lat=%.2f lon=%.2f time=%.1f day=%d)\n",
+        SLOG("SpectralRender: sun position — elev=%.1f° az=%.1f° (lat=%.2f lon=%.2f time=%.1f day=%d)\n",
                 _sunElevation, _sunAzimuth, _latitude, _longitude, _timeOfDay, _dayOfYear);
         return 1;
     }
@@ -1375,10 +1380,12 @@ void SpectralRenderIop::_validate(bool forReal)
         _frame = currentFrame;
         _frameReady.store(false);
         _progressiveSppDone = 0;
-        _vdbLastLoadedFrame = -999; // force VDB reload for new frame
+        _vdbLastLoadedFrame = -999;
         _volume.reset();
-        _volumes.clear();  // clear all volumes so VolMerge reloads
+        _volumes.clear();
     }
+    // If we were scrubbing and have now stopped, force re-render
+    // (scrub detection removed — preview-res loading handles performance)
     // ------------------------------------------------------------------
     // Determine output format:
     //   Priority: BG input format > format knob > fallback
@@ -1724,7 +1731,7 @@ void SpectralRenderIop::_LoadStage()
     GeometryProviderI* geoProvider = in0 ? dynamic_cast<GeometryProviderI*>(in0) : nullptr;
 
     if (geoProvider) {
-        fprintf(stderr, "SpectralRender: reading from node graph input\n");
+        SLOG("SpectralRender: reading from node graph input\n");
 
         try {
             // Validate the upstream op
@@ -1733,7 +1740,7 @@ void SpectralRenderIop::_LoadStage()
             // Build a usg::Stage from the upstream GeomOp
             usg::StageRef usgStage = usg::Stage::CreateInMemory();
             if (!usgStage) {
-                fprintf(stderr, "SpectralRender: failed to create in-memory stage\n");
+                SLOG("SpectralRender: failed to create in-memory stage\n");
                 return;
             }
 
@@ -1743,7 +1750,7 @@ void SpectralRenderIop::_LoadStage()
             GeometryProviderI::BuildStage(usgStage, location, sampleTime);
 
             if (!usgStage || !usgStage->isValid()) {
-                fprintf(stderr, "SpectralRender: BuildStage produced invalid stage\n");
+                SLOG("SpectralRender: BuildStage produced invalid stage\n");
                 return;
             }
 
@@ -1751,25 +1758,25 @@ void SpectralRenderIop::_LoadStage()
             int usdVer = usg::usdAPIVersion();
             usg::Stage::Handle* handle = usgStage->getUsdStageRefPtr(usdVer);
             if (!handle) {
-                fprintf(stderr, "SpectralRender: getUsdStageRefPtr failed (version mismatch?)\n");
+                SLOG("SpectralRender: getUsdStageRefPtr failed (version mismatch?)\n");
                 return;
             }
 
             // Cast to PXR UsdStageRefPtr
             UsdStageRefPtr* pxrStagePtr = reinterpret_cast<UsdStageRefPtr*>(handle);
             if (!pxrStagePtr || !(*pxrStagePtr)) {
-                fprintf(stderr, "SpectralRender: PXR stage pointer is null\n");
+                SLOG("SpectralRender: PXR stage pointer is null\n");
                 return;
             }
 
-            fprintf(stderr, "SpectralRender: got PXR stage from node graph\n");
+            SLOG("SpectralRender: got PXR stage from node graph\n");
             _LoadFromPxrStage(*pxrStagePtr);
             return;
 
         } catch (const std::exception& e) {
-            fprintf(stderr, "SpectralRender: node graph input error: %s\n", e.what());
+            SLOG("SpectralRender: node graph input error: %s\n", e.what());
         } catch (...) {
-            fprintf(stderr, "SpectralRender: node graph input unknown error\n");
+            SLOG("SpectralRender: node graph input unknown error\n");
         }
     }
 
@@ -1777,28 +1784,28 @@ void SpectralRenderIop::_LoadStage()
     // Path 2: File knob fallback
     // ------------------------------------------------------------------
     if (!_usdFilePath || _usdFilePath[0] == '\0') {
-        fprintf(stderr, "SpectralRender: no input connected and no USD file set\n");
+        SLOG("SpectralRender: no input connected and no USD file set\n");
         return;
     }
 
-    fprintf(stderr, "SpectralRender: opening file %s\n", _usdFilePath);
+    SLOG("SpectralRender: opening file %s\n", _usdFilePath);
 
     UsdStageRefPtr stage;
     try {
         stage = UsdStage::Open(std::string(_usdFilePath));
     } catch (const std::exception& e) {
-        fprintf(stderr, "SpectralRender: exception opening stage: %s\n", e.what());
+        SLOG("SpectralRender: exception opening stage: %s\n", e.what());
         return;
     } catch (...) {
-        fprintf(stderr, "SpectralRender: unknown exception opening stage\n");
+        SLOG("SpectralRender: unknown exception opening stage\n");
         return;
     }
     if (!stage) {
-        fprintf(stderr, "SpectralRender: UsdStage::Open returned null\n");
+        SLOG("SpectralRender: UsdStage::Open returned null\n");
         return;
     }
 
-    fprintf(stderr, "SpectralRender: stage opened OK from file\n");
+    SLOG("SpectralRender: stage opened OK from file\n");
     _LoadFromPxrStage(stage);
 }
 
@@ -1822,9 +1829,9 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
         UsdPrim p = stage->GetPrimAtPath(SdfPath(std::string(_cameraPath)));
         if (p.IsValid() && p.IsA<UsdGeomCamera>()) {
             cameraPrim = p;
-            fprintf(stderr, "SpectralRender: using specified camera: %s\n", _cameraPath);
+            SLOG("SpectralRender: using specified camera: %s\n", _cameraPath);
         } else {
-            fprintf(stderr, "SpectralRender: camera not found at %s\n", _cameraPath);
+            SLOG("SpectralRender: camera not found at %s\n", _cameraPath);
         }
     }
 
@@ -1832,7 +1839,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
         // Auto-find first camera
         if (!cameraPrim.IsValid() && prim.IsA<UsdGeomCamera>()) {
             cameraPrim = prim;
-            fprintf(stderr, "SpectralRender: auto-found camera: %s\n",
+            SLOG("SpectralRender: auto-found camera: %s\n",
                     prim.GetPath().GetText());
         }
 
@@ -1931,7 +1938,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                         hdriPath = texPath.GetResolvedPath();
                         if (hdriPath.empty()) hdriPath = texPath.GetAssetPath();
                         if (!hdriPath.empty())
-                            fprintf(stderr, "SpectralRender: dome HDRI via GetTextureFileAttr: '%s'\n", hdriPath.c_str());
+                            SLOG("SpectralRender: dome HDRI via GetTextureFileAttr: '%s'\n", hdriPath.c_str());
                     }
                 }
 
@@ -1944,7 +1951,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                                 SdfAssetPath ap = val.UncheckedGet<SdfAssetPath>();
                                 std::string p = ap.GetResolvedPath();
                                 if (p.empty()) p = ap.GetAssetPath();
-                                fprintf(stderr, "SpectralRender: dome attr '%s' = asset '%s'\n",
+                                SLOG("SpectralRender: dome attr '%s' = asset '%s'\n",
                                         attr.GetName().GetText(), p.c_str());
                                 if (!p.empty() && hdriPath.empty()) hdriPath = p;
                             } else if (val.IsHolding<std::string>()) {
@@ -1954,7 +1961,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                                     s.find(".exr") != std::string::npos ||
                                     s.find(".hdri") != std::string::npos ||
                                     s.find(".tx") != std::string::npos) {
-                                    fprintf(stderr, "SpectralRender: dome attr '%s' = string path '%s'\n",
+                                    SLOG("SpectralRender: dome attr '%s' = string path '%s'\n",
                                             attr.GetName().GetText(), s.c_str());
                                     if (hdriPath.empty()) hdriPath = s;
                                 }
@@ -1978,7 +1985,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                                         std::string p = ap.GetResolvedPath();
                                         if (p.empty()) p = ap.GetAssetPath();
                                         if (!p.empty()) {
-                                            fprintf(stderr, "SpectralRender: dome shader '%s'.%s = '%s'\n",
+                                            SLOG("SpectralRender: dome shader '%s'.%s = '%s'\n",
                                                     target.GetText(), attr.GetName().GetText(), p.c_str());
                                             if (hdriPath.empty()) hdriPath = p;
                                         }
@@ -1991,14 +1998,14 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
 
                 // Debug: dump all attributes if nothing found
                 if (hdriPath.empty()) {
-                    fprintf(stderr, "SpectralRender: dome '%s' — no HDRI found. Attributes:\n",
+                    SLOG("SpectralRender: dome '%s' — no HDRI found. Attributes:\n",
                             prim.GetPath().GetText());
                     for (const auto& attr : prim.GetAttributes()) {
                         VtValue val;
                         if (attr.Get(&val, timeCode))
-                            fprintf(stderr, "  %s = %s\n", attr.GetName().GetText(), val.GetTypeName().c_str());
+                            SLOG("  %s = %s\n", attr.GetName().GetText(), val.GetTypeName().c_str());
                         else
-                            fprintf(stderr, "  %s (no value)\n", attr.GetName().GetText());
+                            SLOG("  %s (no value)\n", attr.GetName().GetText());
                     }
                 }
 
@@ -2013,7 +2020,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                             light.envHeight = tex->GetHeight();
                             light.envPixels = tex->_pixels.data();
                             light.ComputeEnvAverage();
-                            fprintf(stderr, "SpectralRender: HDRI loaded '%s' (%dx%d) avg=(%.2f,%.2f,%.2f)\n",
+                            SLOG("SpectralRender: HDRI loaded '%s' (%dx%d) avg=(%.2f,%.2f,%.2f)\n",
                                     hdriPath.c_str(), light.envWidth, light.envHeight,
                                     light.envAvgColor[0], light.envAvgColor[1], light.envAvgColor[2]);
                         }
@@ -2095,7 +2102,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
             }
 
             _scene->AddLight(light);
-            fprintf(stderr, "SpectralRender: light '%s' — type=%d color=(%.2f,%.2f,%.2f) "
+            SLOG("SpectralRender: light '%s' — type=%d color=(%.2f,%.2f,%.2f) "
                     "intensity=%.2f exposure=%.2f effective=%.2f (multiplier=%.2f)\n",
                     light.name.c_str(), static_cast<int>(light.type),
                     light.color[0], light.color[1], light.color[2],
@@ -2126,7 +2133,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
 
             GfMatrix4d instancerXf = xfCache.GetLocalToWorldTransform(prim);
 
-            fprintf(stderr, "SpectralRender: PointInstancer '%s' — %zu instances, %zu prototypes\n",
+            SLOG("SpectralRender: PointInstancer '%s' — %zu instances, %zu prototypes\n",
                     prim.GetPath().GetText(), positions.size(), protoTargets.size());
 
             // For each instance, find its prototype mesh and add transformed triangles
@@ -2248,7 +2255,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                     _vdbSceneRotate = vxf.rotate;
                     _vdbSceneScale = vxf.scale;
                 }
-                fprintf(stderr, "SpectralRender: VDB[%d] xform: T=(%.1f,%.1f,%.1f) R=(%.1f,%.1f,%.1f) S=(%.2f,%.2f,%.2f)\n",
+                SLOG("SpectralRender: VDB[%d] xform: T=(%.1f,%.1f,%.1f) R=(%.1f,%.1f,%.1f) S=(%.2f,%.2f,%.2f)\n",
                         (int)_volumeXforms.size(),
                         vxf.translate[0], vxf.translate[1], vxf.translate[2],
                         vxf.rotate[0], vxf.rotate[1], vxf.rotate[2],
@@ -2345,7 +2352,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                     // Debug: print shader ID and all inputs
                     TfToken surfShaderId;
                     surfaceShader.GetIdAttr().Get(&surfShaderId, timeCode);
-                    fprintf(stderr, "SpectralRender: shader id='%s' prim='%s'\n",
+                    SLOG("SpectralRender: shader id='%s' prim='%s'\n",
                             surfShaderId.GetText(), surfaceShader.GetPath().GetText());
 
                     // List all inputs
@@ -2365,12 +2372,12 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                             UsdShadeShader connShader(connSrc.GetPrim());
                             TfToken connId;
                             if (connShader) connShader.GetIdAttr().Get(&connId, timeCode);
-                            fprintf(stderr, "  input '%s' -> connected to '%s' (id='%s')\n",
+                            SLOG("  input '%s' -> connected to '%s' (id='%s')\n",
                                     inp.GetBaseName().GetText(),
                                     connSrc.GetPrim().GetPath().GetText(),
                                     connId.GetText());
                         } else if (val.IsHolding<SdfAssetPath>()) {
-                            fprintf(stderr, "  input '%s' = asset:'%s'\n",
+                            SLOG("  input '%s' = asset:'%s'\n",
                                     inp.GetBaseName().GetText(),
                                     val.UncheckedGet<SdfAssetPath>().GetAssetPath().c_str());
                         }
@@ -2491,12 +2498,12 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                                             }
 
                                             int texId = _scene->AddTexture(std::move(tex));
-                                            fprintf(stderr, "SpectralRender: Iop texture '%s' -> %s (%dx%d, id=%d)\n",
+                                            SLOG("SpectralRender: Iop texture '%s' -> %s (%dx%d, id=%d)\n",
                                                     inputName, texIop->node_name(), texW, texH, texId);
                                             return texId;
                                         }
                                     } catch (...) {
-                                        fprintf(stderr, "SpectralRender: failed to render Iop texture '%s'\n",
+                                        SLOG("SpectralRender: failed to render Iop texture '%s'\n",
                                                 inputName);
                                     }
                                 }
@@ -2506,7 +2513,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                             // Real file on disk
                             int texId = _scene->LoadTexture(filePath);
                             if (texId >= 0) {
-                                fprintf(stderr, "SpectralRender: texture '%s' -> '%s' (id=%d)\n",
+                                SLOG("SpectralRender: texture '%s' -> '%s' (id=%d)\n",
                                         inputName, filePath.c_str(), texId);
                             }
                             return texId;
@@ -2563,19 +2570,19 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
 
                                             // Add to texture table
                                             int texId = _scene->AddTexture(std::move(tex));
-                                            fprintf(stderr, "SpectralRender: Iop texture '%s' -> %s (%dx%d, id=%d)\n",
+                                            SLOG("SpectralRender: Iop texture '%s' -> %s (%dx%d, id=%d)\n",
                                                     inputName, texIop->node_name(), texW, texH, texId);
                                             return texId;
                                         }
                                     } catch (...) {
-                                        fprintf(stderr, "SpectralRender: failed to render Iop texture '%s'\n",
+                                        SLOG("SpectralRender: failed to render Iop texture '%s'\n",
                                                 inputName);
                                     }
                                 }
                             }
                         }
 
-                        fprintf(stderr, "SpectralRender: unsupported texture shader '%s' on '%s'\n",
+                        SLOG("SpectralRender: unsupported texture shader '%s' on '%s'\n",
                                 shaderId.GetText(), inputName);
                         return -1;
                     };
@@ -2617,7 +2624,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                                     int dTexId = _scene->LoadTexture(entry.second.displacementFile);
                                     if (dTexId >= 0) {
                                         mat.displacementTexId = dTexId;
-                                        fprintf(stderr, "SpectralRender: displacement map '%s' (id=%d)\n",
+                                        SLOG("SpectralRender: displacement map '%s' (id=%d)\n",
                                                 entry.second.displacementFile.c_str(), dTexId);
                                     }
                                 }
@@ -2655,11 +2662,11 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                                                 }
 
                                                 mat.displacementTexId = _scene->AddTexture(std::move(tex));
-                                                fprintf(stderr, "SpectralRender: displacement from Iop '%s' (%dx%d, id=%d)\n",
+                                                SLOG("SpectralRender: displacement from Iop '%s' (%dx%d, id=%d)\n",
                                                         dispIop->node_name(), texW, texH, mat.displacementTexId);
                                             }
                                         } catch (...) {
-                                            fprintf(stderr, "SpectralRender: failed to read displacement Iop\n");
+                                            SLOG("SpectralRender: failed to read displacement Iop\n");
                                         }
                                     }
                                 }
@@ -2695,11 +2702,11 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                                                     }
                                                 }
                                                 mat.baseColorTexId = _scene->AddTexture(std::move(tex));
-                                                fprintf(stderr, "SpectralRender: base color from tex pipe '%s' (%dx%d, id=%d)\n",
+                                                SLOG("SpectralRender: base color from tex pipe '%s' (%dx%d, id=%d)\n",
                                                         texIop->node_name(), texW, texH, mat.baseColorTexId);
                                             }
                                         } catch (...) {
-                                            fprintf(stderr, "SpectralRender: failed to read texture Iop\n");
+                                            SLOG("SpectralRender: failed to read texture Iop\n");
                                         }
                                     }
                                 }
@@ -2736,18 +2743,18 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                                                 }
                                                 mat.bumpMapTexId = _scene->AddTexture(std::move(tex));
                                                 mat.bumpStrength = entry.second.bumpStrength;
-                                                fprintf(stderr, "SpectralRender: bump map from pipe '%s' (%dx%d, id=%d, strength=%.2f)\n",
+                                                SLOG("SpectralRender: bump map from pipe '%s' (%dx%d, id=%d, strength=%.2f)\n",
                                                         bumpIop->node_name(), bW, bH, mat.bumpMapTexId, mat.bumpStrength);
                                             }
                                         } catch (...) {
-                                            fprintf(stderr, "SpectralRender: failed to read bump Iop\n");
+                                            SLOG("SpectralRender: failed to read bump Iop\n");
                                         }
                                     }
                                 }
 
                                 if (mat.abbeNumber > 0.f || mat.thinFilmThickness > 0.f
                                     || mat.displacementScale > 0.f) {
-                                    fprintf(stderr, "SpectralRender: spectral props from '%s'"
+                                    SLOG("SpectralRender: spectral props from '%s'"
                                             " — Abbe=%.1f thinFilm=%.0fnm disp=%.2f\n",
                                             entry.first.c_str(),
                                             mat.abbeNumber, mat.thinFilmThickness,
@@ -2760,7 +2767,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
 
                     matId = _scene->AddMaterial(mat);
 
-                    fprintf(stderr, "SpectralRender: material '%s' — color=(%.2f,%.2f,%.2f) metal=%.2f rough=%.2f opacity=%.2f\n",
+                    SLOG("SpectralRender: material '%s' — color=(%.2f,%.2f,%.2f) metal=%.2f rough=%.2f opacity=%.2f\n",
                             mat.name.c_str(),
                             mat.baseColor[0], mat.baseColor[1], mat.baseColor[2],
                             mat.metallic, mat.roughness, mat.opacity);
@@ -2785,7 +2792,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                 && meshMat.displacementScale > 0.f
                 && meshMat.displacementTexId >= 0) {
                 scheme = SpectralSubdiv::Scheme::CatmullClark;
-                fprintf(stderr, "SpectralRender: auto-subdividing %s for displacement\n",
+                SLOG("SpectralRender: auto-subdividing %s for displacement\n",
                         prim.GetPath().GetText());
             }
 
@@ -2826,7 +2833,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                         subIn.creaseSharpnesses = edgeSharpnesses;
 
                         if (!edgePairs.empty())
-                            fprintf(stderr, "SpectralRender: %zu crease edges (sharpness %.1f-%.1f)\n",
+                            SLOG("SpectralRender: %zu crease edges (sharpness %.1f-%.1f)\n",
                                     edgeSharpnesses.size(),
                                     *std::min_element(edgeSharpnesses.begin(), edgeSharpnesses.end()),
                                     *std::max_element(edgeSharpnesses.begin(), edgeSharpnesses.end()));
@@ -2840,7 +2847,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                     if (!cornerIndices.empty() && !cornerSharpnesses.empty()) {
                         subIn.cornerIndices = cornerIndices;
                         subIn.cornerSharpnesses = cornerSharpnesses;
-                        fprintf(stderr, "SpectralRender: %zu corner vertices\n", cornerIndices.size());
+                        SLOG("SpectralRender: %zu corner vertices\n", cornerIndices.size());
                     }
                 }
 
@@ -2910,7 +2917,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                     for (size_t i = 0; i < subOut.triangleIndices.size(); ++i)
                         faceVertexIndices[i] = subOut.triangleIndices[i];
 
-                    fprintf(stderr, "SpectralRender: mesh %s subdivided (%s level 2)\n",
+                    SLOG("SpectralRender: mesh %s subdivided (%s level 2)\n",
                             prim.GetPath().GetText(), schemeStr.c_str());
 
                     // Use refined UVs from subdivision
@@ -2928,7 +2935,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                             }
                         }
                         uvsInterp = UsdGeomTokens->faceVarying;
-                        fprintf(stderr, "SpectralRender: refined %zu UVs for %s\n",
+                        SLOG("SpectralRender: refined %zu UVs for %s\n",
                                 uvs.size(), prim.GetPath().GetText());
                     } else {
                         uvs.clear();
@@ -3052,7 +3059,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                                     normals[i] = (len > 1e-8f) ? normals[i] / len : GfVec3f(0,1,0);
                                 }
 
-                                fprintf(stderr, "SpectralRender: displaced %d vertices (scale=%.2f, tex=%dx%d) for %s\n",
+                                SLOG("SpectralRender: displaced %d vertices (scale=%.2f, tex=%dx%d) for %s\n",
                                         nPts, scale, texW, texH, prim.GetPath().GetText());
                             }
                         }
@@ -3090,7 +3097,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
 
         const int numPoints = static_cast<int>(points.size());
 
-        fprintf(stderr, "SpectralRender: mesh %s — %d points, %d faces, %d normals (%s)\n",
+        SLOG("SpectralRender: mesh %s — %d points, %d faces, %d normals (%s)\n",
                 prim.GetPath().GetText(), numPoints,
                 static_cast<int>(faceVertexCounts.size()),
                 static_cast<int>(normals.size()),
@@ -3229,7 +3236,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
         }
     }
 
-    fprintf(stderr, "SpectralRender: loaded %d meshes, %d triangles total\n",
+    SLOG("SpectralRender: loaded %d meshes, %d triangles total\n",
             meshCount, totalTris);
 
     // ------------------------------------------------------------------
@@ -3273,7 +3280,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                 _volume = pxr::SpectralVDBLoader::Load(densityPath.c_str(), "density", tempArg);
                 if (_volume && _volume->IsValid()) {
                     _applyVolumeShading(_volume);
-                    fprintf(stderr, "SpectralRender: loaded USD Volume prim %s (%dx%dx%d)\n",
+                    SLOG("SpectralRender: loaded USD Volume prim %s (%dx%dx%d)\n",
                             prim.GetPath().GetText(), _volume->resX, _volume->resY, _volume->resZ);
                     break;
                 }
@@ -3299,7 +3306,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
     _camera.pixelAspect = fmtPtr ? fmtPtr->pixel_aspect() : 1.0;
     const double aspect = double(W) / double(H);
 
-    fprintf(stderr, "SpectralRender: format %dx%d pixel_aspect=%.4f\n",
+    SLOG("SpectralRender: format %dx%d pixel_aspect=%.4f\n",
             W, H, _camera.pixelAspect);
 
     bool foundCamera = false;
@@ -3315,16 +3322,16 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
             foundCamera = true;
 
             GfVec3d camPos = camToWorld.ExtractTranslation();
-            fprintf(stderr, "SpectralRender: camera at (%.2f, %.2f, %.2f)\n",
+            SLOG("SpectralRender: camera at (%.2f, %.2f, %.2f)\n",
                     camPos[0], camPos[1], camPos[2]);
         } catch (...) {
-            fprintf(stderr, "SpectralRender: camera extraction failed\n");
+            SLOG("SpectralRender: camera extraction failed\n");
         }
     }
 
     if (!foundCamera) {
         // Default 24mm camera positioned to see a typical volume scene
-        fprintf(stderr, "SpectralRender: using default 24mm camera\n");
+        SLOG("SpectralRender: using default 24mm camera\n");
         // Position camera at (0, 2, 8) looking at origin
         GfMatrix4d lookAt(1.0);
         GfVec3d eye(0.0, 2.0, 8.0);
@@ -3370,7 +3377,7 @@ void SpectralRenderIop::_BuildCameraFromInput()
     try {
         cam->validate(true);
     } catch (...) {
-        fprintf(stderr, "SpectralRender: camera input validation failed\n");
+        SLOG("SpectralRender: camera input validation failed\n");
         return;
     }
 
@@ -3423,9 +3430,9 @@ void SpectralRenderIop::_BuildCameraFromInput()
     _camera.cameraMblur = false;  // TODO: camera motion blur (needs proper axis chain evaluation)
 
     GfVec3d camPos = _camera.viewToWorld.ExtractTranslation();
-    fprintf(stderr, "SpectralRender: camera from input at (%.2f, %.2f, %.2f)\n",
+    SLOG("SpectralRender: camera from input at (%.2f, %.2f, %.2f)\n",
             camPos[0], camPos[1], camPos[2]);
-    fprintf(stderr, "SpectralRender: DDImage proj[0][0]=%.4f [1][1]=%.4f → corrected [1][1]=%.4f (aspect=%.4f)\n",
+    SLOG("SpectralRender: DDImage proj[0][0]=%.4f [1][1]=%.4f → corrected [1][1]=%.4f (aspect=%.4f)\n",
             pr[0][0], pr[1][1], pxrProj[1][1], imageAspect);
 }
 
@@ -3528,7 +3535,7 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
 
     float kPi = 3.14159265f;
 
-    // ─── Volume bbox + point cloud (all volumes) ────────────────────
+    // ─── Volume bbox wireframe (all volumes) ──────────────────────
     for (size_t vi = 0; vi < _volumes.size(); ++vi) {
         auto& vol = _volumes[vi];
         if (!vol || !vol->HasBbox()) continue;
@@ -3552,69 +3559,75 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
             glVertex3f(x0,y1,z0);glVertex3f(x0,y1,z1);
             glEnd();
         }
+    }
 
-        // Point cloud — budget split across volumes, skip during playback
-        if (_vdbShowPoints && !_vdbIsMetadataOnly && vol->IsValid()) {
-            if (_vdbPreviewDirty || _vdbPreviewPoints.empty()) {
-                _vdbPreviewPoints.clear(); _vdbMaxDensity = 1e-6f;
+    // ─── Point cloud (ALL volumes, built once) ──────────────────────
+    if (_vdbShowPoints && !_vdbIsMetadataOnly && !_volumes.empty()) {
+        if (_vdbPreviewDirty || _vdbPreviewPoints.empty()) {
+            _vdbPreviewPoints.clear(); _vdbMaxDensity = 1e-6f;
 
-                int maxPointsPerVol = std::max(100, 5000 / std::max(1, (int)_volumes.size()));
-                for (size_t vj = 0; vj < _volumes.size(); ++vj) {
-                    auto& v = _volumes[vj];
-                    if (!v || !v->IsValid()) continue;
-                    int totalVoxels = v->resX * v->resY * v->resZ;
-                    int step = std::max(1, (int)std::cbrt(double(totalVoxels) / maxPointsPerVol));
-                    pxr::GfVec3f vMin = v->bboxMin, vSz = v->bboxMax - v->bboxMin;
-                    for (int iz = 0; iz < v->resZ; iz += step)
-                        for (int iy = 0; iy < v->resY; iy += step)
-                            for (int ix = 0; ix < v->resX; ix += step) {
-                                float u = float(ix)/v->resX, uv = float(iy)/v->resY, w = float(iz)/v->resZ;
-                                float d = v->SampleDensity(u, uv, w);
-                                if (d < 0.01f) continue;
-                                if (d > _vdbMaxDensity) _vdbMaxDensity = d;
-                                // Transform point to world space
-                                pxr::GfVec3f localP(vMin[0]+u*vSz[0], vMin[1]+uv*vSz[1], vMin[2]+w*vSz[2]);
-                                pxr::GfVec3f worldP = v->hasTransform
-                                    ? (v->_center + pxr::GfVec3f(
-                                        v->_rotM[0]*(localP[0]-((v->bboxMin[0]+v->bboxMax[0])*0.5f))*v->scale[0] +
-                                        v->_rotM[1]*(localP[1]-((v->bboxMin[1]+v->bboxMax[1])*0.5f))*v->scale[1] +
-                                        v->_rotM[2]*(localP[2]-((v->bboxMin[2]+v->bboxMax[2])*0.5f))*v->scale[2],
-                                        v->_rotM[3]*(localP[0]-((v->bboxMin[0]+v->bboxMax[0])*0.5f))*v->scale[0] +
-                                        v->_rotM[4]*(localP[1]-((v->bboxMin[1]+v->bboxMax[1])*0.5f))*v->scale[1] +
-                                        v->_rotM[5]*(localP[2]-((v->bboxMin[2]+v->bboxMax[2])*0.5f))*v->scale[2],
-                                        v->_rotM[6]*(localP[0]-((v->bboxMin[0]+v->bboxMax[0])*0.5f))*v->scale[0] +
-                                        v->_rotM[7]*(localP[1]-((v->bboxMin[1]+v->bboxMax[1])*0.5f))*v->scale[1] +
-                                        v->_rotM[8]*(localP[2]-((v->bboxMin[2]+v->bboxMax[2])*0.5f))*v->scale[2]))
-                                    : localP;
-                                VDBPreviewPoint pt;
-                                pt.x = worldP[0]; pt.y = worldP[1]; pt.z = worldP[2];
-                                pt.density = d;
-                                _vdbPreviewPoints.push_back(pt);
+            int totalBudget = 20000;  // total points across all volumes
+            int maxPointsPerVol = std::max(500, totalBudget / std::max(1, (int)_volumes.size()));
+            for (size_t vj = 0; vj < _volumes.size(); ++vj) {
+                auto& v = _volumes[vj];
+                if (!v || !v->IsValid()) continue;
+                int totalVoxels = v->resX * v->resY * v->resZ;
+                int step = std::max(1, (int)std::cbrt(double(totalVoxels) / maxPointsPerVol));
+                pxr::GfVec3f vMin = v->bboxMin, vSz = v->bboxMax - v->bboxMin;
+                pxr::GfVec3f vCenter = (v->bboxMin + v->bboxMax) * 0.5f;
+                int volPts = 0;
+                for (int iz = 0; iz < v->resZ; iz += step)
+                    for (int iy = 0; iy < v->resY; iy += step)
+                        for (int ix = 0; ix < v->resX; ix += step) {
+                            float u = float(ix)/v->resX, uv = float(iy)/v->resY, w = float(iz)/v->resZ;
+                            float d = v->SampleDensity(u, uv, w);
+                            if (d < 0.01f) continue;
+                            if (d > _vdbMaxDensity) _vdbMaxDensity = d;
+                            pxr::GfVec3f localP(vMin[0]+u*vSz[0], vMin[1]+uv*vSz[1], vMin[2]+w*vSz[2]);
+                            pxr::GfVec3f worldP = localP;
+                            if (v->hasTransform) {
+                                pxr::GfVec3f rel = localP - vCenter;
+                                pxr::GfVec3f scaled(rel[0]*v->scale[0], rel[1]*v->scale[1], rel[2]*v->scale[2]);
+                                worldP = v->_center + pxr::GfVec3f(
+                                    v->_rotM[0]*scaled[0] + v->_rotM[1]*scaled[1] + v->_rotM[2]*scaled[2],
+                                    v->_rotM[3]*scaled[0] + v->_rotM[4]*scaled[1] + v->_rotM[5]*scaled[2],
+                                    v->_rotM[6]*scaled[0] + v->_rotM[7]*scaled[1] + v->_rotM[8]*scaled[2]);
                             }
-                }
-                _vdbPreviewDirty = false;
+                            VDBPreviewPoint pt;
+                            pt.x = worldP[0]; pt.y = worldP[1]; pt.z = worldP[2];
+                            pt.density = d;
+                            _vdbPreviewPoints.push_back(pt);
+                            volPts++;
+                        }
+                SLOG("SpectralRender: viewport vol[%zu] %dx%dx%d step=%d pts=%d xf=%d bbox(%.1f,%.1f,%.1f)-(%.1f,%.1f,%.1f)\n",
+                        vj, v->resX, v->resY, v->resZ, step, volPts,
+                        v->hasTransform ? 1 : 0,
+                        v->GetBboxMin()[0], v->GetBboxMin()[1], v->GetBboxMin()[2],
+                        v->GetBboxMax()[0], v->GetBboxMax()[1], v->GetBboxMax()[2]);
             }
-            if (!_vdbPreviewPoints.empty()) {
-                glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-                glPointSize(float(_vdbPointSize)); glEnable(GL_POINT_SMOOTH);
-                float inv = 1.f / _vdbMaxDensity;
-                glBegin(GL_POINTS);
-                for (const auto& pt : _vdbPreviewPoints) {
-                    float t = std::min(pt.density * inv, 1.f);
-                    float r, g, b;
-                    switch (_vdbRenderMode) {
-                        case 1: r = g = b = t; break;
-                        case 3: r=std::max(0.f,std::min((t-.5f)*2.f,1.f)); g=std::max(0.f,std::min((t-.25f)*2.f,1.f)); b=std::min(t*2.f,1.f); break;
-                        case 4: r=std::min(t*2.f,1.f); g=std::max(0.f,std::min((t-.3f)*2.f,1.f)); b=std::max(0.f,std::min((t-.7f)*3.f,1.f)); break;
-                        case 2: r=std::min(t*3.f,1.f); g=std::max(0.f,std::min((t-.33f)*3.f,1.f)); b=std::max(0.f,std::min((t-.66f)*3.f,1.f)); break;
-                        default: r=t; g=t*0.9f; b=t*0.7f; break;
-                    }
-                    glColor4f(r, g, b, .15f+.85f*t);
-                    glVertex3f(pt.x, pt.y, pt.z);
+            SLOG("SpectralRender: viewport total %d points from %d volumes\n",
+                    (int)_vdbPreviewPoints.size(), (int)_volumes.size());
+            _vdbPreviewDirty = false;
+        }
+        if (!_vdbPreviewPoints.empty()) {
+            glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+            glPointSize(float(_vdbPointSize)); glEnable(GL_POINT_SMOOTH);
+            float inv = 1.f / _vdbMaxDensity;
+            glBegin(GL_POINTS);
+            for (const auto& pt : _vdbPreviewPoints) {
+                float t = std::min(pt.density * inv, 1.f);
+                float r, g, b;
+                switch (_vdbRenderMode) {
+                    case 1: r = g = b = t; break;
+                    case 3: r=std::max(0.f,std::min((t-.5f)*2.f,1.f)); g=std::max(0.f,std::min((t-.25f)*2.f,1.f)); b=std::min(t*2.f,1.f); break;
+                    case 4: r=std::min(t*2.f,1.f); g=std::max(0.f,std::min((t-.3f)*2.f,1.f)); b=std::max(0.f,std::min((t-.7f)*3.f,1.f)); break;
+                    case 2: r=std::min(t*3.f,1.f); g=std::max(0.f,std::min((t-.33f)*3.f,1.f)); b=std::max(0.f,std::min((t-.66f)*3.f,1.f)); break;
+                    default: r=t; g=t*0.9f; b=t*0.7f; break;
                 }
-                glEnd(); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                glColor4f(r, g, b, .15f+.85f*t);
+                glVertex3f(pt.x, pt.y, pt.z);
             }
-            break; // only build point cloud once (covers all volumes)
+            glEnd(); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         }
     }
 
@@ -3624,18 +3637,31 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
     if (_cachedEnvLight && _cachedEnvLight->skyPreset > 0) {
         float R = float(_cachedEnvLight->domeRadius);
         if (_cachedEnvLight->showDome) {
-            // Thin ground horizon circle
-            glColor4f(0.45f, 0.45f, 0.5f, 0.15f); glLineWidth(1.f);
+            // Ground horizon circle — bright
+            glColor4f(0.5f, 0.6f, 1.0f, 0.8f); glLineWidth(2.f);
             glBegin(GL_LINE_LOOP);
             for (int i=0;i<64;++i){float a=float(i)/64.f*2.f*kPi;glVertex3f(R*std::cos(a),0,R*std::sin(a));}
             glEnd();
-            // Single equator + 45deg latitude — very faint
-            float skyA = std::min(0.15f, float(_cachedEnvLight->skyIntensity) * 0.5f);
-            glColor4f(0.4f, 0.5f, 0.7f, skyA);
+            // 45deg latitude
+            glColor4f(0.4f, 0.6f, 1.0f, 0.6f); glLineWidth(1.5f);
             float elR45 = 45.f*kPi/180.f;
             float rr45 = R*std::cos(elR45), y45 = R*std::sin(elR45);
             glBegin(GL_LINE_LOOP);
             for (int i=0;i<48;++i){float a=float(i)/48.f*2.f*kPi;glVertex3f(rr45*std::cos(a),y45,rr45*std::sin(a));}
+            glEnd();
+            // 30deg latitude
+            float elR30 = 30.f*kPi/180.f;
+            float rr30 = R*std::cos(elR30), y30 = R*std::sin(elR30);
+            glColor4f(0.4f, 0.6f, 1.0f, 0.4f);
+            glBegin(GL_LINE_LOOP);
+            for (int i=0;i<48;++i){float a=float(i)/48.f*2.f*kPi;glVertex3f(rr30*std::cos(a),y30,rr30*std::sin(a));}
+            glEnd();
+            // Zenith cross
+            glColor4f(0.4f, 0.6f, 1.0f, 0.3f); glLineWidth(1.f);
+            float zr = R*0.08f;
+            glBegin(GL_LINES);
+            glVertex3f(-zr,R,0); glVertex3f(zr,R,0);
+            glVertex3f(0,R,-zr); glVertex3f(0,R,zr);
             glEnd();
         }
         if (_cachedEnvLight->showSunArrow) {
@@ -3842,8 +3868,9 @@ void SpectralRenderIop::_LoadVDB()
         // Prefer VolMerge for multi-volume (handles transforms properly)
         if (volMerge) {
             _cachedVolMerge = volMerge;
-            int masterMaxRes = _GetMasterMaxRes();
-            auto entries = volMerge->GetVolumes(int(outputContext().frame()), masterMaxRes);
+            // Preview res for viewport — full res loaded later in _EnsureFrameRendered
+            int previewMaxRes = 32;
+            auto entries = volMerge->GetVolumes(int(outputContext().frame()), previewMaxRes);
 
             // Collect SpectralVolumeMaterial ops from VolMerge inputs (in order)
             // Materials are mapped positionally to volume entries:
@@ -3903,10 +3930,10 @@ void SpectralRenderIop::_LoadVDB()
             if (!_cachedStudioLight) _cachedStudioLight = volMerge->GetStudioLight();
             _volume = _volumes.empty() ? nullptr : _volumes[0];
             _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
-            fprintf(stderr, "SpectralRender: loaded %d volume(s) from VolMerge\n", (int)_volumes.size());
+            SLOG("SpectralRender: loaded %d volume(s) from VolMerge\n", (int)_volumes.size());
             for (size_t vi = 0; vi < _volumes.size(); ++vi) {
                 auto& v = _volumes[vi];
-                fprintf(stderr, "  vol[%zu] scatter=(%.2f,%.2f,%.2f) ext=%.2f scat=%.2f int=%.2f envI=%.2f envD=%.2f\n",
+                SLOG("  vol[%zu] scatter=(%.2f,%.2f,%.2f) ext=%.2f scat=%.2f int=%.2f envI=%.2f envD=%.2f\n",
                     vi, v->scatterColor[0], v->scatterColor[1], v->scatterColor[2],
                     v->extinction, v->scattering, v->intensity, v->envIntensity, v->envDiffuse);
             }
@@ -3917,8 +3944,9 @@ void SpectralRenderIop::_LoadVDB()
         _cachedVolMerge = nullptr;
         if (!vdbReads.empty()) {
             _volumes.clear();
+            _cachedVdbReads.clear();
             int renderFrame = int(outputContext().frame());
-            int masterMaxRes = _GetMasterMaxRes();
+            int previewMaxRes = 32;  // preview only — render res loaded in _EnsureFrameRendered
 
             // For each VDBRead, find its GeoTransform by walking from scn input
             struct VDBWithXform { SpectralVDBRead* vdb; Op* chainTop; };
@@ -3956,7 +3984,7 @@ void SpectralRenderIop::_LoadVDB()
                 auto& entry = vdbEntries[vi];
                 entry.vdb->validate(true);
                 int nodeRes = entry.vdb->GetMaxRes();
-                int effectiveRes = std::min(masterMaxRes, nodeRes);
+                int effectiveRes = std::min(previewMaxRes, nodeRes);
                 auto vol = entry.vdb->GetVolumeAtFrame(renderFrame, effectiveRes);
                 if (vol && vol->IsValid()) {
                     _applyVolumeShading(vol, entry.vdb);
@@ -3991,6 +4019,7 @@ void SpectralRenderIop::_LoadVDB()
                     }
 
                     _volumes.push_back(vol);
+                    _cachedVdbReads.push_back(entry.vdb);
 
                     // Bbox lock: stabilize world-space position across frames
                     // Applied AFTER GeoTransform to avoid rotation amplification
@@ -4012,7 +4041,7 @@ void SpectralRenderIop::_LoadVDB()
                         }
                     }
 
-                    fprintf(stderr, "SpectralRender: vol[%d] %dx%dx%d bbox(%.1f,%.1f,%.1f)-(%.1f,%.1f,%.1f)\n",
+                    SLOG("SpectralRender: vol[%d] %dx%dx%d bbox(%.1f,%.1f,%.1f)-(%.1f,%.1f,%.1f)\n",
                             (int)vi, vol->resX, vol->resY, vol->resZ,
                             vol->GetBboxMin()[0], vol->GetBboxMin()[1], vol->GetBboxMin()[2],
                             vol->GetBboxMax()[0], vol->GetBboxMax()[1], vol->GetBboxMax()[2]);
@@ -4021,11 +4050,11 @@ void SpectralRenderIop::_LoadVDB()
             // Primary volume for preview/backward compat
             _volume = _volumes.empty() ? nullptr : _volumes[0];
             _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
-            fprintf(stderr, "SpectralRender: loaded %d volume(s) from scn input chain\n",
+            SLOG("SpectralRender: loaded %d volume(s) from scn input chain\n",
                     (int)_volumes.size());
             for (size_t vi = 0; vi < _volumes.size(); ++vi) {
                 auto& v = _volumes[vi];
-                fprintf(stderr, "  vol[%zu] scatter=(%.2f,%.2f,%.2f) ext=%.2f scat=%.2f int=%.2f envI=%.2f envD=%.2f\n",
+                SLOG("  vol[%zu] scatter=(%.2f,%.2f,%.2f) ext=%.2f scat=%.2f int=%.2f envI=%.2f envD=%.2f\n",
                     vi, v->scatterColor[0], v->scatterColor[1], v->scatterColor[2],
                     v->extinction, v->scattering, v->intensity, v->envIntensity, v->envDiffuse);
             }
@@ -4038,7 +4067,7 @@ void SpectralRenderIop::_LoadVDB()
             _volume.reset();
             _vdbPreviewDirty = true;
             _vdbPreviewPoints.clear();
-            fprintf(stderr, "SpectralRender: no volumes in scn chain — cleared\n");
+            SLOG("SpectralRender: no volumes in scn chain — cleared\n");
         }
     }
 }
@@ -4106,7 +4135,7 @@ void SpectralRenderIop::_LoadVDBForRender()
                 _VDBCachePut(renderKey, _volume, false, false);
                 float memMB = (_volume->density.size() + _volume->temperature.size() + _volume->flame.size())
                               * sizeof(float) / (1024.f * 1024.f);
-                fprintf(stderr, "SpectralRender: loaded VDB at %dx%dx%d (%.1f MB)\n",
+                SLOG("SpectralRender: loaded VDB at %dx%dx%d (%.1f MB)\n",
                         _volume->resX, _volume->resY, _volume->resZ, memMB);
             }
         }
@@ -4474,7 +4503,7 @@ void SpectralRenderIop::_BuildLightRig()
                 sun.color = GfVec3f(float(sunR * si), float(sunG * si), float(sunB * si));
                 sun.intensity = 1.f;
                 _scene->AddLight(sun);
-                fprintf(stderr, "SpectralRender: env sky sun type=%s softness=%.2f radius=%.1f\n",
+                SLOG("SpectralRender: env sky sun type=%s softness=%.2f radius=%.1f\n",
                     sun.type == SpectralLight::Type::Sphere ? "Sphere" : "Distant",
                     el->sunShadowSoftness, sun.radius);
             }
@@ -4531,10 +4560,10 @@ void SpectralRenderIop::_BuildLightRig()
                         }
                         texId = _scene->AddTexture(std::move(tex));
                         hasHdri = true;
-                        fprintf(stderr, "SpectralRender: HDRI from input pipe (%dx%d)\n", W, H);
+                        SLOG("SpectralRender: HDRI from input pipe (%dx%d)\n", W, H);
                     }
                 } catch (...) {
-                    fprintf(stderr, "SpectralRender: HDRI input pipe failed\n");
+                    SLOG("SpectralRender: HDRI input pipe failed\n");
                 }
             }
         }
@@ -4562,7 +4591,7 @@ void SpectralRenderIop::_BuildLightRig()
                 hdriDome.envShadowSoftness = float(el->hdriShadowSoftness);
                 hdriDome.ComputeEnvAverage();
                 _scene->AddLight(hdriDome);
-                fprintf(stderr, "SpectralRender: HDRI dome (%dx%d) intensity=%.1f nd=%.1f stops (effective=%.3f) avg=(%.3f,%.3f,%.3f) cdf=%s sh=%s vlights=%d\n",
+                SLOG("SpectralRender: HDRI dome (%dx%d) intensity=%.1f nd=%.1f stops (effective=%.3f) avg=(%.3f,%.3f,%.3f) cdf=%s sh=%s vlights=%d\n",
                         hdriDome.envWidth, hdriDome.envHeight, el->hdriIntensity, el->ndFilter,
                         hdriDome.intensity,
                         hdriDome.envAvgColor[0], hdriDome.envAvgColor[1], hdriDome.envAvgColor[2],
@@ -4571,7 +4600,7 @@ void SpectralRenderIop::_BuildLightRig()
                         (int)hdriDome.envVirtualLights.size());
                 for (size_t vi = 0; vi < hdriDome.envVirtualLights.size(); ++vi) {
                     auto& vl = hdriDome.envVirtualLights[vi];
-                    fprintf(stderr, "  vlight[%zu] dir=(%.2f,%.2f,%.2f) rgb=(%.2f,%.2f,%.2f)\n",
+                    SLOG("  vlight[%zu] dir=(%.2f,%.2f,%.2f) rgb=(%.2f,%.2f,%.2f)\n",
                             vi, vl.direction[0], vl.direction[1], vl.direction[2],
                             vl.color[0], vl.color[1], vl.color[2]);
                 }
@@ -4733,12 +4762,12 @@ void SpectralRenderIop::_BuildLightRig()
     // Log all lights
     {
         const auto& allLights = _scene->GetLights();
-        fprintf(stderr, "SpectralRender: %zu lights in scene:\n", allLights.size());
+        SLOG("SpectralRender: %zu lights in scene:\n", allLights.size());
         for (size_t i = 0; i < allLights.size(); ++i) {
             const auto& L = allLights[i];
             const char* typeNames[] = {"Distant","Sphere","Rect","Dome","Spot"};
             int ti = std::min(int(L.type), 4);
-            fprintf(stderr, "  [%zu] %s '%s' color=(%.2f,%.2f,%.2f) intensity=%.2f env=%s\n",
+            SLOG("  [%zu] %s '%s' color=(%.2f,%.2f,%.2f) intensity=%.2f env=%s\n",
                     i, typeNames[ti], L.name.c_str(),
                     L.color[0], L.color[1], L.color[2], L.intensity,
                     L.envPixels ? "HDRI" : "none");
@@ -4774,6 +4803,7 @@ void SpectralRenderIop::_EnsureFrameRendered()
         _frameReady.store(true);
         return;
     }
+
     // Create scene if needed (volume-only, no geometry loaded)
     if (!_scene) _scene = std::make_unique<pxr::SpectralScene>();
 
@@ -4859,10 +4889,10 @@ void SpectralRenderIop::_EnsureFrameRendered()
     const char* deviceStr = useGPU ? "GPU" : "CPU";
     const char* passStr = (_progressive && renderSpp < _samples) ? " [preview]" : "";
     if (W != fullW || H != fullH)
-        fprintf(stderr, "SpectralRender: rendering %dx%d (proxy of %dx%d), %zu tris, %d spp, device=%s%s\n",
+        SLOG("SpectralRender: rendering %dx%d (proxy of %dx%d), %zu tris, %d spp, device=%s%s\n",
                 W, H, fullW, fullH, _scene->TotalTriangles(), renderSpp, deviceStr, passStr);
     else
-        fprintf(stderr, "SpectralRender: rendering %dx%d, %zu tris, %d spp, device=%s%s\n",
+        SLOG("SpectralRender: rendering %dx%d, %zu tris, %d spp, device=%s%s\n",
                 W, H, _scene->TotalTriangles(), renderSpp, deviceStr, passStr);
 
     // Caustics disabled — photon mapping removed for stability.
@@ -4941,6 +4971,24 @@ void SpectralRenderIop::_EnsureFrameRendered()
                     _applyVolumeMaterialDirect(_volumes[vi], volMats.back());
             }
         }
+    }
+    // Non-VolMerge scn chain: upgrade from preview res to render res
+    else if (!_volumes.empty() && !_cachedVdbReads.empty()) {
+        int masterMaxRes = _GetMasterMaxRes();
+        int renderFrame = int(outputContext().frame());
+        _volumes.clear();
+        for (auto* vdb : _cachedVdbReads) {
+            if (!vdb || vdb->node_disabled()) continue;
+            vdb->validate(true);
+            int nodeRes = vdb->GetMaxRes();
+            int effectiveRes = std::min(masterMaxRes, nodeRes);
+            auto vol = vdb->GetVolumeAtFrame(renderFrame, effectiveRes);
+            if (vol && vol->IsValid()) {
+                _applyVolumeShading(vol, vdb);
+                _volumes.push_back(vol);
+            }
+        }
+        _volume = _volumes.empty() ? nullptr : _volumes[0];
     }
 
     std::vector<const pxr::SpectralVolume*> volPtrs;
@@ -5031,7 +5079,7 @@ void SpectralRenderIop::_EnsureFrameRendered()
                                              volPtrs.empty() ? nullptr : volPtrs.data(),
                                              (int)volPtrs.size());
 
-            fprintf(stderr, "SpectralRender: shading AOVs computed (%d spp CPU pass)\n", aovSpp);
+            SLOG("SpectralRender: shading AOVs computed (%d spp CPU pass)\n", aovSpp);
         }
     }
 #endif
@@ -5067,13 +5115,13 @@ void SpectralRenderIop::_EnsureFrameRendered()
 
     // If this was a preview pass, schedule refinement
     if (_progressive && _progressiveSppDone < _samples) {
-        fprintf(stderr, "SpectralRender: preview complete (%d spp) — re-render for full %d spp\n",
+        SLOG("SpectralRender: preview complete (%d spp) — re-render for full %d spp\n",
                 _progressiveSppDone, _samples);
     }
 
     _frameReady.store(true);
 
-    fprintf(stderr, "SpectralRender: render complete\n");
+    SLOG("SpectralRender: render complete\n");
 }
 
 // ---------------------------------------------------------------------------

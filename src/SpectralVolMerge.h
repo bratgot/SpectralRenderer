@@ -5,6 +5,7 @@
 #include <DDImage/Knobs.h>
 #include <pxr/base/gf/vec3f.h>
 #include <vector>
+#include <array>
 #include <memory>
 
 using namespace DD::Image;
@@ -33,6 +34,10 @@ public:
     bool test_input(int input, Op* op) const override;
     const char* input_label(int input, char* buf) const override;
     void knobs(Knob_Callback f) override;
+    void build_handles(DD::Image::ViewerContext* ctx) override;
+    void draw_handle(DD::Image::ViewerContext* ctx) override;
+    void append(DD::Image::Hash& hash) override;
+    void _validate(bool forReal) override;
 
     std::vector<VolMergeEntry> GetVolumes(int frame, int maxRes = 512);
 
@@ -43,9 +48,13 @@ public:
     static const char* const CLASS;
     static const GeomOp::Description description;
 
+    struct PreviewPoint { float x, y, z, r, g, b; };
+
 private:
     class Engine;
     int _volCount = 0;
+    int _curFrame = -999;
+    bool _validating = false;
     SpectralEnvLight*    _envLight = nullptr;
     SpectralStudioLight* _studioLight = nullptr;
 };

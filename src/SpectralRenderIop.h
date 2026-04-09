@@ -32,6 +32,7 @@ PXR_NAMESPACE_USING_DIRECTIVE
 #include <vector>
 #include <memory>
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <string>
 
@@ -52,6 +53,7 @@ class SpectralEnvLight;
 class SpectralStudioLight;
 class SpectralVolumeMaterial;
 class SpectralVolMerge;
+class SpectralVDBRead;
 
 class HDSPECTRAL_API SpectralRenderIop : public Iop, public DeepOp
 {
@@ -337,6 +339,9 @@ private:
 
     int   _progressiveSppDone = 0;      // samples accumulated so far
     bool  _denoise = false;             // OptiX AI denoiser
+    // Scrub detection: skip full render during rapid frame changes
+    std::chrono::steady_clock::time_point _lastFrameChangeTime;
+    bool  _scrubbing = false;
     double _shutterOpen  = -0.5;   // shutter open  (relative to frame)
     double _shutterClose =  0.5;   // shutter close (relative to frame)
     float _lightIntensity = 1.0f;  // global light intensity multiplier
@@ -364,6 +369,7 @@ private:
     SpectralEnvLight*    _cachedEnvLight = nullptr;      // first, for GL preview
     SpectralStudioLight* _cachedStudioLight = nullptr;    // first, for GL preview
     SpectralVolMerge*    _cachedVolMerge = nullptr;       // for material re-application
+    std::vector<SpectralVDBRead*> _cachedVdbReads;       // for render-res upgrade
     std::vector<SpectralEnvLight*>    _allEnvLights;      // all, for additive rendering
     std::vector<SpectralStudioLight*> _allStudioLights;   // all, for additive rendering
     SpectralCamera                      _camera;
