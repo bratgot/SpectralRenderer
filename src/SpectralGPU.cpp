@@ -12,6 +12,14 @@
 #include <cstdio>
 #include <chrono>
 
+// Forward declaration of GPU NanoVDB densify kernel (SpectralNanoDensify.cu)
+extern "C" void launchDensifyNanoVDB(
+    const void* d_nanoGrid, float* d_output,
+    int resX, int resY, int resZ,
+    float bboxMinX, float bboxMinY, float bboxMinZ,
+    float bboxMaxX, float bboxMaxY, float bboxMaxZ,
+    cudaStream_t stream);
+
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -870,47 +878,106 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
         gv.nanoGridFlame = nullptr;
 
         if (volume->useNanoVDB && !volume->nanoDensityBuf.empty()) {
-            // ── NanoVDB path: simple buffer upload, no 3D texture needed ──
-            size_t sz = volume->nanoDensityBuf.size();
-            if (sz != dv.nanoSizeDensity) {
-                if (dv.nano_density) cudaFree(reinterpret_cast<void*>(dv.nano_density));
-                cudaMalloc(reinterpret_cast<void**>(&dv.nano_density), sz);
-                dv.nanoSizeDensity = sz;
-            }
-            cudaMemcpy(reinterpret_cast<void*>(dv.nano_density),
-                       volume->nanoDensityBuf.data(), sz, cudaMemcpyHostToDevice);
-            gv.nanoGridDensity = reinterpret_cast<void*>(dv.nano_density);
+            // ── NanoVDB GPU densification path ──
+            // Upload NanoVDB buffer → GPU densify kernel → 3D texture
+            // Bypasses CPU resample entirely
+            int targetResX = volume->resX, targetResY = volume->resY, targetResZ = volume->resZ;
+            // Cap at maxRes for the target texture
+            int maxDim = std::max({targetResX, targetResY, targetResZ});
+            // Use the capped resolution from VolMerge (already set in volume->resX/Y/Z)
 
-            // Temperature NanoVDB
+            size_t texVoxels = size_t(targetResX) * targetResY * targetResZ;
+
+            auto densifyGrid = [&](const std::vector<uint8_t>& nanoBuf,
+                                   CUdeviceptr& d_nano, size_t& nanoSize,
+                                   cudaArray_t& arr, cudaTextureObject_t& tex,
+                                   int& cachedRX, int& cachedRY, int& cachedRZ,
+                                   const char* label) -> cudaTextureObject_t
+            {
+                // Upload NanoVDB buffer to device
+                size_t sz = nanoBuf.size();
+                if (sz != nanoSize) {
+                    if (d_nano) cudaFree(reinterpret_cast<void*>(d_nano));
+                    cudaMalloc(reinterpret_cast<void**>(&d_nano), sz);
+                    nanoSize = sz;
+                }
+                cudaMemcpy(reinterpret_cast<void*>(d_nano), nanoBuf.data(), sz, cudaMemcpyHostToDevice);
+
+                // Allocate device output buffer
+                float* d_dense = nullptr;
+                cudaMalloc(&d_dense, texVoxels * sizeof(float));
+
+                // GPU densify: NanoVDB → dense float buffer
+                float3 bmin = gv.bboxMin, bmax = gv.bboxMax;
+                // Use original bbox for sampling (before transform)
+                if (volume->hasTransform) {
+                    bmin = make_float3(volume->bboxMin[0], volume->bboxMin[1], volume->bboxMin[2]);
+                    bmax = make_float3(volume->bboxMax[0], volume->bboxMax[1], volume->bboxMax[2]);
+                }
+                launchDensifyNanoVDB(
+                    reinterpret_cast<void*>(d_nano), d_dense,
+                    targetResX, targetResY, targetResZ,
+                    bmin.x, bmin.y, bmin.z, bmax.x, bmax.y, bmax.z, nullptr);
+                cudaDeviceSynchronize();
+
+                // Create 3D texture from device buffer
+                bool resChanged = (targetResX != cachedRX || targetResY != cachedRY || targetResZ != cachedRZ);
+                if (resChanged) {
+                    _DestroyVolumeTex3D(arr, tex);
+                }
+                if (!tex) {
+                    // Need host copy for _CreateVolumeTex3D
+                    std::vector<float> hostBuf(texVoxels);
+                    cudaMemcpy(hostBuf.data(), d_dense, texVoxels * sizeof(float), cudaMemcpyDeviceToHost);
+                    _CreateVolumeTex3D(hostBuf.data(), targetResX, targetResY, targetResZ, arr, tex);
+                    cachedRX = targetResX; cachedRY = targetResY; cachedRZ = targetResZ;
+                } else {
+                    // Same resolution — update existing array
+                    std::vector<float> hostBuf(texVoxels);
+                    cudaMemcpy(hostBuf.data(), d_dense, texVoxels * sizeof(float), cudaMemcpyDeviceToHost);
+                    cudaMemcpy3DParms cp = {};
+                    cp.srcPtr = make_cudaPitchedPtr(hostBuf.data(),
+                        targetResX * sizeof(float), targetResX, targetResY);
+                    cp.dstArray = arr;
+                    cp.extent = make_cudaExtent(targetResX, targetResY, targetResZ);
+                    cp.kind = cudaMemcpyHostToDevice;
+                    cudaMemcpy3D(&cp);
+                }
+
+                cudaFree(d_dense);
+                return tex;
+            };
+
+            // Density
+            gv.densityTex = densifyGrid(volume->nanoDensityBuf,
+                dv.nano_density, dv.nanoSizeDensity,
+                dv.arr_density, dv.tex_density,
+                dv.cachedResX, dv.cachedResY, dv.cachedResZ, "density");
+
+            // Temperature
             if (!volume->nanoTempBuf.empty()) {
-                size_t tsz = volume->nanoTempBuf.size();
-                if (tsz != dv.nanoSizeTemp) {
-                    if (dv.nano_temp) cudaFree(reinterpret_cast<void*>(dv.nano_temp));
-                    cudaMalloc(reinterpret_cast<void**>(&dv.nano_temp), tsz);
-                    dv.nanoSizeTemp = tsz;
-                }
-                cudaMemcpy(reinterpret_cast<void*>(dv.nano_temp),
-                           volume->nanoTempBuf.data(), tsz, cudaMemcpyHostToDevice);
-                gv.nanoGridTemp = reinterpret_cast<void*>(dv.nano_temp);
+                gv.temperatureTex = densifyGrid(volume->nanoTempBuf,
+                    dv.nano_temp, dv.nanoSizeTemp,
+                    dv.arr_temp, dv.tex_temp,
+                    dv.cachedTempResX, dv.cachedTempResY, dv.cachedTempResZ, "temp");
+            } else {
+                gv.temperatureTex = 0;
             }
 
-            // Flame NanoVDB
+            // Flame
             if (!volume->nanoFlameBuf.empty()) {
-                size_t fsz = volume->nanoFlameBuf.size();
-                if (fsz != dv.nanoSizeFlame) {
-                    if (dv.nano_flame) cudaFree(reinterpret_cast<void*>(dv.nano_flame));
-                    cudaMalloc(reinterpret_cast<void**>(&dv.nano_flame), fsz);
-                    dv.nanoSizeFlame = fsz;
-                }
-                cudaMemcpy(reinterpret_cast<void*>(dv.nano_flame),
-                           volume->nanoFlameBuf.data(), fsz, cudaMemcpyHostToDevice);
-                gv.nanoGridFlame = reinterpret_cast<void*>(dv.nano_flame);
+                gv.flameTex = densifyGrid(volume->nanoFlameBuf,
+                    dv.nano_flame, dv.nanoSizeFlame,
+                    dv.arr_flame, dv.tex_flame,
+                    dv.cachedFlameResX, dv.cachedFlameResY, dv.cachedFlameResZ, "flame");
+            } else {
+                gv.flameTex = 0;
             }
 
-            // Don't need 3D textures — set to 0
-            gv.densityTex = 0;
-            gv.temperatureTex = 0;
-            gv.flameTex = 0;
+            // NanoVDB pointers not used by kernel (tex3D path)
+            gv.nanoGridDensity = nullptr;
+            gv.nanoGridTemp = nullptr;
+            gv.nanoGridFlame = nullptr;
 
         } else {
             // ── Dense 3D texture path (fallback) ──

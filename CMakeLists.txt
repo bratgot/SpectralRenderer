@@ -40,6 +40,18 @@ if(EXISTS "${OPTIX_ROOT}/include/optix.h" AND EXISTS "${CUDA_TOOLKIT_ROOT}/bin/n
         COMMENT "Embedding PTX as C header" VERBATIM)
 
     add_custom_target(SpectralPTX DEPENDS "${PTX_HEADER}")
+    set(DENSIFY_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/SpectralNanoDensify.cu")
+    set(DENSIFY_OBJ "${CMAKE_CURRENT_BINARY_DIR}/SpectralNanoDensify.obj")
+    add_custom_command(OUTPUT "${DENSIFY_OBJ}"
+        COMMAND "${CUDA_TOOLKIT_ROOT}/bin/nvcc.exe"
+            -c -O3 --use_fast_math --std c++17
+            -I "${CUDA_TOOLKIT_ROOT}/include"
+            -I "${VCPKG_INSTALLED}/include"
+            --machine 64 -Xcompiler "/MD /O2"
+            -o "${DENSIFY_OBJ}" "${DENSIFY_SOURCE}"
+        DEPENDS "${DENSIFY_SOURCE}"
+        COMMENT "Compiling NanoVDB densify kernel" VERBATIM)
+    add_custom_target(SpectralDensify DEPENDS "${DENSIFY_OBJ}")
 else()
     message(STATUS "OptiX or CUDA not found — GPU rendering disabled")
 endif()
@@ -210,6 +222,8 @@ if(HAS_OPTIX)
     target_link_libraries(SpectralCore PUBLIC "${LIB_CUDA}" "${LIB_CUDART}")
     target_compile_definitions(SpectralCore PUBLIC SPECTRAL_HAS_OPTIX=1)
     add_dependencies(SpectralCore SpectralPTX)
+    add_dependencies(SpectralCore SpectralDensify)
+    target_link_libraries(SpectralCore PUBLIC "${DENSIFY_OBJ}")
 endif()
 if(HAS_VDB)
     if(TARGET OpenVDB::openvdb)

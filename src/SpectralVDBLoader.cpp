@@ -298,22 +298,43 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::_LoadFromDisk(const char* fil
 
         } else {
             // ── QUALITY RENDER PATH ────────────────────────────────────
-            // Test NanoVDB conversion (timing only — kernel still uses tex3D)
-            {
+            // Try NanoVDB: OpenVDB → NanoVDB on CPU, then GPU densifies to tex3D
+            bool nanoOK = false;
+            try {
                 auto tNano = std::chrono::high_resolution_clock::now();
-                try {
-                    auto handle = createNanoFromOpenVDB(*densityGrid);
-                    auto tNanoDone = std::chrono::high_resolution_clock::now();
-                    auto msNano = std::chrono::duration_cast<std::chrono::milliseconds>(tNanoDone - tNano).count();
-                    fprintf(stderr, "SpectralVDB: NanoVDB test — density %.1f MB in %lldms (%zu active voxels)\n",
-                            handle.size()/(1024.0*1024.0), msNano, densityGrid->activeVoxelCount());
-                } catch (const std::exception& e) {
-                    fprintf(stderr, "SpectralVDB: NanoVDB test failed: %s\n", e.what());
+                auto handle = createNanoFromOpenVDB(*densityGrid);
+                auto* data = reinterpret_cast<const uint8_t*>(handle.data());
+                vol->nanoDensityBuf.assign(data, data + handle.size());
+
+                if (tempGrid && !densityOnly) {
+                    auto th = createNanoFromOpenVDB(*tempGrid);
+                    auto* td = reinterpret_cast<const uint8_t*>(th.data());
+                    vol->nanoTempBuf.assign(td, td + th.size());
                 }
+                if (flameGrid && !densityOnly) {
+                    auto fh = createNanoFromOpenVDB(*flameGrid);
+                    auto* fd = reinterpret_cast<const uint8_t*>(fh.data());
+                    vol->nanoFlameBuf.assign(fd, fd + fh.size());
+                }
+                vol->useNanoVDB = true;
+                vol->density.clear();
+                vol->temperature.clear();
+                vol->flame.clear();
+                nanoOK = true;
+
+                auto tNanoDone = std::chrono::high_resolution_clock::now();
+                auto msNano = std::chrono::duration_cast<std::chrono::milliseconds>(tNanoDone - tNano).count();
+                fprintf(stderr, "SpectralVDB: NanoVDB conversion — %.1f MB in %lldms (%zu active voxels)\n",
+                        handle.size()/(1024.0*1024.0), msNano, densityGrid->activeVoxelCount());
+            } catch (const std::exception& e) {
+                fprintf(stderr, "SpectralVDB: NanoVDB failed (%s), using dense fallback\n", e.what());
+                vol->useNanoVDB = false;
+                vol->nanoDensityBuf.clear();
+                vol->nanoTempBuf.clear();
+                vol->nanoFlameBuf.clear();
             }
 
-            // Dense path (active — kernel uses tex3D)
-            {
+            if (!nanoOK) {
                 // Dense fallback
                 vol->density.resize(totalVoxels, 0.f);
                 bool isNativeRes = (vol->resX >= int(dim.x()) &&

@@ -1,0 +1,25 @@
+# Add these lines to CMakeLists.txt
+#
+# INSERTION 1: After line 42 (after "add_custom_target(SpectralPTX ...)")
+# Add before the else() / endif():
+
+    # NanoVDB densify kernel — compiled CUDA (not OptiX PTX)
+    set(DENSIFY_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/SpectralNanoDensify.cu")
+    set(DENSIFY_OBJ "${CMAKE_CURRENT_BINARY_DIR}/SpectralNanoDensify.obj")
+    add_custom_command(OUTPUT "${DENSIFY_OBJ}"
+        COMMAND "${CUDA_TOOLKIT_ROOT}/bin/nvcc.exe"
+            -c -O3 --use_fast_math
+            -I "${CUDA_TOOLKIT_ROOT}/include"
+            -I "${VCPKG_INSTALLED}/include"
+            --machine 64
+            -Xcompiler "/MD /O2"
+            -o "${DENSIFY_OBJ}" "${DENSIFY_SOURCE}"
+        DEPENDS "${DENSIFY_SOURCE}"
+        COMMENT "Compiling NanoVDB densify kernel" VERBATIM)
+    add_custom_target(SpectralDensify DEPENDS "${DENSIFY_OBJ}")
+
+# INSERTION 2: After line 212 (after "add_dependencies(SpectralCore SpectralPTX)")
+# Add:
+
+    add_dependencies(SpectralCore SpectralDensify)
+    target_link_libraries(SpectralCore PUBLIC "${DENSIFY_OBJ}")
