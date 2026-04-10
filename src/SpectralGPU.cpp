@@ -864,9 +864,59 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
         // Only recreate texture when resolution changes (texture creation is expensive)
         auto& dv = _d_volumes[gi];
 
-        bool resChanged = (volume->resX != dv.cachedResX ||
-                           volume->resY != dv.cachedResY ||
-                           volume->resZ != dv.cachedResZ);
+        // Initialize NanoVDB pointers to null
+        gv.nanoGridDensity = nullptr;
+        gv.nanoGridTemp = nullptr;
+        gv.nanoGridFlame = nullptr;
+
+        if (volume->useNanoVDB && !volume->nanoDensityBuf.empty()) {
+            // ── NanoVDB path: simple buffer upload, no 3D texture needed ──
+            size_t sz = volume->nanoDensityBuf.size();
+            if (sz != dv.nanoSizeDensity) {
+                if (dv.nano_density) cudaFree(reinterpret_cast<void*>(dv.nano_density));
+                cudaMalloc(reinterpret_cast<void**>(&dv.nano_density), sz);
+                dv.nanoSizeDensity = sz;
+            }
+            cudaMemcpy(reinterpret_cast<void*>(dv.nano_density),
+                       volume->nanoDensityBuf.data(), sz, cudaMemcpyHostToDevice);
+            gv.nanoGridDensity = reinterpret_cast<void*>(dv.nano_density);
+
+            // Temperature NanoVDB
+            if (!volume->nanoTempBuf.empty()) {
+                size_t tsz = volume->nanoTempBuf.size();
+                if (tsz != dv.nanoSizeTemp) {
+                    if (dv.nano_temp) cudaFree(reinterpret_cast<void*>(dv.nano_temp));
+                    cudaMalloc(reinterpret_cast<void**>(&dv.nano_temp), tsz);
+                    dv.nanoSizeTemp = tsz;
+                }
+                cudaMemcpy(reinterpret_cast<void*>(dv.nano_temp),
+                           volume->nanoTempBuf.data(), tsz, cudaMemcpyHostToDevice);
+                gv.nanoGridTemp = reinterpret_cast<void*>(dv.nano_temp);
+            }
+
+            // Flame NanoVDB
+            if (!volume->nanoFlameBuf.empty()) {
+                size_t fsz = volume->nanoFlameBuf.size();
+                if (fsz != dv.nanoSizeFlame) {
+                    if (dv.nano_flame) cudaFree(reinterpret_cast<void*>(dv.nano_flame));
+                    cudaMalloc(reinterpret_cast<void**>(&dv.nano_flame), fsz);
+                    dv.nanoSizeFlame = fsz;
+                }
+                cudaMemcpy(reinterpret_cast<void*>(dv.nano_flame),
+                           volume->nanoFlameBuf.data(), fsz, cudaMemcpyHostToDevice);
+                gv.nanoGridFlame = reinterpret_cast<void*>(dv.nano_flame);
+            }
+
+            // Don't need 3D textures — set to 0
+            gv.densityTex = 0;
+            gv.temperatureTex = 0;
+            gv.flameTex = 0;
+
+        } else {
+            // ── Dense 3D texture path (fallback) ──
+            bool resChanged = (volume->resX != dv.cachedResX ||
+                               volume->resY != dv.cachedResY ||
+                               volume->resZ != dv.cachedResZ);
 
         if (resChanged) {
             _DestroyVolumeTex3D(dv.arr_density, dv.tex_density);
@@ -955,9 +1005,10 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
             }
         }
 
-        gv.densityTex = dv.tex_density;
-        gv.temperatureTex = dv.tex_temp;
-        gv.flameTex = dv.tex_flame;
+            gv.densityTex = dv.tex_density;
+            gv.temperatureTex = dv.tex_temp;
+            gv.flameTex = dv.tex_flame;
+        } // end dense 3D texture path
 
         // Also populate legacy single-volume fields for volume[0]
         if (gi == 0) {

@@ -88,6 +88,10 @@ struct GPUVolume {
     cudaTextureObject_t densityTex;      // 3D texture (hardware trilinear)
     cudaTextureObject_t temperatureTex;  // 3D texture (0 if none)
     cudaTextureObject_t flameTex;        // 3D texture (0 if none)
+    // NanoVDB device grids (alternative sparse path)
+    void*   nanoGridDensity;    // device ptr to NanoGrid<float>
+    void*   nanoGridTemp;       // device ptr to NanoGrid<float>
+    void*   nanoGridFlame;      // device ptr to NanoGrid<float>
     int     resX, resY, resZ;
     float3  bboxMin, bboxMax;
     float   extinction;

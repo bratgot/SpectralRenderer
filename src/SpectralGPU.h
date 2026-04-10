@@ -127,6 +127,13 @@ private:
         cudaTextureObject_t   tex_density  = 0;
         cudaTextureObject_t   tex_temp     = 0;
         cudaTextureObject_t   tex_flame    = 0;
+        // NanoVDB device buffers
+        CUdeviceptr           nano_density = 0;
+        CUdeviceptr           nano_temp    = 0;
+        CUdeviceptr           nano_flame   = 0;
+        size_t                nanoSizeDensity = 0;
+        size_t                nanoSizeTemp    = 0;
+        size_t                nanoSizeFlame   = 0;
         int                   cachedResX = 0, cachedResY = 0, cachedResZ = 0;
         int                   cachedTempResX = 0, cachedTempResY = 0, cachedTempResZ = 0;
         int                   cachedFlameResX = 0, cachedFlameResY = 0, cachedFlameResZ = 0;

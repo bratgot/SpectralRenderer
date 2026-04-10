@@ -18,6 +18,12 @@ struct SpectralVolume {
     std::vector<GfVec3f> color;        // 3D color grid (optional)
     int resX = 0, resY = 0, resZ = 0;
 
+    // NanoVDB grid buffers (alternative to dense grids — GPU-ready sparse format)
+    std::vector<uint8_t> nanoDensityBuf;
+    std::vector<uint8_t> nanoTempBuf;
+    std::vector<uint8_t> nanoFlameBuf;
+    bool useNanoVDB = false;
+
     // World-space bounds (original, before transform)
     GfVec3f bboxMin = GfVec3f(0.f);
     GfVec3f bboxMax = GfVec3f(1.f);
@@ -189,7 +195,7 @@ struct SpectralVolume {
     float envIntensity   = 1.0f;
     float envDiffuse     = 0.5f;
 
-    bool IsValid() const { return !density.empty() && resX > 0; }
+    bool IsValid() const { return (!density.empty() || !nanoDensityBuf.empty()) && resX > 0; }
     bool HasBbox() const { return resX > 0 && resY > 0 && resZ > 0; }
 
     // Trilinear interpolation helper

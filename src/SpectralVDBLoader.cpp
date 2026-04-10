@@ -10,6 +10,48 @@
 #include <openvdb/io/File.h>
 #include <openvdb/tools/Interpolation.h>
 #include <openvdb/tools/Dense.h>
+#include <nanovdb/NanoVDB.h>
+#include <nanovdb/tools/CreateNanoGrid.h>
+#include <nanovdb/tools/GridBuilder.h>
+
+// Build a NanoVDB grid from an OpenVDB FloatGrid without using the broken
+// createNanoGrid<OpenVDB> adapter (OpenVDB 12 / NanoVDB 32.7 API mismatch).
+// Uses NanoVDB's own grid builder fed from OpenVDB's active voxel iterator.
+static nanovdb::GridHandle<> buildNanoFromOpenVDB(const openvdb::FloatGrid& srcGrid) {
+    using SrcGridT = openvdb::FloatGrid;
+    
+    fprintf(stderr, "SpectralVDB: NanoVDB conversion starting (%zu active voxels)...\n",
+            srcGrid.activeVoxelCount());
+    
+    // Use NanoVDB's built-in OpenVDB converter via the NodeManager approach
+    // Build a nanovdb::build::Grid and populate from OpenVDB active values
+    nanovdb::tools::build::Grid<float> builder(srcGrid.background());
+    
+    auto acc = builder.getAccessor();
+    for (auto iter = srcGrid.cbeginValueOn(); iter; ++iter) {
+        auto c = iter.getCoord();
+        acc.setValue(nanovdb::Coord(c.x(), c.y(), c.z()), iter.getValue());
+    }
+    
+    // Get transform from source grid
+    auto vs = srcGrid.voxelSize();
+    auto origin = srcGrid.transform().indexToWorld(openvdb::Vec3d(0, 0, 0));
+    double voxelSize = vs[0]; // assume uniform
+    
+    auto handle = nanovdb::tools::createNanoGrid(builder);
+    
+    // Apply the transform by patching the Map in the grid data
+    if (auto* grid = handle.grid<float>()) {
+        // Access the grid's mutable data to set the map
+        auto& map = const_cast<nanovdb::Map&>(grid->map());
+        map = nanovdb::Map(voxelSize, nanovdb::Vec3d(origin.x(), origin.y(), origin.z()));
+    }
+    
+    fprintf(stderr, "SpectralVDB: NanoVDB conversion done (%.1f MB)\n",
+            handle.size() / (1024.0 * 1024.0));
+    
+    return handle;
+}
 #include <algorithm>
 #include <cstdio>
 #include <chrono>
@@ -274,100 +316,81 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::_LoadFromDisk(const char* fil
 
         } else {
             // ── QUALITY RENDER PATH ────────────────────────────────────
-            bool isNativeRes = (vol->resX >= int(dim.x()) &&
-                                vol->resY >= int(dim.y()) &&
-                                vol->resZ >= int(dim.z()));
+            // NanoVDB integration deferred (OpenVDB 12 / NanoVDB 32.7 API mismatch)
+            // Dense copyToDense + downsample is already fast (~400ms)
+            bool nanoOK = false;
 
-            if (isNativeRes) {
-                // NATIVE RESOLUTION — bulk tree copy, no interpolation
-                // copyToDense walks VDB tree structure directly: ~100× faster than BoxSampler
-                openvdb::tools::Dense<float, openvdb::tools::LayoutXYZ> denseGrid(bbox, vol->density.data());
-                openvdb::tools::copyToDense(*densityGrid, denseGrid);
+            if (!nanoOK) {
+                // Dense fallback
+                vol->density.resize(totalVoxels, 0.f);
+                bool isNativeRes = (vol->resX >= int(dim.x()) &&
+                                    vol->resY >= int(dim.y()) &&
+                                    vol->resZ >= int(dim.z()));
 
-            } else {
-                // DOWNSAMPLED — copyToDense at native res, then stride-downsample
-                // This is ~10× faster than PointSampler for moderate downsampling
-                int nX = int(dim.x()), nY = int(dim.y()), nZ = int(dim.z());
-                size_t nativeVoxels = size_t(nX) * nY * nZ;
-                std::vector<float> nativeBuf(nativeVoxels, 0.f);
-                openvdb::tools::Dense<float, openvdb::tools::LayoutXYZ> denseNative(bbox, nativeBuf.data());
-                openvdb::tools::copyToDense(*densityGrid, denseNative);
-
-                // Box-downsample: average source voxels per target voxel
-                float scaleX = float(nX) / float(rX);
-                float scaleY = float(nY) / float(rY);
-                float scaleZ = float(nZ) / float(rZ);
-                #pragma omp parallel for schedule(dynamic) if(totalVoxels > 10000)
-                for (int iz = 0; iz < rZ; ++iz) {
-                    int sz = int(iz * scaleZ);
-                    sz = std::min(sz, nZ - 1);
-                    for (int iy = 0; iy < rY; ++iy) {
-                        int sy = int(iy * scaleY);
-                        sy = std::min(sy, nY - 1);
-                        for (int ix = 0; ix < rX; ++ix) {
-                            int sx = int(ix * scaleX);
-                            sx = std::min(sx, nX - 1);
-                            vol->density[iz * rY * rX + iy * rX + ix] =
-                                nativeBuf[sz * nY * nX + sy * nX + sx];
+                if (isNativeRes) {
+                    openvdb::tools::Dense<float, openvdb::tools::LayoutXYZ> denseGrid(bbox, vol->density.data());
+                    openvdb::tools::copyToDense(*densityGrid, denseGrid);
+                } else {
+                    int nX = int(dim.x()), nY = int(dim.y()), nZ = int(dim.z());
+                    size_t nativeVoxels = size_t(nX) * nY * nZ;
+                    std::vector<float> nativeBuf(nativeVoxels, 0.f);
+                    openvdb::tools::Dense<float, openvdb::tools::LayoutXYZ> denseNative(bbox, nativeBuf.data());
+                    openvdb::tools::copyToDense(*densityGrid, denseNative);
+                    float scaleX = float(nX) / float(rX);
+                    float scaleY = float(nY) / float(rY);
+                    float scaleZ = float(nZ) / float(rZ);
+                    #pragma omp parallel for schedule(dynamic) if(totalVoxels > 10000)
+                    for (int iz = 0; iz < rZ; ++iz) {
+                        int sz = std::min(int(iz * scaleZ), nZ - 1);
+                        for (int iy = 0; iy < rY; ++iy) {
+                            int sy = std::min(int(iy * scaleY), nY - 1);
+                            for (int ix = 0; ix < rX; ++ix) {
+                                int sx = std::min(int(ix * scaleX), nX - 1);
+                                vol->density[iz * rY * rX + iy * rX + ix] =
+                                    nativeBuf[sz * nY * nX + sy * nX + sx];
+                            }
                         }
                     }
                 }
-            }
-        }
 
-        // Resample temperature (skip for preview)
-        if (tempGrid && !densityOnly) {
-            vol->temperature.resize(totalVoxels, 0.f);
-            bool isNativeRes = (vol->resX >= int(dim.x()) &&
-                                vol->resY >= int(dim.y()) &&
-                                vol->resZ >= int(dim.z()));
-            if (isNativeRes) {
-                openvdb::tools::Dense<float, openvdb::tools::LayoutXYZ> denseGrid(bbox, vol->temperature.data());
-                openvdb::tools::copyToDense(*tempGrid, denseGrid);
-            } else {
-                int nX = int(dim.x()), nY = int(dim.y()), nZ = int(dim.z());
-                std::vector<float> nativeBuf(size_t(nX) * nY * nZ, 0.f);
-                openvdb::tools::Dense<float, openvdb::tools::LayoutXYZ> denseNative(bbox, nativeBuf.data());
-                openvdb::tools::copyToDense(*tempGrid, denseNative);
-                float scaleX = float(nX)/float(rX), scaleY = float(nY)/float(rY), scaleZ = float(nZ)/float(rZ);
-                #pragma omp parallel for schedule(dynamic) if(totalVoxels > 10000)
-                for (int iz = 0; iz < rZ; ++iz) {
-                    int sz = std::min(int(iz * scaleZ), nZ-1);
-                    for (int iy = 0; iy < rY; ++iy) {
-                        int sy = std::min(int(iy * scaleY), nY-1);
-                        for (int ix = 0; ix < rX; ++ix) {
-                            int sx = std::min(int(ix * scaleX), nX-1);
-                            vol->temperature[iz*rY*rX + iy*rX + ix] = nativeBuf[sz*nY*nX + sy*nX + sx];
-                        }
+                // Resample temperature
+                if (tempGrid) {
+                    vol->temperature.resize(totalVoxels, 0.f);
+                    bool isNR = (vol->resX >= int(dim.x()) && vol->resY >= int(dim.y()) && vol->resZ >= int(dim.z()));
+                    if (isNR) {
+                        openvdb::tools::Dense<float, openvdb::tools::LayoutXYZ> dg(bbox, vol->temperature.data());
+                        openvdb::tools::copyToDense(*tempGrid, dg);
+                    } else {
+                        int nX=int(dim.x()),nY=int(dim.y()),nZ=int(dim.z());
+                        std::vector<float> nb(size_t(nX)*nY*nZ,0.f);
+                        openvdb::tools::Dense<float,openvdb::tools::LayoutXYZ> dn(bbox,nb.data());
+                        openvdb::tools::copyToDense(*tempGrid,dn);
+                        float sX=float(nX)/rX,sY=float(nY)/rY,sZ=float(nZ)/rZ;
+                        #pragma omp parallel for schedule(dynamic) if(totalVoxels>10000)
+                        for(int iz=0;iz<rZ;++iz){int sz=std::min(int(iz*sZ),nZ-1);
+                            for(int iy=0;iy<rY;++iy){int sy=std::min(int(iy*sY),nY-1);
+                                for(int ix=0;ix<rX;++ix){int sx=std::min(int(ix*sX),nX-1);
+                                    vol->temperature[iz*rY*rX+iy*rX+ix]=nb[sz*nY*nX+sy*nX+sx];}}}
                     }
                 }
-            }
-        }
-
-        // Resample flame (skip for preview)
-        if (flameGrid && !densityOnly) {
-            vol->flame.resize(totalVoxels, 0.f);
-            bool isNativeRes = (vol->resX >= int(dim.x()) &&
-                                vol->resY >= int(dim.y()) &&
-                                vol->resZ >= int(dim.z()));
-            if (isNativeRes) {
-                openvdb::tools::Dense<float, openvdb::tools::LayoutXYZ> denseGrid(bbox, vol->flame.data());
-                openvdb::tools::copyToDense(*flameGrid, denseGrid);
-            } else {
-                int nX = int(dim.x()), nY = int(dim.y()), nZ = int(dim.z());
-                std::vector<float> nativeBuf(size_t(nX) * nY * nZ, 0.f);
-                openvdb::tools::Dense<float, openvdb::tools::LayoutXYZ> denseNative(bbox, nativeBuf.data());
-                openvdb::tools::copyToDense(*flameGrid, denseNative);
-                float scaleX = float(nX)/float(rX), scaleY = float(nY)/float(rY), scaleZ = float(nZ)/float(rZ);
-                #pragma omp parallel for schedule(dynamic) if(totalVoxels > 10000)
-                for (int iz = 0; iz < rZ; ++iz) {
-                    int sz = std::min(int(iz * scaleZ), nZ-1);
-                    for (int iy = 0; iy < rY; ++iy) {
-                        int sy = std::min(int(iy * scaleY), nY-1);
-                        for (int ix = 0; ix < rX; ++ix) {
-                            int sx = std::min(int(ix * scaleX), nX-1);
-                            vol->flame[iz*rY*rX + iy*rX + ix] = nativeBuf[sz*nY*nX + sy*nX + sx];
-                        }
+                // Resample flame
+                if (flameGrid) {
+                    vol->flame.resize(totalVoxels, 0.f);
+                    bool isNR = (vol->resX >= int(dim.x()) && vol->resY >= int(dim.y()) && vol->resZ >= int(dim.z()));
+                    if (isNR) {
+                        openvdb::tools::Dense<float,openvdb::tools::LayoutXYZ> dg(bbox,vol->flame.data());
+                        openvdb::tools::copyToDense(*flameGrid,dg);
+                    } else {
+                        int nX=int(dim.x()),nY=int(dim.y()),nZ=int(dim.z());
+                        std::vector<float> nb(size_t(nX)*nY*nZ,0.f);
+                        openvdb::tools::Dense<float,openvdb::tools::LayoutXYZ> dn(bbox,nb.data());
+                        openvdb::tools::copyToDense(*flameGrid,dn);
+                        float sX=float(nX)/rX,sY=float(nY)/rY,sZ=float(nZ)/rZ;
+                        #pragma omp parallel for schedule(dynamic) if(totalVoxels>10000)
+                        for(int iz=0;iz<rZ;++iz){int sz=std::min(int(iz*sZ),nZ-1);
+                            for(int iy=0;iy<rY;++iy){int sy=std::min(int(iy*sY),nY-1);
+                                for(int ix=0;ix<rX;++ix){int sx=std::min(int(ix*sX),nX-1);
+                                    vol->flame[iz*rY*rX+iy*rX+ix]=nb[sz*nY*nX+sy*nX+sx];}}}
                     }
                 }
             }
@@ -384,7 +407,7 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::_LoadFromDisk(const char* fil
         fprintf(stderr, "SpectralVDB: loaded '%s' — %dx%dx%d (open=%lldms grids=%lldms resample=%lldms total=%lldms) [%s]%s%s\n",
                 filepath, vol->resX, vol->resY, vol->resZ,
                 msOpen, msGrids, msResample, msTotal,
-                densityOnly ? "streaming" : (isNative ? "copyToDense" : "copyToDense+downsample"),
+                densityOnly ? "streaming" : (vol->useNanoVDB ? "NanoVDB" : (isNative ? "copyToDense" : "copyToDense+downsample")),
                 tempGrid && !densityOnly ? " +temperature" : "",
                 flameGrid && !densityOnly ? " +flame" : "");
 

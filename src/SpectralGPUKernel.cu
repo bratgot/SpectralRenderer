@@ -7,6 +7,13 @@
 #include <cuda_runtime.h>
 #include "SpectralGPUParams.h"
 
+// NanoVDB sparse volume sampling (Phase 22) — disabled pending OpenVDB 12 compat
+// #define SPECTRAL_USE_NANOVDB
+#ifdef SPECTRAL_USE_NANOVDB
+#include <nanovdb/NanoVDB.h>
+#include <nanovdb/math/SampleFromVoxels.h>
+#endif
+
 using namespace spectral_gpu;
 
 extern "C" { __constant__ LaunchParams params; }
@@ -697,19 +704,50 @@ static __forceinline__ __device__ float shadeHit(
 // Per-volume sampling functions — CUDA 3D texture with hardware trilinear
 // Normalized coordinates [0,1], clamped at borders, hardware-interpolated.
 // Each tex3D replaces 8 global memory reads + 7 lerps with a single texture fetch.
+
+#ifdef SPECTRAL_USE_NANOVDB
+// NanoVDB helper: sample sparse grid directly on GPU (no dense resample needed)
+static __forceinline__ __device__ float sampleNanoGrid(
+    const void* gridPtr, float u, float v, float w,
+    const spectral_gpu::GPUVolume& vol)
+{
+    auto* grid = reinterpret_cast<const nanovdb::NanoGrid<float>*>(gridPtr);
+    float3 orig_min = vol.hasTransform ? vol.origBboxMin : vol.bboxMin;
+    float3 orig_max = vol.hasTransform ? vol.origBboxMax : vol.bboxMax;
+    float wx = orig_min.x + u * (orig_max.x - orig_min.x);
+    float wy = orig_min.y + v * (orig_max.y - orig_min.y);
+    float wz = orig_min.z + w * (orig_max.z - orig_min.z);
+    auto ipos = grid->worldToIndexF(nanovdb::Vec3f(wx, wy, wz));
+    auto acc = grid->getAccessor();
+    return nanovdb::math::SampleFromVoxels<decltype(acc), 1>(acc)(ipos);
+}
+#endif
+
 static __forceinline__ __device__ float sampleDensity(const spectral_gpu::GPUVolume& vol, float u, float v, float w)
 {
+#ifdef SPECTRAL_USE_NANOVDB
+    if (vol.nanoGridDensity)
+        return sampleNanoGrid(vol.nanoGridDensity, u, v, w, vol) * vol.densityMult;
+#endif
     return tex3D<float>(vol.densityTex, u, v, w) * vol.densityMult;
 }
 
 static __forceinline__ __device__ float sampleTemp(const spectral_gpu::GPUVolume& vol, float u, float v, float w)
 {
+#ifdef SPECTRAL_USE_NANOVDB
+    if (vol.nanoGridTemp)
+        return sampleNanoGrid(vol.nanoGridTemp, u, v, w, vol);
+#endif
     if (!vol.temperatureTex) return 0.f;
     return tex3D<float>(vol.temperatureTex, u, v, w);
 }
 
 static __forceinline__ __device__ float sampleFlame(const spectral_gpu::GPUVolume& vol, float u, float v, float w)
 {
+#ifdef SPECTRAL_USE_NANOVDB
+    if (vol.nanoGridFlame)
+        return sampleNanoGrid(vol.nanoGridFlame, u, v, w, vol);
+#endif
     if (!vol.flameTex) return 0.f;
     return tex3D<float>(vol.flameTex, u, v, w);
 }
