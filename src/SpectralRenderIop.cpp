@@ -626,12 +626,12 @@ void SpectralRenderIop::knobs(Knob_Callback f)
             "Lit", "Greyscale", "Heat", "Cool", "Blackbody", "Explosion", nullptr
         };
         Enumeration_knob(f, &_vdbRenderMode, renderModes, "vdb_render_mode", "mode");
-        Tooltip(f, "Lit \xe2\x80\x94 full lighting, shadows, phase function\n"
+        Tooltip(f, "Lit \xe2\x80\x94 warm density tint, uses temperature when available\n"
                    "Greyscale \xe2\x80\x94 density preview, no lighting (fastest)\n"
-                   "Heat \xe2\x80\x94 warm ramp: black \xe2\x86\x92 red \xe2\x86\x92 yellow \xe2\x86\x92 white\n"
+                   "Heat \xe2\x80\x94 warm ramp, uses temperature grid when available\n"
                    "Cool \xe2\x80\x94 cool ramp: black \xe2\x86\x92 blue \xe2\x86\x92 cyan \xe2\x86\x92 white\n"
-                   "Blackbody \xe2\x80\x94 temperature to fire colour (RGB)\n"
-                   "Explosion \xe2\x80\x94 lit smoke + self-luminous fire");
+                   "Blackbody \xe2\x80\x94 temperature \xe2\x86\x92 physical fire colour + flame emission\n"
+                   "Explosion \xe2\x80\x94 fire core (temp/flame) + smoke shell (density)");
         Double_knob(f, &_vdbIntensity, "vdb_intensity", "intensity");
         ClearFlags(f, Knob::STARTLINE);
         SetRange(f, 0, 10);
@@ -659,6 +659,11 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         ClearFlags(f, Knob::STARTLINE);
         Tooltip(f, "Coloured point cloud preview.\n"
                    "Colour scheme follows the current Render Mode.");
+        Bool_knob(f, &_vdbShadedPreview, "vdb_shaded", "shaded");
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "GPU ray-marched volume preview in the 3D viewport.\n"
+                   "Shows absorption + fire emission with real shading.\n"
+                   "Requires temperature/flame grids for fire colour.");
         Double_knob(f, &_vdbPointDensity, "vdb_point_density", "density");
         ClearFlags(f, Knob::STARTLINE);
         SetRange(f, 0.1, 1.0);
@@ -1084,7 +1089,7 @@ int SpectralRenderIop::knob_changed(Knob* k)
         }
         return 1;
     }
-    if (k->is("vdb_3d_preview") || k->is("vdb_show_points") || k->is("vdb_point_density") || k->is("vdb_point_size") || k->is("vdb_show_bbox") || k->is("vdb_fast_scrub")) {
+    if (k->is("vdb_3d_preview") || k->is("vdb_show_points") || k->is("vdb_shaded") || k->is("vdb_point_density") || k->is("vdb_point_size") || k->is("vdb_show_bbox") || k->is("vdb_fast_scrub")) {
         _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
         if (k->is("vdb_fast_scrub")) _vdbLoadedPath.clear();
         return 1;
@@ -3608,6 +3613,259 @@ void SpectralRenderIop::build_handles(ViewerContext* ctx)
     if (cam) cam->build_handles(ctx);
 }
 
+// ---------------------------------------------------------------------------
+// GL Volume Ray March Shader
+// ---------------------------------------------------------------------------
+static const char* kVolVS = R"(
+#version 330
+uniform mat4 uMV;
+uniform mat4 uProj;
+layout(location=0) in vec3 aPos;
+out vec3 vWorldPos;
+void main() {
+    gl_Position = uProj * uMV * vec4(aPos, 1.0);
+    vWorldPos = aPos;
+}
+)";
+
+static const char* kVolFS = R"(
+#version 330
+uniform sampler3D uDensity;
+uniform sampler3D uTemp;
+uniform vec3 uBboxMin;
+uniform vec3 uBboxMax;
+uniform vec3 uCamPos;
+uniform float uDensityMult;
+uniform float uTempMult;
+uniform int uMaxSteps;
+in vec3 vWorldPos;
+out vec4 fragColor;
+
+vec2 boxIntersect(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax) {
+    vec3 inv = 1.0 / rd;
+    vec3 t0 = (bmin - ro) * inv;
+    vec3 t1 = (bmax - ro) * inv;
+    vec3 mn = min(t0, t1);
+    vec3 mx = max(t0, t1);
+    return vec2(max(max(mn.x, mn.y), max(mn.z, 0.0)),
+                min(min(mx.x, mx.y), mx.z));
+}
+
+void main() {
+    vec3 rd = normalize(vWorldPos - uCamPos);
+    vec2 tb = boxIntersect(uCamPos, rd, uBboxMin, uBboxMax);
+    if (tb.x >= tb.y) discard;
+
+    vec3 size = uBboxMax - uBboxMin;
+    float diag = length(size);
+    float step = diag / float(uMaxSteps);
+
+    vec4 acc = vec4(0.0);
+    float transmittance = 1.0;
+    for (int i = 0; i < uMaxSteps; i++) {
+        float t = tb.x + (float(i) + 0.5) * step;
+        if (t > tb.y) break;
+
+        vec3 p = uCamPos + rd * t;
+        vec3 uvw = (p - uBboxMin) / size;
+        if (any(lessThan(uvw, vec3(0))) || any(greaterThan(uvw, vec3(1)))) continue;
+
+        float d = texture(uDensity, uvw).r * uDensityMult;
+        float tmp = texture(uTemp, uvw).r * uTempMult;
+
+        if (d < 0.001) continue;
+
+        // Emission from temperature (blackbody approx)
+        vec3 emit = vec3(0.0);
+        if (tmp > 0.01) {
+            emit.r = min(1.0, tmp * 3.0);
+            emit.g = max(0.0, min(1.0, (tmp - 0.15) * 2.5));
+            emit.b = max(0.0, min(1.0, (tmp - 0.5) * 3.0));
+            emit *= tmp * 2.0;
+        }
+
+        // Ambient scatter: density lit by ambient light (warm grey)
+        vec3 ambient = vec3(0.9, 0.85, 0.8) * d * 0.15;
+
+        // Beer-Lambert absorption
+        float sigma = d * step * 3.0;
+        float tr = exp(-sigma);
+
+        acc.rgb += transmittance * (emit + ambient) * (1.0 - tr);
+        transmittance *= tr;
+
+        if (transmittance < 0.01) break;
+    }
+    acc.a = 1.0 - transmittance;
+    if (acc.a < 0.001) discard;
+    // Output non-premultiplied
+    acc.rgb /= max(acc.a, 0.001);
+    fragColor = acc;
+}
+)";
+
+static GLuint _CompileShader(GLenum type, const char* src) {
+    GLuint s = glCreateShader(type);
+    glShaderSource(s, 1, &src, nullptr);
+    glCompileShader(s);
+    GLint ok; glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        char log[512]; glGetShaderInfoLog(s, 512, nullptr, log);
+        fprintf(stderr, "SpectralRender: GL shader error: %s\n", log);
+        glDeleteShader(s); return 0;
+    }
+    return s;
+}
+
+void SpectralRenderIop::_InitGLVolShader()
+{
+    if (_glVolProg) return;
+    GLuint vs = _CompileShader(GL_VERTEX_SHADER, kVolVS);
+    GLuint fs = _CompileShader(GL_FRAGMENT_SHADER, kVolFS);
+    if (!vs || !fs) { if(vs) glDeleteShader(vs); if(fs) glDeleteShader(fs); return; }
+    _glVolProg = glCreateProgram();
+    glAttachShader(_glVolProg, vs); glAttachShader(_glVolProg, fs);
+    glLinkProgram(_glVolProg);
+    glDeleteShader(vs); glDeleteShader(fs);
+    GLint ok; glGetProgramiv(_glVolProg, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[512]; glGetProgramInfoLog(_glVolProg, 512, nullptr, log);
+        fprintf(stderr, "SpectralRender: GL link error: %s\n", log);
+        glDeleteProgram(_glVolProg); _glVolProg = 0;
+    }
+}
+
+void SpectralRenderIop::_UploadGLVolTex(const pxr::SpectralVolume* vol)
+{
+    if (!vol) return;
+    int rX = vol->resX, rY = vol->resY, rZ = vol->resZ;
+    if (rX == _glVolTexResX && rY == _glVolTexResY && rZ == _glVolTexResZ &&
+        _glVolTexFrame == (int)outputContext().frame() && _glVolDensityTex) return;
+
+    // Density texture
+    if (!_glVolDensityTex) glGenTextures(1, &_glVolDensityTex);
+    glBindTexture(GL_TEXTURE_3D, _glVolDensityTex);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_BORDER);
+    if (!vol->density.empty())
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_R32F, rX, rY, rZ, 0, GL_RED, GL_FLOAT, vol->density.data());
+    else {
+        std::vector<float> zeros(rX*rY*rZ, 0.f);
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_R32F, rX, rY, rZ, 0, GL_RED, GL_FLOAT, zeros.data());
+    }
+
+    // Temperature texture
+    if (!_glVolTempTex) glGenTextures(1, &_glVolTempTex);
+    glBindTexture(GL_TEXTURE_3D, _glVolTempTex);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_BORDER);
+    if (!vol->temperature.empty())
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_R32F, rX, rY, rZ, 0, GL_RED, GL_FLOAT, vol->temperature.data());
+    else {
+        std::vector<float> zeros(rX*rY*rZ, 0.f);
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_R32F, rX, rY, rZ, 0, GL_RED, GL_FLOAT, zeros.data());
+    }
+
+    glBindTexture(GL_TEXTURE_3D, 0);
+    _glVolTexResX = rX; _glVolTexResY = rY; _glVolTexResZ = rZ;
+    _glVolTexFrame = (int)outputContext().frame();
+}
+
+void SpectralRenderIop::_DrawVolumeShaded(ViewerContext* ctx)
+{
+    if (_volumes.empty()) return;
+    auto& vol = _volumes[0];
+    if (!vol || !vol->IsValid()) return;
+
+    _InitGLVolShader();
+    if (!_glVolProg) { fprintf(stderr, "SpectralRender: GL vol shader failed to compile\n"); return; }
+
+    _UploadGLVolTex(vol.get());
+    if (!_glVolDensityTex) { fprintf(stderr, "SpectralRender: GL vol texture upload failed\n"); return; }
+
+    // Get current GL matrices (column-major)
+    float mv[16], proj[16];
+    glGetFloatv(GL_MODELVIEW_MATRIX, mv);
+    glGetFloatv(GL_PROJECTION_MATRIX, proj);
+
+    // Camera position from inverse modelview (column-major)
+    // cam = -R^T * t where columns of R are mv[0..2], mv[4..6], mv[8..10]
+    float camX = -(mv[0]*mv[12] + mv[4]*mv[13] + mv[8]*mv[14]);
+    float camY = -(mv[1]*mv[12] + mv[5]*mv[13] + mv[9]*mv[14]);
+    float camZ = -(mv[2]*mv[12] + mv[6]*mv[13] + mv[10]*mv[14]);
+
+    pxr::GfVec3f bMin = vol->GetBboxMin();
+    pxr::GfVec3f bMax = vol->GetBboxMax();
+
+    fprintf(stderr, "SpectralRender: shaded vol cam=(%.1f,%.1f,%.1f) bbox=(%.1f,%.1f,%.1f)-(%.1f,%.1f,%.1f)\n",
+            camX, camY, camZ, bMin[0], bMin[1], bMin[2], bMax[0], bMax[1], bMax[2]);
+
+    // Save GL state
+    glPushAttrib(GL_ALL_ATTRIB_BITS);
+    GLint prevProg; glGetIntegerv(GL_CURRENT_PROGRAM, &prevProg);
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);  // render front faces only
+
+    glUseProgram(_glVolProg);
+
+    // Set uniforms — pass MV and Proj separately (GL_FALSE = column-major, matches glGetFloatv)
+    glUniformMatrix4fv(glGetUniformLocation(_glVolProg, "uMV"), 1, GL_FALSE, mv);
+    glUniformMatrix4fv(glGetUniformLocation(_glVolProg, "uProj"), 1, GL_FALSE, proj);
+    glUniform3f(glGetUniformLocation(_glVolProg, "uBboxMin"), bMin[0], bMin[1], bMin[2]);
+    glUniform3f(glGetUniformLocation(_glVolProg, "uBboxMax"), bMax[0], bMax[1], bMax[2]);
+    glUniform3f(glGetUniformLocation(_glVolProg, "uCamPos"), camX, camY, camZ);
+    glUniform1f(glGetUniformLocation(_glVolProg, "uDensityMult"), float(vol->densityMult));
+    glUniform1f(glGetUniformLocation(_glVolProg, "uTempMult"),
+                _vdbMaxTemp > 0.01f ? 1.f / _vdbMaxTemp : 1.f);
+    glUniform1i(glGetUniformLocation(_glVolProg, "uMaxSteps"), 128);
+
+    // Bind textures
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_3D, _glVolDensityTex);
+    glUniform1i(glGetUniformLocation(_glVolProg, "uDensity"), 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_3D, _glVolTempTex);
+    glUniform1i(glGetUniformLocation(_glVolProg, "uTemp"), 1);
+
+    // Draw bbox cube (12 triangles, 36 vertices)
+    float x0=bMin[0], y0=bMin[1], z0=bMin[2];
+    float x1=bMax[0], y1=bMax[1], z1=bMax[2];
+    float verts[] = {
+        // Front
+        x0,y0,z1, x1,y0,z1, x1,y1,z1,  x0,y0,z1, x1,y1,z1, x0,y1,z1,
+        // Back
+        x1,y0,z0, x0,y0,z0, x0,y1,z0,  x1,y0,z0, x0,y1,z0, x1,y1,z0,
+        // Left
+        x0,y0,z0, x0,y0,z1, x0,y1,z1,  x0,y0,z0, x0,y1,z1, x0,y1,z0,
+        // Right
+        x1,y0,z1, x1,y0,z0, x1,y1,z0,  x1,y0,z1, x1,y1,z0, x1,y1,z1,
+        // Top
+        x0,y1,z1, x1,y1,z1, x1,y1,z0,  x0,y1,z1, x1,y1,z0, x0,y1,z0,
+        // Bottom
+        x0,y0,z0, x1,y0,z0, x1,y0,z1,  x0,y0,z0, x1,y0,z1, x0,y0,z1,
+    };
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, verts);
+    glDrawArrays(GL_TRIANGLES, 0, 36);
+    glDisableVertexAttribArray(0);
+
+    // Restore
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_3D, 0);
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_3D, 0);
+    glUseProgram(prevProg);
+    glPopAttrib();
+}
+
 void SpectralRenderIop::draw_handle(ViewerContext* ctx)
 {
     glPushAttrib(GL_CURRENT_BIT | GL_LINE_BIT | GL_ENABLE_BIT | GL_POINT_BIT);
@@ -3648,12 +3906,15 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
     if (_vdbShowPoints && !_vdbIsMetadataOnly && !_volumes.empty()) {
         if (_vdbPreviewDirty || _vdbPreviewPoints.empty()) {
             _vdbPreviewPoints.clear(); _vdbMaxDensity = 1e-6f;
+            _vdbMaxTemp = 1e-6f; _vdbMaxFlame = 1e-6f;
 
             int totalBudget = 20000;  // total points across all volumes
             int maxPointsPerVol = std::max(500, totalBudget / std::max(1, (int)_volumes.size()));
             for (size_t vj = 0; vj < _volumes.size(); ++vj) {
                 auto& v = _volumes[vj];
                 if (!v || !v->IsValid()) continue;
+                bool hasTemp = !v->temperature.empty();
+                bool hasFlame = !v->flame.empty();
                 int totalVoxels = v->resX * v->resY * v->resZ;
                 int step = std::max(1, (int)std::cbrt(double(totalVoxels) / maxPointsPerVol));
                 pxr::GfVec3f vMin = v->bboxMin, vSz = v->bboxMax - v->bboxMin;
@@ -3664,8 +3925,12 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
                         for (int ix = 0; ix < v->resX; ix += step) {
                             float u = float(ix)/v->resX, uv = float(iy)/v->resY, w = float(iz)/v->resZ;
                             float d = v->SampleDensity(u, uv, w);
-                            if (d < 0.01f) continue;
+                            float temp = hasTemp ? v->SampleTemperature(u, uv, w) : 0.f;
+                            float fl = hasFlame ? v->SampleFlame(u, uv, w) : 0.f;
+                            if (d < 0.01f && temp < 0.01f && fl < 0.01f) continue;
                             if (d > _vdbMaxDensity) _vdbMaxDensity = d;
+                            if (temp > _vdbMaxTemp) _vdbMaxTemp = temp;
+                            if (fl > _vdbMaxFlame) _vdbMaxFlame = fl;
                             pxr::GfVec3f localP(vMin[0]+u*vSz[0], vMin[1]+uv*vSz[1], vMin[2]+w*vSz[2]);
                             pxr::GfVec3f worldP = localP;
                             if (v->hasTransform) {
@@ -3678,7 +3943,7 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
                             }
                             VDBPreviewPoint pt;
                             pt.x = worldP[0]; pt.y = worldP[1]; pt.z = worldP[2];
-                            pt.density = d;
+                            pt.density = d; pt.temperature = temp; pt.flame = fl;
                             _vdbPreviewPoints.push_back(pt);
                             volPts++;
                         }
@@ -3695,23 +3960,82 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
         if (!_vdbPreviewPoints.empty()) {
             glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);
             glPointSize(float(_vdbPointSize)); glEnable(GL_POINT_SMOOTH);
-            float inv = 1.f / _vdbMaxDensity;
+            float invD = 1.f / _vdbMaxDensity;
+            float invT = 1.f / _vdbMaxTemp;
+            float invF = 1.f / _vdbMaxFlame;
             glBegin(GL_POINTS);
             for (const auto& pt : _vdbPreviewPoints) {
-                float t = std::min(pt.density * inv, 1.f);
-                float r, g, b;
+                float t = std::min(pt.density * invD, 1.f);
+                float temp = std::min(pt.temperature * invT, 1.f);
+                float fl = std::min(pt.flame * invF, 1.f);
+                float r, g, b, a;
                 switch (_vdbRenderMode) {
-                    case 1: r = g = b = t; break;
-                    case 3: r=std::max(0.f,std::min((t-.5f)*2.f,1.f)); g=std::max(0.f,std::min((t-.25f)*2.f,1.f)); b=std::min(t*2.f,1.f); break;
-                    case 4: r=std::min(t*2.f,1.f); g=std::max(0.f,std::min((t-.3f)*2.f,1.f)); b=std::max(0.f,std::min((t-.7f)*3.f,1.f)); break;
-                    case 2: r=std::min(t*3.f,1.f); g=std::max(0.f,std::min((t-.33f)*3.f,1.f)); b=std::max(0.f,std::min((t-.66f)*3.f,1.f)); break;
-                    default: r=t; g=t*0.9f; b=t*0.7f; break;
+                    case 1: r = g = b = t; a = .15f+.85f*t; break;  // Greyscale
+                    case 2: {  // Heat — use temperature if available
+                        float h = (pt.temperature > 0.01f) ? temp : t;
+                        r = std::min(h*3.f, 1.f);
+                        g = std::max(0.f, std::min((h-.33f)*3.f, 1.f));
+                        b = std::max(0.f, std::min((h-.66f)*3.f, 1.f));
+                        a = .15f+.85f*std::max(t, h);
+                    } break;
+                    case 3: {  // Cool
+                        r = std::max(0.f, std::min((t-.5f)*2.f, 1.f));
+                        g = std::max(0.f, std::min((t-.25f)*2.f, 1.f));
+                        b = std::min(t*2.f, 1.f);
+                        a = .15f+.85f*t;
+                    } break;
+                    case 4: {  // Blackbody — temperature to physical fire color
+                        float h = (pt.temperature > 0.01f) ? temp : t;
+                        // Blackbody approximation: dark red → orange → yellow → white
+                        r = std::min(1.f, h * 3.f);
+                        g = std::max(0.f, std::min(1.f, (h - 0.15f) * 2.5f));
+                        b = std::max(0.f, std::min(1.f, (h - 0.5f) * 3.f));
+                        // Boost with flame channel emission
+                        float emis = (pt.flame > 0.01f) ? fl * 0.5f : 0.f;
+                        r = std::min(1.f, r + emis);
+                        g = std::min(1.f, g + emis * 0.6f);
+                        a = .1f + .9f * std::max(t, std::max(h, fl));
+                    } break;
+                    case 5: {  // Explosion — fire core + smoke shell
+                        float h = (pt.temperature > 0.01f) ? temp : t;
+                        float f = (pt.flame > 0.01f) ? fl : h;
+                        // Fire core: bright orange-yellow from flame/temperature
+                        float fireR = std::min(1.f, f * 2.5f);
+                        float fireG = std::max(0.f, std::min(1.f, (f - 0.1f) * 2.f));
+                        float fireB = std::max(0.f, std::min(1.f, (f - 0.6f) * 3.f));
+                        // Smoke: grey-brown from density without temperature
+                        float smokeV = t * 0.4f;
+                        // Blend: high temp = fire, low temp = smoke
+                        float fireMix = std::max(h, f);
+                        r = fireR * fireMix + smokeV * (1.f - fireMix);
+                        g = fireG * fireMix + smokeV * 0.9f * (1.f - fireMix);
+                        b = fireB * fireMix + smokeV * 0.7f * (1.f - fireMix);
+                        a = .1f + .9f * std::max(t, fireMix);
+                    } break;
+                    default: {  // Lit (mode 0) — warm tint, use temperature when available
+                        if (pt.temperature > 0.01f) {
+                            // Warm: density for opacity, temperature for color
+                            float h = temp;
+                            r = std::min(1.f, h * 2.5f + t * 0.3f);
+                            g = std::max(0.f, std::min(1.f, (h - 0.15f) * 2.f + t * 0.2f));
+                            b = std::max(0.f, std::min(1.f, (h - 0.5f) * 2.f));
+                        } else {
+                            r = t; g = t * 0.9f; b = t * 0.7f;
+                        }
+                        a = .15f+.85f*t;
+                    } break;
                 }
-                glColor4f(r, g, b, .15f+.85f*t);
+                glColor4f(r, g, b, a);
                 glVertex3f(pt.x, pt.y, pt.z);
             }
             glEnd(); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         }
+    }
+
+    // ─── Shaded volume preview (GL ray march) ──────────────────────
+    if (_vdbShadedPreview && !_volumes.empty()) {
+        fprintf(stderr, "SpectralRender: shaded preview enabled, %d volumes\n", (int)_volumes.size());
+        _DrawVolumeShaded(ctx);
     }
 
     // ─── Light preview (subtle, professional) ────────────────────────

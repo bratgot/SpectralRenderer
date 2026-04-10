@@ -255,11 +255,24 @@ private:
     double _vdbPointSize = 5.0;
 
     // Cached point cloud for viewport
-    struct VDBPreviewPoint { float x, y, z, density; };
+    struct VDBPreviewPoint { float x, y, z, density, temperature, flame; };
     std::vector<VDBPreviewPoint> _vdbPreviewPoints;
     float _vdbMaxDensity = 1.f;
+    float _vdbMaxTemp = 1.f;
+    float _vdbMaxFlame = 1.f;
     bool  _vdbPreviewDirty = true;
     std::string _vdbLoadedPath;
+
+    // GL volume ray march shader
+    bool   _vdbShadedPreview = false;
+    GLuint _glVolProg = 0;
+    GLuint _glVolDensityTex = 0;
+    GLuint _glVolTempTex = 0;
+    int    _glVolTexFrame = -1;
+    int    _glVolTexResX = 0, _glVolTexResY = 0, _glVolTexResZ = 0;
+    void   _InitGLVolShader();
+    void   _UploadGLVolTex(const pxr::SpectralVolume* vol);
+    void   _DrawVolumeShaded(ViewerContext* ctx);
 
     // Scene graph transform (from GeoTransform via USD stage)
     bool  _vdbHasSceneXform = false;

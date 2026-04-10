@@ -318,7 +318,7 @@ target_compile_options(SpectralRender PRIVATE ${SPECTRAL_OPTIONS})
 target_link_libraries(SpectralRender PRIVATE
     SpectralCore "${LIB_DDIMAGE}" "${LIB_FDKBASE}" "${LIB_TBB}" "${LIB_NDK}"
     "${LIB_USDABS}" "${LIB_USDENGINE}" "C:/dev/SpectralRenderer/python311.lib" ${USD_LIBS}
-    opengl32
+    opengl32 "${NUKE_ROOT}/glew32.lib"
 )
 
 set_target_properties(SpectralRender PROPERTIES
