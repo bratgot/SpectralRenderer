@@ -4955,18 +4955,8 @@ void SpectralRenderIop::_EnsureFrameRendered()
     if (_cameraMblur && _camera.cameraMblur) {
         renderSpp = std::max(renderSpp, renderSpp * _cameraMblurQuality / 4);
     }
-    // Auto-preview: always render 1 spp first for volume scenes, then refine
-    bool hasVolumeScene = !_volumes.empty() || (_volume && _volume->IsValid());
-    if (hasVolumeScene && _progressiveSppDone == 0 && _samples > 1) {
-        renderSpp = 1;
-        isPreviewPass = true;
-    }
-    if (_progressive && _progressiveSppDone == 0 && _samples > 2) {
-        renderSpp = 1;  // fast preview pass — triggers GPU previewMode (no shadows, 2× step)
-        isPreviewPass = true;
-    }
 
-    // Determine render device
+    // Determine render device (needed before preview decision)
     bool useGPU = false;
 #ifdef SPECTRAL_HAS_OPTIX
     if (_deviceMode == 1) {          // gpu
@@ -4975,6 +4965,17 @@ void SpectralRenderIop::_EnsureFrameRendered()
         useGPU = SpectralIntegrator::IsGPUAvailable();
     }
 #endif
+
+    // Auto-preview: GPU-only (CPU spp=1 has no volume rendering)
+    bool hasVolumeScene = !_volumes.empty() || (_volume && _volume->IsValid());
+    if (hasVolumeScene && _progressiveSppDone == 0 && _samples > 1 && useGPU) {
+        renderSpp = 1;
+        isPreviewPass = true;
+    }
+    if (_progressive && _progressiveSppDone == 0 && _samples > 2 && useGPU) {
+        renderSpp = 1;
+        isPreviewPass = true;
+    }
 
     const char* deviceStr = useGPU ? "GPU" : "CPU";
     const char* passStr = isPreviewPass ? " [preview]" : "";

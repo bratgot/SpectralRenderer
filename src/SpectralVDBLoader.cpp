@@ -173,6 +173,27 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::Load(const char* filepath,
     return vol;
 }
 
+// ---------------------------------------------------------------------------
+// OpenVDB grid cache — avoids reopening the same file for viewport + render
+// ---------------------------------------------------------------------------
+struct GridCacheEntry {
+    openvdb::FloatGrid::Ptr density;
+    openvdb::FloatGrid::Ptr temp;
+    openvdb::FloatGrid::Ptr flame;
+    openvdb::CoordBBox bbox;
+    std::string filepath;
+};
+static std::mutex s_gridCacheMutex;
+static std::unordered_map<std::string, GridCacheEntry> s_gridCache;
+static constexpr int MAX_GRID_CACHE = 8;  // keep 8 most recent files' grids
+
+static void _evictGridCache() {
+    // Simple eviction: if over limit, clear oldest (FIFO via map iteration)
+    while ((int)s_gridCache.size() > MAX_GRID_CACHE) {
+        s_gridCache.erase(s_gridCache.begin());
+    }
+}
+
 std::shared_ptr<SpectralVolume> SpectralVDBLoader::_LoadFromDisk(const char* filepath,
     const char* densityGridName, const char* tempGridName, int maxRes)
 {
@@ -185,10 +206,6 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::_LoadFromDisk(const char* fil
         auto tStart = std::chrono::high_resolution_clock::now();
 
         openvdb::initialize();
-        openvdb::io::File file(filepath);
-        file.open();
-
-        auto tOpen = std::chrono::high_resolution_clock::now();
 
         auto vol = std::make_shared<SpectralVolume>();
 
@@ -198,6 +215,37 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::_LoadFromDisk(const char* fil
         std::string wantDensity = (densityGridName && strlen(densityGridName) > 0) ? densityGridName : "";
         std::string wantTemp = (tempGridName && strlen(tempGridName) > 0) ? tempGridName : "";
         if (wantDensity == "(none)") wantDensity = "";
+
+        // Check grid cache first — avoids reopening the same VDB file
+        std::string cacheKey = std::string(filepath);
+        openvdb::CoordBBox cachedBbox;
+        bool cacheHit = false;
+        {
+            std::lock_guard<std::mutex> lock(s_gridCacheMutex);
+            auto it = s_gridCache.find(cacheKey);
+            if (it != s_gridCache.end()) {
+                densityGrid = it->second.density;
+                if (!densityOnly) {
+                    tempGrid = it->second.temp;
+                    flameGrid = it->second.flame;
+                }
+                cachedBbox = it->second.bbox;
+                // Only count as full cache hit if we have all grids we need
+                if (densityOnly || (tempGrid || flameGrid)) {
+                    cacheHit = true;
+                }
+                // If we need temp/flame but cache doesn't have them,
+                // we have density from cache but must re-open file for other grids
+            }
+        }
+
+        auto tOpen = std::chrono::high_resolution_clock::now();
+
+        if (!cacheHit) {
+            // Cache miss or partial hit — open file and read missing grids
+            openvdb::io::File file(filepath);
+            file.open();
+            tOpen = std::chrono::high_resolution_clock::now();
 
         for (auto it = file.beginName(); it != file.endName(); ++it) {
             std::string name = *it;
@@ -232,14 +280,34 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::_LoadFromDisk(const char* fil
 
         file.close();
 
+            // Insert into grid cache
+            {
+                std::lock_guard<std::mutex> lock(s_gridCacheMutex);
+                GridCacheEntry entry;
+                entry.density = densityGrid;
+                entry.temp = tempGrid;
+                entry.flame = flameGrid;
+                entry.bbox = densityGrid->evalActiveVoxelBoundingBox();
+                entry.filepath = filepath;
+                s_gridCache[cacheKey] = entry;
+                _evictGridCache();
+            }
+        } // end !cacheHit
+
         auto tGrids = std::chrono::high_resolution_clock::now();
+
+        if (cacheHit) {
+            fprintf(stderr, "SpectralVDB: grid cache hit for '%s'\n", filepath);
+        } else if (densityGrid && cachedBbox.dim().x() > 0) {
+            fprintf(stderr, "SpectralVDB: grid cache partial hit for '%s' (reading temp/flame)\n", filepath);
+        }
 
         if (!densityGrid) {
             fprintf(stderr, "SpectralVDB: no float grid found in %s\n", filepath);
             return nullptr;
         }
 
-        auto bbox = densityGrid->evalActiveVoxelBoundingBox();
+        auto bbox = cacheHit ? cachedBbox : densityGrid->evalActiveVoxelBoundingBox();
         auto wMin = densityGrid->indexToWorld(bbox.min());
         auto wMax = densityGrid->indexToWorld(bbox.max());
         vol->bboxMin = GfVec3f(float(wMin.x()), float(wMin.y()), float(wMin.z()));
@@ -341,9 +409,8 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::_LoadFromDisk(const char* fil
                 }
 
                 vol->useNanoVDB = true;
-                vol->density.clear();
-                vol->temperature.clear();
-                vol->flame.clear();
+                // Keep dense vectors — CPU render path needs them
+                // NanoVDB buffers are used by GPU densify kernel
                 nanoOK = true;
 
                 auto tNanoDone = std::chrono::high_resolution_clock::now();
@@ -358,7 +425,8 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::_LoadFromDisk(const char* fil
                 vol->nanoFlameBuf.clear();
             }
 
-            if (!nanoOK) {
+            // Always populate dense data (CPU render needs it even when NanoVDB active)
+            {
                 // Dense fallback
                 vol->density.resize(totalVoxels, 0.f);
                 bool isNativeRes = (vol->resX >= int(dim.x()) &&
