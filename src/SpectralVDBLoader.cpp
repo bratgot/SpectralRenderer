@@ -12,45 +12,27 @@
 #include <openvdb/tools/Dense.h>
 #include <nanovdb/NanoVDB.h>
 #include <nanovdb/tools/CreateNanoGrid.h>
-#include <nanovdb/tools/GridBuilder.h>
 
-// Build a NanoVDB grid from an OpenVDB FloatGrid without using the broken
-// createNanoGrid<OpenVDB> adapter (OpenVDB 12 / NanoVDB 32.7 API mismatch).
-// Uses NanoVDB's own grid builder fed from OpenVDB's active voxel iterator.
-static nanovdb::GridHandle<> buildNanoFromOpenVDB(const openvdb::FloatGrid& srcGrid) {
-    using SrcGridT = openvdb::FloatGrid;
-    
-    fprintf(stderr, "SpectralVDB: NanoVDB conversion starting (%zu active voxels)...\n",
-            srcGrid.activeVoxelCount());
-    
-    // Use NanoVDB's built-in OpenVDB converter via the NodeManager approach
-    // Build a nanovdb::build::Grid and populate from OpenVDB active values
-    nanovdb::tools::build::Grid<float> builder(srcGrid.background());
-    
-    auto acc = builder.getAccessor();
-    for (auto iter = srcGrid.cbeginValueOn(); iter; ++iter) {
-        auto c = iter.getCoord();
-        acc.setValue(nanovdb::Coord(c.x(), c.y(), c.z()), iter.getValue());
+// OpenVDB 12 compat shim: NanoVDB's NodeAccessor<GridT> calls gridClass() and map()
+// which don't exist on openvdb::FloatGrid. Add them via thin derived class.
+struct FloatGridCompat : public openvdb::FloatGrid {
+    nanovdb::GridClass gridClass() const {
+        switch (this->getGridClass()) {
+            case openvdb::GRID_LEVEL_SET:  return nanovdb::GridClass::LevelSet;
+            case openvdb::GRID_FOG_VOLUME: return nanovdb::GridClass::FogVolume;
+            case openvdb::GRID_STAGGERED:  return nanovdb::GridClass::Staggered;
+            default:                       return nanovdb::GridClass::Unknown;
+        }
     }
-    
-    // Get transform from source grid
-    auto vs = srcGrid.voxelSize();
-    auto origin = srcGrid.transform().indexToWorld(openvdb::Vec3d(0, 0, 0));
-    double voxelSize = vs[0]; // assume uniform
-    
-    auto handle = nanovdb::tools::createNanoGrid(builder);
-    
-    // Apply the transform by patching the Map in the grid data
-    if (auto* grid = handle.grid<float>()) {
-        // Access the grid's mutable data to set the map
-        auto& map = const_cast<nanovdb::Map&>(grid->map());
-        map = nanovdb::Map(voxelSize, nanovdb::Vec3d(origin.x(), origin.y(), origin.z()));
+    nanovdb::Map map() const {
+        auto vs = this->voxelSize();
+        auto origin = this->transform().indexToWorld(openvdb::Vec3d(0, 0, 0));
+        return nanovdb::Map(vs[0], nanovdb::Vec3d(origin.x(), origin.y(), origin.z()));
     }
-    
-    fprintf(stderr, "SpectralVDB: NanoVDB conversion done (%.1f MB)\n",
-            handle.size() / (1024.0 * 1024.0));
-    
-    return handle;
+};
+static inline nanovdb::GridHandle<> createNanoFromOpenVDB(const openvdb::FloatGrid& grid) {
+    return nanovdb::tools::createNanoGrid<FloatGridCompat>(
+        reinterpret_cast<const FloatGridCompat&>(grid));
 }
 #include <algorithm>
 #include <cstdio>
@@ -316,11 +298,22 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::_LoadFromDisk(const char* fil
 
         } else {
             // ── QUALITY RENDER PATH ────────────────────────────────────
-            // NanoVDB integration deferred (OpenVDB 12 / NanoVDB 32.7 API mismatch)
-            // Dense copyToDense + downsample is already fast (~400ms)
-            bool nanoOK = false;
+            // Test NanoVDB conversion (timing only — kernel still uses tex3D)
+            {
+                auto tNano = std::chrono::high_resolution_clock::now();
+                try {
+                    auto handle = createNanoFromOpenVDB(*densityGrid);
+                    auto tNanoDone = std::chrono::high_resolution_clock::now();
+                    auto msNano = std::chrono::duration_cast<std::chrono::milliseconds>(tNanoDone - tNano).count();
+                    fprintf(stderr, "SpectralVDB: NanoVDB test — density %.1f MB in %lldms (%zu active voxels)\n",
+                            handle.size()/(1024.0*1024.0), msNano, densityGrid->activeVoxelCount());
+                } catch (const std::exception& e) {
+                    fprintf(stderr, "SpectralVDB: NanoVDB test failed: %s\n", e.what());
+                }
+            }
 
-            if (!nanoOK) {
+            // Dense path (active — kernel uses tex3D)
+            {
                 // Dense fallback
                 vol->density.resize(totalVoxels, 0.f);
                 bool isNativeRes = (vol->resX >= int(dim.x()) &&
