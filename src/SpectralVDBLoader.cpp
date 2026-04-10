@@ -40,6 +40,7 @@ static inline nanovdb::GridHandle<> createNanoFromOpenVDB(const openvdb::FloatGr
 #include <mutex>
 #include <thread>
 #include <atomic>
+#include <future>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -299,23 +300,46 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::_LoadFromDisk(const char* fil
         } else {
             // ── QUALITY RENDER PATH ────────────────────────────────────
             // Try NanoVDB: OpenVDB → NanoVDB on CPU, then GPU densifies to tex3D
+            // All 3 grids converted in parallel (density, temp, flame)
             bool nanoOK = false;
             try {
                 auto tNano = std::chrono::high_resolution_clock::now();
-                auto handle = createNanoFromOpenVDB(*densityGrid);
+
+                // Launch all conversions in parallel
+                auto densityFuture = std::async(std::launch::async, [&]() {
+                    return createNanoFromOpenVDB(*densityGrid);
+                });
+
+                std::future<nanovdb::GridHandle<>> tempFuture;
+                if (tempGrid && !densityOnly) {
+                    tempFuture = std::async(std::launch::async, [&]() {
+                        return createNanoFromOpenVDB(*tempGrid);
+                    });
+                }
+
+                std::future<nanovdb::GridHandle<>> flameFuture;
+                if (flameGrid && !densityOnly) {
+                    flameFuture = std::async(std::launch::async, [&]() {
+                        return createNanoFromOpenVDB(*flameGrid);
+                    });
+                }
+
+                // Collect results
+                auto handle = densityFuture.get();
                 auto* data = reinterpret_cast<const uint8_t*>(handle.data());
                 vol->nanoDensityBuf.assign(data, data + handle.size());
 
-                if (tempGrid && !densityOnly) {
-                    auto th = createNanoFromOpenVDB(*tempGrid);
+                if (tempFuture.valid()) {
+                    auto th = tempFuture.get();
                     auto* td = reinterpret_cast<const uint8_t*>(th.data());
                     vol->nanoTempBuf.assign(td, td + th.size());
                 }
-                if (flameGrid && !densityOnly) {
-                    auto fh = createNanoFromOpenVDB(*flameGrid);
+                if (flameFuture.valid()) {
+                    auto fh = flameFuture.get();
                     auto* fd = reinterpret_cast<const uint8_t*>(fh.data());
                     vol->nanoFlameBuf.assign(fd, fd + fh.size());
                 }
+
                 vol->useNanoVDB = true;
                 vol->density.clear();
                 vol->temperature.clear();
@@ -324,7 +348,7 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::_LoadFromDisk(const char* fil
 
                 auto tNanoDone = std::chrono::high_resolution_clock::now();
                 auto msNano = std::chrono::duration_cast<std::chrono::milliseconds>(tNanoDone - tNano).count();
-                fprintf(stderr, "SpectralVDB: NanoVDB conversion — %.1f MB in %lldms (%zu active voxels)\n",
+                fprintf(stderr, "SpectralVDB: NanoVDB conversion — %.1f MB in %lldms (%zu active voxels, parallel)\n",
                         handle.size()/(1024.0*1024.0), msNano, densityGrid->activeVoxelCount());
             } catch (const std::exception& e) {
                 fprintf(stderr, "SpectralVDB: NanoVDB failed (%s), using dense fallback\n", e.what());
