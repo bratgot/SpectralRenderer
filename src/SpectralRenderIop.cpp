@@ -5081,19 +5081,15 @@ void SpectralRenderIop::_EnsureFrameRendered()
 
 #ifdef SPECTRAL_HAS_OPTIX
     if (useGPU) {
-        // Strip callback: update viewer progressively during render
-        auto stripCb = [this, W](int y0, int y1) {
-            DD::Image::Box box(0, y0, W, y1);
-            asapUpdate(box);
-        };
-        int strips = isPreviewPass ? 8 : 4;  // more strips for preview (faster feedback)
+        // Strip rendering: multiple smaller launches for better GPU occupancy
+        int strips = isPreviewPass ? 8 : 4;
 
         SpectralIntegrator::RenderFrameGPU(*_scene, cam, _frameBuffer.data(),
                                             renderSpp, _depthBuffer.data(), _maxBounces,
                                             _colorSpace,
                                             volPtrs.empty() ? nullptr : volPtrs.data(),
                                             (int)volPtrs.size(),
-                                            stripCb, strips);
+                                            nullptr, strips);
         // Note: GPU caustics use CPU gathering pass below
     } else
 #endif
@@ -5249,7 +5245,9 @@ void SpectralRenderIop::_EnsureFrameRendered()
             auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(tEnd - tStart).count();
             SLOG("SpectralRender: async quality complete (%lldms)\n", ms);
 
-            asapUpdate();
+            // Quality data is now in _frameBuffer — viewer serves it on next engine() call
+            // (Don't call asapUpdate() from background thread — causes
+            //  "Illegal version number change during op generation" warning)
         });
     }
 

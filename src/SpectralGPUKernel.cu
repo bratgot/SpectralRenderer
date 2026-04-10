@@ -632,7 +632,7 @@ static __forceinline__ __device__ float shadeHit(
                             float su,sv,sw;
                             worldToVolUV(svol, spx, spy, spz, su, sv, sw);
                             if (su<0||su>1||sv<0||sv>1||sw<0||sw>1) continue;
-                            float d = sampleDensity(svol, su, sv, sw) * svol.densityMult;
+                            float d = sampleDensity(svol, su, sv, sw);
                             if (d < 1e-5f) continue;
                             shadowTransmit *= expf(-d * svol.extinction * sDt);
                             if (shadowTransmit < 0.01f) break;
@@ -950,7 +950,7 @@ static __forceinline__ __device__ void marchSingleVolume(
                         float su,sv,sw;
                         worldToVolUV(vol, spx, spy, spz, su, sv, sw);
                         if(su<0||su>1||sv<0||sv>1||sw<0||sw>1) break;
-                        float sd = sampleDensity(vol,su,sv,sw) * vol.densityMult;
+                        float sd = sampleDensity(vol,su,sv,sw);
                         if (sd < 1e-5f) continue;
                         shadowTrans*=expf(-sd*vol.extinction*vol.shadowDensity*sDt);
                         if(shadowTrans<0.001f) break;
@@ -977,7 +977,7 @@ static __forceinline__ __device__ void marchSingleVolume(
                                 float osu,osv,osw;
                                 worldToVolUV(ovol,osx,osy,osz,osu,osv,osw);
                                 if(osu<0||osu>1||osv<0||osv>1||osw<0||osw>1) continue;
-                                float od=sampleDensity(ovol,osu,osv,osw)*ovol.densityMult;
+                                float od=sampleDensity(ovol,osu,osv,osw);
                                 if(od<1e-5f) continue;
                                 shadowTrans*=expf(-od*ovol.extinction*oDt);
                                 if(shadowTrans<0.001f) break;
@@ -1081,7 +1081,7 @@ static __forceinline__ __device__ void marchSingleVolume(
                         float su,sv,sw;
                         worldToVolUV(vol, spx, spy, spz, su, sv, sw);
                         if(su<0||su>1||sv<0||sv>1||sw<0||sw>1) break;
-                        float sd = sampleDensity(vol,su,sv,sw) * vol.densityMult;
+                        float sd = sampleDensity(vol,su,sv,sw);
                         if (sd < 1e-5f) continue;
                         shadowTrans*=expf(-sd*vol.extinction*vol.shadowDensity*sDt);
                         if(shadowTrans<0.001f) break;
@@ -1108,7 +1108,7 @@ static __forceinline__ __device__ void marchSingleVolume(
                                 float osu,osv,osw;
                                 worldToVolUV(ovol,osx,osy,osz,osu,osv,osw);
                                 if(osu<0||osu>1||osv<0||osv>1||osw<0||osw>1) continue;
-                                float od=sampleDensity(ovol,osu,osv,osw)*ovol.densityMult;
+                                float od=sampleDensity(ovol,osu,osv,osw);
                                 if(od<1e-5f) continue;
                                 shadowTrans*=expf(-od*ovol.extinction*oDt);
                                 if(shadowTrans<0.001f) break;
