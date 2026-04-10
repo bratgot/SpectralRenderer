@@ -1000,10 +1000,21 @@ void SpectralRenderIop::knobs(Knob_Callback f)
 
 int SpectralRenderIop::knob_changed(Knob* k)
 {
-    _asyncCancel.store(true);
-    if (_asyncQualityThread.joinable()) _asyncQualityThread.join();
-    _frameReady.store(false);
-    _progressiveSppDone = 0;
+    // Only reset render for knobs that affect the image
+    // Skip UI-only knobs (showPanel, hidePanel, label, tile_color, etc.)
+    bool isUIOnly = k->is("showPanel") || k->is("hidePanel")
+                 || k->is("label") || k->is("tile_color")
+                 || k->is("note_font") || k->is("note_font_size")
+                 || k->is("note_font_color") || k->is("selected")
+                 || k->is("help") || k->is("indicators")
+                 || k->is("postage_stamp");
+
+    if (!isUIOnly) {
+        _asyncCancel.store(true);
+        if (_asyncQualityThread.joinable()) _asyncQualityThread.join();
+        _frameReady.store(false);
+        _progressiveSppDone = 0;
+    }
 
     // Update DAG node label with CPU/GPU indicator
     if (k->is("device_mode") || k->is("showPanel")) {
