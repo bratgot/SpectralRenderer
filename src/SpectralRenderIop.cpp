@@ -720,6 +720,14 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                    "1/2 = ~12.5%% of native voxels (production)\n"
                    "Full = ~100%% at 512\xc2\xb3 cap (high quality)\n"
                    "Native = actual VDB dims, capped at 1024\xc2\xb3");
+        static const char* const scrubOpts[] = {
+            "Fast (64)", "Medium (128)", "Full (no cap)", nullptr
+        };
+        Enumeration_knob(f, &_scrubQuality, scrubOpts, "scrub_quality", "scrub quality");
+        Tooltip(f, "Volume resolution during timeline scrubbing (preview pass).\n"
+                   "Fast = 64\xc2\xb3 density-only (~50ms, shape only)\n"
+                   "Medium = 128\xc2\xb3 with NanoVDB (~400ms, decent detail)\n"
+                   "Full = no cap, uses render resolution (slower but full quality)");
         Double_knob(f, &_vdbAnisotropy, "vdb_anisotropy", "anisotropy"); SetRange(f, -1, 1);
         SetFlags(f, Knob::INVISIBLE);
 
@@ -4991,8 +4999,12 @@ void SpectralRenderIop::_EnsureFrameRendered()
     if (!_volumes.empty() && _cachedVolMerge) {
         auto tVolStart = std::chrono::high_resolution_clock::now();
         int masterMaxRes = _GetMasterMaxRes();
-        // Preview pass: use 256³ max for fast VDB load, quality pass uses full res
-        if (isPreviewPass && masterMaxRes > 256) masterMaxRes = 256;
+        if (isPreviewPass) {
+            // Scrub quality: cap preview resolution for fast interaction
+            if (_scrubQuality == 0) masterMaxRes = std::min(masterMaxRes, 64);       // Fast: 64³ density-only
+            else if (_scrubQuality == 1) masterMaxRes = std::min(masterMaxRes, 128);  // Medium: 128³
+            // scrubQuality == 2: no cap, full render resolution
+        }
         auto entries = _cachedVolMerge->GetVolumes(int(outputContext().frame()), masterMaxRes);
         auto tVolLoad = std::chrono::high_resolution_clock::now();
 
@@ -5235,30 +5247,20 @@ void SpectralRenderIop::_EnsureFrameRendered()
             auto tStart = std::chrono::high_resolution_clock::now();
 
 #ifdef SPECTRAL_HAS_OPTIX
-            // Strip callback checks cancellation between strips
-            auto cancelCb = [this](int y0, int y1) {
-                (void)y0; (void)y1;
-                // Check if we should abort
-            };
             SpectralIntegrator::RenderFrameGPU(*_scene, asyncCam, _frameBuffer.data(),
                                                 asyncSpp, _depthBuffer.data(), _maxBounces,
                                                 _colorSpace,
                                                 asyncVolPtrs.empty() ? nullptr : asyncVolPtrs.data(),
                                                 (int)asyncVolPtrs.size(),
-                                                cancelCb, 4);
+                                                nullptr, 4);
 #endif
 
             if (_asyncCancel.load()) return;
-
             _progressiveSppDone = asyncSpp;
 
             auto tEnd = std::chrono::high_resolution_clock::now();
             auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(tEnd - tStart).count();
             SLOG("SpectralRender: async quality complete (%lldms)\n", ms);
-
-            // Quality data is now in _frameBuffer — viewer serves it on next engine() call
-            // (Don't call asapUpdate() from background thread — causes
-            //  "Illegal version number change during op generation" warning)
         });
     }
 

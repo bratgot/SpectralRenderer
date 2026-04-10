@@ -185,6 +185,7 @@ private:
     double _vdbStepSize = 0.0;       // 0 = auto
     int    _vdbMaxSteps = 256;
     int    _vdbVolRes = 0;           // 0=1/8, 1=1/4, 2=1/2, 3=Full, 4=Native
+    int    _scrubQuality = 1;        // 0=Fast(64³), 1=Medium(128³), 2=Full(no cap)
     const char* _vdbMemInfo = "";
     double _vdbEmissionIntensity = 2.0;
     double _vdbTempMin = 500.0;
