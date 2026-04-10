@@ -920,29 +920,38 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
                     bmin.x, bmin.y, bmin.z, bmax.x, bmax.y, bmax.z, nullptr);
                 cudaDeviceSynchronize();
 
-                // Create 3D texture from device buffer
+                // Create/reuse 3D texture, copy device→device (no host bounce)
                 bool resChanged = (targetResX != cachedRX || targetResY != cachedRY || targetResZ != cachedRZ);
                 if (resChanged) {
                     _DestroyVolumeTex3D(arr, tex);
                 }
                 if (!tex) {
-                    // Need host copy for _CreateVolumeTex3D
-                    std::vector<float> hostBuf(texVoxels);
-                    cudaMemcpy(hostBuf.data(), d_dense, texVoxels * sizeof(float), cudaMemcpyDeviceToHost);
-                    _CreateVolumeTex3D(hostBuf.data(), targetResX, targetResY, targetResZ, arr, tex);
+                    // Allocate cudaArray + create texture object
+                    cudaChannelFormatDesc cd = cudaCreateChannelDesc<float>();
+                    cudaExtent ext = make_cudaExtent(targetResX, targetResY, targetResZ);
+                    cudaMalloc3DArray(&arr, &cd, ext);
+
+                    cudaResourceDesc resDesc = {};
+                    resDesc.resType = cudaResourceTypeArray;
+                    resDesc.res.array.array = arr;
+                    cudaTextureDesc texDesc = {};
+                    texDesc.addressMode[0] = cudaAddressModeClamp;
+                    texDesc.addressMode[1] = cudaAddressModeClamp;
+                    texDesc.addressMode[2] = cudaAddressModeClamp;
+                    texDesc.filterMode = cudaFilterModeLinear;
+                    texDesc.readMode = cudaReadModeElementType;
+                    texDesc.normalizedCoords = 1;
+                    cudaCreateTextureObject(&tex, &resDesc, &texDesc, nullptr);
                     cachedRX = targetResX; cachedRY = targetResY; cachedRZ = targetResZ;
-                } else {
-                    // Same resolution — update existing array
-                    std::vector<float> hostBuf(texVoxels);
-                    cudaMemcpy(hostBuf.data(), d_dense, texVoxels * sizeof(float), cudaMemcpyDeviceToHost);
-                    cudaMemcpy3DParms cp = {};
-                    cp.srcPtr = make_cudaPitchedPtr(hostBuf.data(),
-                        targetResX * sizeof(float), targetResX, targetResY);
-                    cp.dstArray = arr;
-                    cp.extent = make_cudaExtent(targetResX, targetResY, targetResZ);
-                    cp.kind = cudaMemcpyHostToDevice;
-                    cudaMemcpy3D(&cp);
                 }
+                // Device-to-device copy: d_dense → cudaArray
+                cudaMemcpy3DParms cp = {};
+                cp.srcPtr = make_cudaPitchedPtr(d_dense,
+                    targetResX * sizeof(float), targetResX, targetResY);
+                cp.dstArray = arr;
+                cp.extent = make_cudaExtent(targetResX, targetResY, targetResZ);
+                cp.kind = cudaMemcpyDeviceToDevice;
+                cudaMemcpy3D(&cp);
 
                 cudaFree(d_dense);
                 return tex;
