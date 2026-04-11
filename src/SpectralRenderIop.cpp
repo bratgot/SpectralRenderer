@@ -3642,6 +3642,9 @@ uniform vec3 uBboxMax;
 uniform float uDensityMult;
 uniform float uTempMult;
 uniform int uMaxSteps;
+uniform vec3 uLightDir;
+uniform vec3 uLightCol;
+uniform vec3 uAmbient;
 varying vec3 vWorldPos;
 
 void main() {
@@ -3660,7 +3663,7 @@ void main() {
     float tFar  = min(min(mx.x, mx.y), mx.z);
     if (tNear >= tFar) discard;
 
-    vec3 lightDir = normalize(vec3(0.3, 1.0, 0.2));
+    vec3 lightDir = normalize(uLightDir);
 
     float transmittance = 1.0;
     vec3 color = vec3(0.0);
@@ -3693,9 +3696,9 @@ void main() {
         }
         float shadow = exp(-shadowD * 0.8);
 
-        // In-scattered radiance — balanced with absorption
-        vec3 Li = vec3(0.7, 0.65, 0.6) * shadow * 0.3
-                + vec3(0.08, 0.1, 0.14)
+        // In-scattered radiance from scene lights
+        vec3 Li = uLightCol * shadow * 0.3
+                + uAmbient
                 + emit;
 
         // Absorption — density controls opacity only
@@ -3795,6 +3798,10 @@ void SpectralRenderIop::_UploadGLVolTex(const pxr::SpectralVolume* vol)
     _glVolTexFrame = (int)outputContext().frame();
 }
 
+// Forward declarations (defined in _BuildLightRig section)
+static void sunColorFromElevation(double elev, double turbidity, double& r, double& g, double& b);
+static void skyColorFromElevation(double elev, double turbidity, double& r, double& g, double& b);
+
 void SpectralRenderIop::_DrawVolumeShaded(ViewerContext* ctx)
 {
     if (_volumes.empty()) return;
@@ -3809,6 +3816,44 @@ void SpectralRenderIop::_DrawVolumeShaded(ViewerContext* ctx)
 
     pxr::GfVec3f bMin = vol->GetBboxMin();
     pxr::GfVec3f bMax = vol->GetBboxMax();
+
+    // Compute light direction and color from scene lights
+    float lightDirX = 0.f, lightDirY = 1.f, lightDirZ = 0.f;  // default: straight up
+    float lightR = 1.f, lightG = 0.95f, lightB = 0.9f;
+    float ambR = 0.15f, ambG = 0.2f, ambB = 0.3f;
+
+    double sunElev = _sunElevation, sunAz = _sunAzimuth;
+    double sunInt = _sunIntensity, turbidity = _turbidity;
+    if (_cachedEnvLight) {
+        sunElev = _cachedEnvLight->sunElevation;
+        sunAz = _cachedEnvLight->sunAzimuth;
+        sunInt = _cachedEnvLight->sunIntensity;
+    }
+
+    // Sun direction: negate dirFromElevAzim (shader marches toward light)
+    {
+        double er = sunElev * M_PI / 180.0, ar = sunAz * M_PI / 180.0;
+        lightDirX = float(-std::cos(er) * std::sin(ar));
+        lightDirY = float(std::sin(er));
+        lightDirZ = float(std::cos(er) * std::cos(ar));
+        float len = std::sqrt(lightDirX*lightDirX + lightDirY*lightDirY + lightDirZ*lightDirZ);
+        if (len > 1e-6f) { lightDirX /= len; lightDirY /= len; lightDirZ /= len; }
+    }
+
+    // Sun color from elevation
+    {
+        double r, g, b;
+        sunColorFromElevation(sunElev, turbidity, r, g, b);
+        float si = float(std::min(sunInt / 5.0, 1.5));
+        lightR = float(r * si); lightG = float(g * si); lightB = float(b * si);
+    }
+
+    // Sky ambient from elevation
+    {
+        double r, g, b;
+        skyColorFromElevation(sunElev, turbidity, r, g, b);
+        ambR = float(r * 0.3); ambG = float(g * 0.3); ambB = float(b * 0.3);
+    }
 
     // Save GL state
     glPushAttrib(GL_ALL_ATTRIB_BITS);
@@ -3830,6 +3875,9 @@ void SpectralRenderIop::_DrawVolumeShaded(ViewerContext* ctx)
     glUniform1f(glGetUniformLocation(_glVolProg, "uTempMult"),
                 _glVolMaxTemp > 0.01f ? 1.f / _glVolMaxTemp : 1.f);
     glUniform1i(glGetUniformLocation(_glVolProg, "uMaxSteps"), 128);
+    glUniform3f(glGetUniformLocation(_glVolProg, "uLightDir"), lightDirX, lightDirY, lightDirZ);
+    glUniform3f(glGetUniformLocation(_glVolProg, "uLightCol"), lightR, lightG, lightB);
+    glUniform3f(glGetUniformLocation(_glVolProg, "uAmbient"), ambR, ambG, ambB);
 
     // Bind textures
     glActiveTexture(GL_TEXTURE0);
