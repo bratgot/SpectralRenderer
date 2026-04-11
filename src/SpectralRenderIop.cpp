@@ -664,6 +664,14 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         Tooltip(f, "GPU ray-marched volume preview in the 3D viewport.\n"
                    "Shows absorption + fire emission with real shading.\n"
                    "Requires temperature/flame grids for fire colour.");
+        static const char* const vpResOpts[] = {
+            "32", "64", "128", "256", nullptr
+        };
+        Enumeration_knob(f, &_vdbViewportRes, vpResOpts, "vdb_viewport_res", "vp res");
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Viewport volume resolution for shaded preview.\n"
+                   "Higher = sharper but slower to load.\n"
+                   "32 = fastest scrub, 256 = near-render quality.");
         Double_knob(f, &_vdbPointDensity, "vdb_point_density", "density");
         ClearFlags(f, Knob::STARTLINE);
         SetRange(f, 0.1, 1.0);
@@ -1089,9 +1097,9 @@ int SpectralRenderIop::knob_changed(Knob* k)
         }
         return 1;
     }
-    if (k->is("vdb_3d_preview") || k->is("vdb_show_points") || k->is("vdb_shaded") || k->is("vdb_point_density") || k->is("vdb_point_size") || k->is("vdb_show_bbox") || k->is("vdb_fast_scrub")) {
+    if (k->is("vdb_3d_preview") || k->is("vdb_show_points") || k->is("vdb_shaded") || k->is("vdb_viewport_res") || k->is("vdb_point_density") || k->is("vdb_point_size") || k->is("vdb_show_bbox") || k->is("vdb_fast_scrub")) {
         _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
-        if (k->is("vdb_fast_scrub")) _vdbLoadedPath.clear();
+        if (k->is("vdb_fast_scrub") || k->is("vdb_viewport_res")) _vdbLoadedPath.clear();
         return 1;
     }
     if (k->is("vdb_cache_clear")) {
@@ -3665,7 +3673,7 @@ void main() {
 
         float d = texture3D(uDensity, uvw).r * uDensityMult;
         float tmp = texture3D(uTemp, uvw).r * uTempMult;
-        if (d < 0.001) continue;
+        if (d < 0.02) continue;
 
         // Fire emission from temperature
         vec3 emit = vec3(0.0);
@@ -3681,23 +3689,24 @@ void main() {
         for (int s = 1; s <= 4; s++) {
             vec3 sp = uvw + lightDir * (float(s) * 0.05);
             if (sp.x >= 0.0 && sp.x <= 1.0 && sp.y >= 0.0 && sp.y <= 1.0 && sp.z >= 0.0 && sp.z <= 1.0)
-                shadowD += texture3D(uDensity, sp).r;
+                shadowD += texture3D(uDensity, sp).r * uDensityMult;
         }
-        float shadow = exp(-shadowD * uDensityMult * 2.0);
+        float shadow = exp(-shadowD * 0.8);
 
-        // Scatter + ambient
-        vec3 scatter = vec3(1.0, 0.95, 0.9) * shadow * 0.8;
-        vec3 ambient = vec3(0.2, 0.25, 0.35);
-        vec3 Li = (scatter + ambient) * d + emit;
+        // In-scattered radiance — balanced with absorption
+        vec3 Li = vec3(0.7, 0.65, 0.6) * shadow * 0.3
+                + vec3(0.08, 0.1, 0.14)
+                + emit;
 
-        float sigma = d * step * 1.5;
+        // Absorption — density controls opacity only
+        float sigma = d * step * 0.6;
         float tr = exp(-sigma);
         color += transmittance * Li * (1.0 - tr);
         transmittance *= tr;
         if (transmittance < 0.01) break;
     }
     float alpha = 1.0 - transmittance;
-    if (alpha < 0.001) discard;
+    if (alpha < 0.005) discard;
     gl_FragColor = vec4(color / max(alpha, 0.001), alpha);
 }
 )";
@@ -3737,8 +3746,19 @@ void SpectralRenderIop::_UploadGLVolTex(const pxr::SpectralVolume* vol)
 {
     if (!vol) return;
     int rX = vol->resX, rY = vol->resY, rZ = vol->resZ;
-    if (rX == _glVolTexResX && rY == _glVolTexResY && rZ == _glVolTexResZ &&
-        _glVolTexFrame == (int)outputContext().frame() && _glVolDensityTex) return;
+    // Always re-upload: data can change between viewport preview and render loads
+
+    // Compute max density for normalization
+    _glVolMaxDensity = 0.001f;
+    _glVolMaxTemp = 0.001f;
+    if (!vol->density.empty()) {
+        for (size_t i = 0; i < vol->density.size(); i++)
+            if (vol->density[i] > _glVolMaxDensity) _glVolMaxDensity = vol->density[i];
+    }
+    if (!vol->temperature.empty()) {
+        for (size_t i = 0; i < vol->temperature.size(); i++)
+            if (vol->temperature[i] > _glVolMaxTemp) _glVolMaxTemp = vol->temperature[i];
+    }
 
     // Density texture
     if (!_glVolDensityTex) glGenTextures(1, &_glVolDensityTex);
@@ -3805,9 +3825,10 @@ void SpectralRenderIop::_DrawVolumeShaded(ViewerContext* ctx)
     // Uniforms (no matrix uniforms needed — GLSL 120 uses gl_ModelViewProjectionMatrix)
     glUniform3f(glGetUniformLocation(_glVolProg, "uBboxMin"), bMin[0], bMin[1], bMin[2]);
     glUniform3f(glGetUniformLocation(_glVolProg, "uBboxMax"), bMax[0], bMax[1], bMax[2]);
-    glUniform1f(glGetUniformLocation(_glVolProg, "uDensityMult"), float(vol->densityMult));
+    // Normalize density to 0-1 range in shader, then apply artistic mult
+    glUniform1f(glGetUniformLocation(_glVolProg, "uDensityMult"), 1.f / _glVolMaxDensity);
     glUniform1f(glGetUniformLocation(_glVolProg, "uTempMult"),
-                _vdbMaxTemp > 0.01f ? 1.f / _vdbMaxTemp : 1.f);
+                _glVolMaxTemp > 0.01f ? 1.f / _glVolMaxTemp : 1.f);
     glUniform1i(glGetUniformLocation(_glVolProg, "uMaxSteps"), 128);
 
     // Bind textures
@@ -4258,7 +4279,8 @@ void SpectralRenderIop::_LoadVDB()
         if (volMerge) {
             _cachedVolMerge = volMerge;
             // Preview res for viewport — full res loaded later in _EnsureFrameRendered
-            int previewMaxRes = 32;
+            static const int vpResLUT[] = {32, 64, 128, 256};
+            int previewMaxRes = vpResLUT[std::min(std::max(_vdbViewportRes, 0), 3)];
             auto entries = volMerge->GetVolumes(int(outputContext().frame()), previewMaxRes);
 
             // Collect SpectralVolumeMaterial ops from VolMerge inputs (in order)
@@ -4335,7 +4357,8 @@ void SpectralRenderIop::_LoadVDB()
             _volumes.clear();
             _cachedVdbReads.clear();
             int renderFrame = int(outputContext().frame());
-            int previewMaxRes = 32;  // preview only — render res loaded in _EnsureFrameRendered
+            static const int vpResLUT2[] = {32, 64, 128, 256};
+            int previewMaxRes = vpResLUT2[std::min(std::max(_vdbViewportRes, 0), 3)];  // viewport res knob
 
             // For each VDBRead, find its GeoTransform by walking from scn input
             struct VDBWithXform { SpectralVDBRead* vdb; Op* chainTop; };

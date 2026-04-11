@@ -199,8 +199,8 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::_LoadFromDisk(const char* fil
 {
     if (!filepath || strlen(filepath) == 0) return nullptr;
 
-    // Preview loads (low res) skip temp/flame for speed
-    bool densityOnly = (maxRes > 0 && maxRes <= 64);
+    // Always load all grids (temp/flame needed for viewport fire shading)
+    bool densityOnly = false;
 
     try {
         auto tStart = std::chrono::high_resolution_clock::now();
@@ -340,29 +340,35 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::_LoadFromDisk(const char* fil
 
         if (densityOnly) {
             // ── FAST PREVIEW PATH ──────────────────────────────────────
-            // Iterate active voxels directly (walks VDB tree efficiently,
-            // skips empty space, no interpolation, no systematic traversal).
-            // Maps VDB index coords → our uniform grid coords.
-            size_t activeCount = densityGrid->activeVoxelCount();
-            int stride = std::max(1, int(activeCount / (totalVoxels * 2)));
-            auto bboxMin_idx = bbox.min();
-            float dimX = std::max(1.f, float(dim.x()));
-            float dimY = std::max(1.f, float(dim.y()));
-            float dimZ = std::max(1.f, float(dim.z()));
-            int count = 0;
-            for (auto iter = densityGrid->cbeginValueOn(); iter; ++iter) {
-                if (count++ % stride != 0) continue;
-                auto coord = iter.getCoord();
-                float u = float(coord.x() - bboxMin_idx.x()) / dimX;
-                float v = float(coord.y() - bboxMin_idx.y()) / dimY;
-                float w = float(coord.z() - bboxMin_idx.z()) / dimZ;
-                int ix = std::max(0, std::min(rX-1, int(u * rX)));
-                int iy = std::max(0, std::min(rY-1, int(v * rY)));
-                int iz = std::max(0, std::min(rZ-1, int(w * rZ)));
-                float val = iter.getValue();
-                // Max-merge: multiple VDB voxels may map to same output cell
-                float& dst = vol->density[iz * rY * rX + iy * rX + ix];
-                if (val > dst) dst = val;
+            // Use copyToDense+downsample for consistent density at all resolutions
+            // (sparse active voxel path was OK for point clouds but bad for ray march)
+            bool isNativeRes = (vol->resX >= int(dim.x()) &&
+                                vol->resY >= int(dim.y()) &&
+                                vol->resZ >= int(dim.z()));
+            if (isNativeRes) {
+                openvdb::tools::Dense<float, openvdb::tools::LayoutXYZ> denseGrid(bbox, vol->density.data());
+                openvdb::tools::copyToDense(*densityGrid, denseGrid);
+            } else {
+                int nX = int(dim.x()), nY = int(dim.y()), nZ = int(dim.z());
+                size_t nativeVoxels = size_t(nX) * nY * nZ;
+                std::vector<float> nativeBuf(nativeVoxels, 0.f);
+                openvdb::tools::Dense<float, openvdb::tools::LayoutXYZ> denseNative(bbox, nativeBuf.data());
+                openvdb::tools::copyToDense(*densityGrid, denseNative);
+                float scaleX = float(nX) / float(rX);
+                float scaleY = float(nY) / float(rY);
+                float scaleZ = float(nZ) / float(rZ);
+                #pragma omp parallel for schedule(dynamic) if(totalVoxels > 10000)
+                for (int iz = 0; iz < rZ; ++iz) {
+                    int sz = std::min(int(iz * scaleZ), nZ - 1);
+                    for (int iy = 0; iy < rY; ++iy) {
+                        int sy = std::min(int(iy * scaleY), nY - 1);
+                        for (int ix = 0; ix < rX; ++ix) {
+                            int sx = std::min(int(ix * scaleX), nX - 1);
+                            vol->density[iz * rY * rX + iy * rX + ix] =
+                                nativeBuf[sz * nY * nX + sy * nX + sx];
+                        }
+                    }
+                }
             }
 
         } else {

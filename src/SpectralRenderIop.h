@@ -265,11 +265,14 @@ private:
 
     // GL volume ray march shader
     bool   _vdbShadedPreview = false;
+    int    _vdbViewportRes = 2;      // 0=32, 1=64, 2=128, 3=256
     GLuint _glVolProg = 0;
     GLuint _glVolDensityTex = 0;
     GLuint _glVolTempTex = 0;
     int    _glVolTexFrame = -1;
     int    _glVolTexResX = 0, _glVolTexResY = 0, _glVolTexResZ = 0;
+    float  _glVolMaxDensity = 0.001f;
+    float  _glVolMaxTemp = 0.001f;
     void   _InitGLVolShader();
     void   _UploadGLVolTex(const pxr::SpectralVolume* vol);
     void   _DrawVolumeShaded(ViewerContext* ctx);
