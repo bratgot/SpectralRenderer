@@ -3617,65 +3617,57 @@ void SpectralRenderIop::build_handles(ViewerContext* ctx)
 // GL Volume Ray March Shader
 // ---------------------------------------------------------------------------
 static const char* kVolVS = R"(
-#version 330
-uniform mat4 uMV;
-uniform mat4 uProj;
-layout(location=0) in vec3 aPos;
-out vec3 vWorldPos;
+#version 120
+varying vec3 vWorldPos;
 void main() {
-    gl_Position = uProj * uMV * vec4(aPos, 1.0);
-    vWorldPos = aPos;
+    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;
+    vWorldPos = gl_Vertex.xyz;
 }
 )";
 
 static const char* kVolFS = R"(
-#version 330
+#version 120
 uniform sampler3D uDensity;
 uniform sampler3D uTemp;
 uniform vec3 uBboxMin;
 uniform vec3 uBboxMax;
-uniform vec3 uCamPos;
 uniform float uDensityMult;
 uniform float uTempMult;
 uniform int uMaxSteps;
-in vec3 vWorldPos;
-out vec4 fragColor;
-
-vec2 boxIntersect(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax) {
-    vec3 inv = 1.0 / rd;
-    vec3 t0 = (bmin - ro) * inv;
-    vec3 t1 = (bmax - ro) * inv;
-    vec3 mn = min(t0, t1);
-    vec3 mx = max(t0, t1);
-    return vec2(max(max(mn.x, mn.y), max(mn.z, 0.0)),
-                min(min(mx.x, mx.y), mx.z));
-}
+varying vec3 vWorldPos;
 
 void main() {
-    vec3 rd = normalize(vWorldPos - uCamPos);
-    vec2 tb = boxIntersect(uCamPos, rd, uBboxMin, uBboxMax);
-    if (tb.x >= tb.y) discard;
-
+    vec3 camPos = (gl_ModelViewMatrixInverse * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+    vec3 rd = normalize(vWorldPos - camPos);
     vec3 size = uBboxMax - uBboxMin;
     float diag = length(size);
-    float step = diag / float(uMaxSteps);
+    float step = diag / 128.0;
 
-    vec4 acc = vec4(0.0);
+    vec3 inv = 1.0 / rd;
+    vec3 t0 = (uBboxMin - camPos) * inv;
+    vec3 t1 = (uBboxMax - camPos) * inv;
+    vec3 mn = min(t0, t1);
+    vec3 mx = max(t0, t1);
+    float tNear = max(max(mn.x, mn.y), max(mn.z, 0.0));
+    float tFar  = min(min(mx.x, mx.y), mx.z);
+    if (tNear >= tFar) discard;
+
+    vec3 lightDir = normalize(vec3(0.3, 1.0, 0.2));
+
     float transmittance = 1.0;
-    for (int i = 0; i < uMaxSteps; i++) {
-        float t = tb.x + (float(i) + 0.5) * step;
-        if (t > tb.y) break;
+    vec3 color = vec3(0.0);
+    for (int i = 0; i < 128; i++) {
+        float t = tNear + float(i) * step;
+        if (t > tFar) break;
 
-        vec3 p = uCamPos + rd * t;
+        vec3 p = camPos + rd * t;
         vec3 uvw = (p - uBboxMin) / size;
-        if (any(lessThan(uvw, vec3(0))) || any(greaterThan(uvw, vec3(1)))) continue;
 
-        float d = texture(uDensity, uvw).r * uDensityMult;
-        float tmp = texture(uTemp, uvw).r * uTempMult;
-
+        float d = texture3D(uDensity, uvw).r * uDensityMult;
+        float tmp = texture3D(uTemp, uvw).r * uTempMult;
         if (d < 0.001) continue;
 
-        // Emission from temperature (blackbody approx)
+        // Fire emission from temperature
         vec3 emit = vec3(0.0);
         if (tmp > 0.01) {
             emit.r = min(1.0, tmp * 3.0);
@@ -3684,23 +3676,29 @@ void main() {
             emit *= tmp * 2.0;
         }
 
-        // Ambient scatter: density lit by ambient light (warm grey)
-        vec3 ambient = vec3(0.9, 0.85, 0.8) * d * 0.15;
+        // Shadow: 4 samples along light direction
+        float shadowD = 0.0;
+        for (int s = 1; s <= 4; s++) {
+            vec3 sp = uvw + lightDir * (float(s) * 0.05);
+            if (sp.x >= 0.0 && sp.x <= 1.0 && sp.y >= 0.0 && sp.y <= 1.0 && sp.z >= 0.0 && sp.z <= 1.0)
+                shadowD += texture3D(uDensity, sp).r;
+        }
+        float shadow = exp(-shadowD * uDensityMult * 2.0);
 
-        // Beer-Lambert absorption
-        float sigma = d * step * 3.0;
+        // Scatter + ambient
+        vec3 scatter = vec3(1.0, 0.95, 0.9) * shadow * 0.8;
+        vec3 ambient = vec3(0.2, 0.25, 0.35);
+        vec3 Li = (scatter + ambient) * d + emit;
+
+        float sigma = d * step * 1.5;
         float tr = exp(-sigma);
-
-        acc.rgb += transmittance * (emit + ambient) * (1.0 - tr);
+        color += transmittance * Li * (1.0 - tr);
         transmittance *= tr;
-
         if (transmittance < 0.01) break;
     }
-    acc.a = 1.0 - transmittance;
-    if (acc.a < 0.001) discard;
-    // Output non-premultiplied
-    acc.rgb /= max(acc.a, 0.001);
-    fragColor = acc;
+    float alpha = 1.0 - transmittance;
+    if (alpha < 0.001) discard;
+    gl_FragColor = vec4(color / max(alpha, 0.001), alpha);
 }
 )";
 
@@ -3789,22 +3787,8 @@ void SpectralRenderIop::_DrawVolumeShaded(ViewerContext* ctx)
     _UploadGLVolTex(vol.get());
     if (!_glVolDensityTex) { fprintf(stderr, "SpectralRender: GL vol texture upload failed\n"); return; }
 
-    // Get current GL matrices (column-major)
-    float mv[16], proj[16];
-    glGetFloatv(GL_MODELVIEW_MATRIX, mv);
-    glGetFloatv(GL_PROJECTION_MATRIX, proj);
-
-    // Camera position from inverse modelview (column-major)
-    // cam = -R^T * t where columns of R are mv[0..2], mv[4..6], mv[8..10]
-    float camX = -(mv[0]*mv[12] + mv[4]*mv[13] + mv[8]*mv[14]);
-    float camY = -(mv[1]*mv[12] + mv[5]*mv[13] + mv[9]*mv[14]);
-    float camZ = -(mv[2]*mv[12] + mv[6]*mv[13] + mv[10]*mv[14]);
-
     pxr::GfVec3f bMin = vol->GetBboxMin();
     pxr::GfVec3f bMax = vol->GetBboxMax();
-
-    fprintf(stderr, "SpectralRender: shaded vol cam=(%.1f,%.1f,%.1f) bbox=(%.1f,%.1f,%.1f)-(%.1f,%.1f,%.1f)\n",
-            camX, camY, camZ, bMin[0], bMin[1], bMin[2], bMax[0], bMax[1], bMax[2]);
 
     // Save GL state
     glPushAttrib(GL_ALL_ATTRIB_BITS);
@@ -3814,16 +3798,13 @@ void SpectralRenderIop::_DrawVolumeShaded(ViewerContext* ctx)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
-    glCullFace(GL_BACK);  // render front faces only
+    glCullFace(GL_BACK);
 
     glUseProgram(_glVolProg);
 
-    // Set uniforms — pass MV and Proj separately (GL_FALSE = column-major, matches glGetFloatv)
-    glUniformMatrix4fv(glGetUniformLocation(_glVolProg, "uMV"), 1, GL_FALSE, mv);
-    glUniformMatrix4fv(glGetUniformLocation(_glVolProg, "uProj"), 1, GL_FALSE, proj);
+    // Uniforms (no matrix uniforms needed — GLSL 120 uses gl_ModelViewProjectionMatrix)
     glUniform3f(glGetUniformLocation(_glVolProg, "uBboxMin"), bMin[0], bMin[1], bMin[2]);
     glUniform3f(glGetUniformLocation(_glVolProg, "uBboxMax"), bMax[0], bMax[1], bMax[2]);
-    glUniform3f(glGetUniformLocation(_glVolProg, "uCamPos"), camX, camY, camZ);
     glUniform1f(glGetUniformLocation(_glVolProg, "uDensityMult"), float(vol->densityMult));
     glUniform1f(glGetUniformLocation(_glVolProg, "uTempMult"),
                 _vdbMaxTemp > 0.01f ? 1.f / _vdbMaxTemp : 1.f);
@@ -3837,27 +3818,29 @@ void SpectralRenderIop::_DrawVolumeShaded(ViewerContext* ctx)
     glBindTexture(GL_TEXTURE_3D, _glVolTempTex);
     glUniform1i(glGetUniformLocation(_glVolProg, "uTemp"), 1);
 
-    // Draw bbox cube (12 triangles, 36 vertices)
+    // Draw bbox cube with glBegin/glEnd (compatible with Nuke's GL context)
     float x0=bMin[0], y0=bMin[1], z0=bMin[2];
     float x1=bMax[0], y1=bMax[1], z1=bMax[2];
-    float verts[] = {
-        // Front
-        x0,y0,z1, x1,y0,z1, x1,y1,z1,  x0,y0,z1, x1,y1,z1, x0,y1,z1,
-        // Back
-        x1,y0,z0, x0,y0,z0, x0,y1,z0,  x1,y0,z0, x0,y1,z0, x1,y1,z0,
-        // Left
-        x0,y0,z0, x0,y0,z1, x0,y1,z1,  x0,y0,z0, x0,y1,z1, x0,y1,z0,
-        // Right
-        x1,y0,z1, x1,y0,z0, x1,y1,z0,  x1,y0,z1, x1,y1,z0, x1,y1,z1,
-        // Top
-        x0,y1,z1, x1,y1,z1, x1,y1,z0,  x0,y1,z1, x1,y1,z0, x0,y1,z0,
-        // Bottom
-        x0,y0,z0, x1,y0,z0, x1,y0,z1,  x0,y0,z0, x1,y0,z1, x0,y0,z1,
-    };
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, verts);
-    glDrawArrays(GL_TRIANGLES, 0, 36);
-    glDisableVertexAttribArray(0);
+    glBegin(GL_TRIANGLES);
+    // Front (+Z)
+    glVertex3f(x0,y0,z1); glVertex3f(x1,y0,z1); glVertex3f(x1,y1,z1);
+    glVertex3f(x0,y0,z1); glVertex3f(x1,y1,z1); glVertex3f(x0,y1,z1);
+    // Back (-Z)
+    glVertex3f(x1,y0,z0); glVertex3f(x0,y0,z0); glVertex3f(x0,y1,z0);
+    glVertex3f(x1,y0,z0); glVertex3f(x0,y1,z0); glVertex3f(x1,y1,z0);
+    // Left (-X)
+    glVertex3f(x0,y0,z0); glVertex3f(x0,y0,z1); glVertex3f(x0,y1,z1);
+    glVertex3f(x0,y0,z0); glVertex3f(x0,y1,z1); glVertex3f(x0,y1,z0);
+    // Right (+X)
+    glVertex3f(x1,y0,z1); glVertex3f(x1,y0,z0); glVertex3f(x1,y1,z0);
+    glVertex3f(x1,y0,z1); glVertex3f(x1,y1,z0); glVertex3f(x1,y1,z1);
+    // Top (+Y)
+    glVertex3f(x0,y1,z1); glVertex3f(x1,y1,z1); glVertex3f(x1,y1,z0);
+    glVertex3f(x0,y1,z1); glVertex3f(x1,y1,z0); glVertex3f(x0,y1,z0);
+    // Bottom (-Y)
+    glVertex3f(x0,y0,z0); glVertex3f(x1,y0,z0); glVertex3f(x1,y0,z1);
+    glVertex3f(x0,y0,z0); glVertex3f(x1,y0,z1); glVertex3f(x0,y0,z1);
+    glEnd();
 
     // Restore
     glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_3D, 0);
@@ -4033,8 +4016,7 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
     }
 
     // ─── Shaded volume preview (GL ray march) ──────────────────────
-    if (_vdbShadedPreview && !_volumes.empty()) {
-        fprintf(stderr, "SpectralRender: shaded preview enabled, %d volumes\n", (int)_volumes.size());
+    if (_vdbShadedPreview && !_volumes.empty() && _volumes[0] && _volumes[0]->IsValid()) {
         _DrawVolumeShaded(ctx);
     }
 
