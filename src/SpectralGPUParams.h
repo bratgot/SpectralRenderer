@@ -160,6 +160,7 @@ struct LaunchParams {
     OptixTraversableHandle traversable;
 
     int                spp;
+    int                volumeSpp;     // 0 = use spp, else separate vol samples
     int                maxBounces;
     int                colorSpace;   // 0=sRGB, 1=ACEScg, 2=ACES2065
     int                previewMode;  // 1=scrub preview (no shadows, 2× step)

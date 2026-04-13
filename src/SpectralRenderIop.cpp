@@ -211,10 +211,15 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                    "3/4 = three-quarter resolution<br>"
                    "full = full output resolution");
         Int_knob(f, &_samples, "spp", "samples"); SetRange(f, 1, 256);
-        Tooltip(f, "Number of spectral samples per pixel.<br>"
+        Tooltip(f, "Number of spectral samples per pixel for geometry.<br>"
                    "Higher values reduce noise. Each sample<br>"
                    "traces one wavelength through the scene.<br>"
                    "1 = normal-shaded preview, 16+ = spectral.");
+        Int_knob(f, &_volumeSpp, "vol_spp", "vol samples"); SetRange(f, 1, 256);
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Samples per pixel for volume rendering.<br>"
+                   "Volumes need fewer samples than geometry (4-8 typical).<br>"
+                   "0 = use geometry spp value.");
         Int_knob(f, &_maxBounces, "max_bounces", "max bounces"); SetRange(f, 1, 16);
         Tooltip(f, "Maximum ray bounce depth for all paths.<br>"
                    "1 = direct lighting only<br>"
@@ -269,6 +274,11 @@ void SpectralRenderIop::knobs(Knob_Callback f)
 
     BeginGroup(f, "lighting_grp", "Lighting");
     {
+        Bool_knob(f, &_useBuiltinLight, "use_builtin_light", "built-in light");
+        Tooltip(f, "Enable the built-in sun/sky light.\n"
+                   "Uses the sky preset and sun direction from the hidden Lighting tab.\n"
+                   "Automatically disabled when SpectralEnvLight is connected.\n"
+                   "Disable to use only scene graph lights (GeoDiskLight etc).");
         Float_knob(f, &_lightIntensity, "light_intensity", "intensity multiplier");
         SetRange(f, 0.01f, 10.f);
         Tooltip(f, "Global multiplier applied to all light intensities.<br>"
@@ -3609,11 +3619,12 @@ void SpectralRenderIop::build_handles(ViewerContext* ctx)
     Op* scn = (inputs() > 1) ? input(1) : nullptr;
     if (scn) scn->build_handles(ctx);
 
-    // Local GL preview (point cloud + bbox + env light dome)
-    if (_vdb3dPreview) {
-        bool hasVolume = !_volumes.empty() || (_volume && _volume->HasBbox());
-        bool hasLights = _cachedEnvLight || _cachedStudioLight;
-        if (hasVolume || hasLights) add_draw_handle(ctx);
+    // Local GL preview (point cloud + bbox + env light dome + geometry wireframe)
+    {
+        bool hasVolume = _vdb3dPreview && (!_volumes.empty() || (_volume && _volume->HasBbox()));
+        bool hasLights = _vdb3dPreview && (_cachedEnvLight || _cachedStudioLight);
+        bool hasGeo = _scene && _scene->TotalTriangles() > 0;
+        if (hasVolume || hasLights || hasGeo) add_draw_handle(ctx);
     }
 
     // Camera handles
@@ -3687,14 +3698,14 @@ void main() {
             emit *= tmp * 2.0;
         }
 
-        // Shadow: 4 samples along light direction
+        // Shadow: 6 samples along light direction (longer reach)
         float shadowD = 0.0;
-        for (int s = 1; s <= 4; s++) {
-            vec3 sp = uvw + lightDir * (float(s) * 0.05);
+        for (int s = 1; s <= 6; s++) {
+            vec3 sp = uvw + lightDir * (float(s) * 0.04);
             if (sp.x >= 0.0 && sp.x <= 1.0 && sp.y >= 0.0 && sp.y <= 1.0 && sp.z >= 0.0 && sp.z <= 1.0)
                 shadowD += texture3D(uDensity, sp).r * uDensityMult;
         }
-        float shadow = exp(-shadowD * 0.8);
+        float shadow = exp(-shadowD * 1.2);
 
         // In-scattered radiance from scene lights
         vec3 Li = uLightCol * shadow * 0.3
@@ -3711,6 +3722,164 @@ void main() {
     float alpha = 1.0 - transmittance;
     if (alpha < 0.005) discard;
     gl_FragColor = vec4(color / max(alpha, 0.001), alpha);
+}
+)";
+
+// Ground shadow shader — marches through volume from ground toward light
+static const char* kShadowVS = R"(
+#version 120
+varying vec3 vWorldPos;
+void main() {
+    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;
+    vWorldPos = gl_Vertex.xyz;
+}
+)";
+
+static const char* kShadowFS = R"(
+#version 120
+uniform sampler3D uDensity;
+uniform vec3 uBboxMin;
+uniform vec3 uBboxMax;
+uniform float uDensityMult;
+uniform vec3 uLightDir;
+varying vec3 vWorldPos;
+
+void main() {
+    // Ray from ground point toward light — intersect volume bbox
+    vec3 size = uBboxMax - uBboxMin;
+    vec3 ld = normalize(uLightDir);
+    vec3 inv = 1.0 / ld;
+    vec3 t0 = (uBboxMin - vWorldPos) * inv;
+    vec3 t1 = (uBboxMax - vWorldPos) * inv;
+    vec3 mn = min(t0, t1);
+    vec3 mx = max(t0, t1);
+    float tNear = max(max(mn.x, mn.y), max(mn.z, 0.0));
+    float tFar  = min(min(mx.x, mx.y), mx.z);
+    if (tNear >= tFar) discard;
+
+    float totalD = 0.0;
+    float step = (tFar - tNear) / 24.0;
+    for (int i = 0; i < 24; i++) {
+        float t = tNear + float(i) * step;
+        vec3 p = vWorldPos + ld * t;
+        vec3 uvw = (p - uBboxMin) / size;
+        totalD += texture3D(uDensity, uvw).r * uDensityMult;
+    }
+    float shadow = 1.0 - exp(-totalD * 0.4);
+    if (shadow < 0.02) discard;
+    gl_FragColor = vec4(0.0, 0.0, 0.0, shadow * 0.35);
+}
+)";
+
+// Geometry shading shader — flat-shaded triangles with volume shadow
+static const char* kGeoVS = R"(
+#version 120
+varying vec3 vWorldPos;
+varying vec3 vNormal;
+void main() {
+    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;
+    vWorldPos = gl_Vertex.xyz;
+    vNormal = gl_Normal;
+}
+)";
+
+static const char* kGeoFS = R"(
+#version 120
+uniform sampler3D uDensity;
+uniform sampler2D uShadowMap;
+uniform vec3 uBboxMin;
+uniform vec3 uBboxMax;
+uniform float uDensityMult;
+uniform vec3 uLightDir;
+uniform vec3 uLightCol;
+uniform vec3 uAmbient;
+uniform vec3 uMatColor;
+uniform float uHasVolume;
+uniform float uHasShadowMap;
+uniform mat4 uLightVP;
+varying vec3 vWorldPos;
+varying vec3 vNormal;
+
+void main() {
+    vec3 N = normalize(vNormal);
+    vec3 camDir = normalize((gl_ModelViewMatrixInverse * vec4(0.0,0.0,0.0,1.0)).xyz - vWorldPos);
+    if (dot(N, camDir) < 0.0) N = -N;
+
+    float NdL = max(dot(N, normalize(uLightDir)), 0.0);
+
+    // Geometry shadow map
+    float geoShadow = 1.0;
+    if (uHasShadowMap > 0.5) {
+        vec4 lightClip = uLightVP * vec4(vWorldPos, 1.0);
+        vec3 lightNDC = lightClip.xyz / lightClip.w;
+        vec2 shadowUV = lightNDC.xy * 0.5 + 0.5;
+        float fragDepth = lightNDC.z * 0.5 + 0.5;
+
+        if (shadowUV.x >= 0.0 && shadowUV.x <= 1.0 && shadowUV.y >= 0.0 && shadowUV.y <= 1.0) {
+            // PCF 3x3 for soft edges
+            float shadow = 0.0;
+            float texelSize = 1.0 / 1024.0;
+            for (int y = -1; y <= 1; y++) {
+                for (int x = -1; x <= 1; x++) {
+                    float mapDepth = texture2D(uShadowMap, shadowUV + vec2(float(x), float(y)) * texelSize).r;
+                    shadow += (fragDepth - 0.002 > mapDepth) ? 0.0 : 1.0;
+                }
+            }
+            geoShadow = shadow / 9.0;
+        }
+    }
+
+    // Volume shadow on geometry
+    float volShadow = 1.0;
+    if (uHasVolume > 0.5) {
+        vec3 size = uBboxMax - uBboxMin;
+        vec3 ld = normalize(uLightDir);
+        vec3 inv = vec3(
+            abs(ld.x) > 0.0001 ? 1.0/ld.x : 1e6,
+            abs(ld.y) > 0.0001 ? 1.0/ld.y : 1e6,
+            abs(ld.z) > 0.0001 ? 1.0/ld.z : 1e6
+        );
+        vec3 t0 = (uBboxMin - vWorldPos) * inv;
+        vec3 t1 = (uBboxMax - vWorldPos) * inv;
+        vec3 mn = min(t0, t1);
+        vec3 mx = max(t0, t1);
+        float tNear = max(max(mn.x, mn.y), mn.z);
+        float tFar  = min(min(mx.x, mx.y), mx.z);
+        tNear = max(tNear, 0.001);
+        if (tNear < tFar && tFar > 0.0) {
+            float totalD = 0.0;
+            float marchStep = (tFar - tNear) / 16.0;
+            for (int i = 0; i < 16; i++) {
+                float t = tNear + (float(i) + 0.5) * marchStep;
+                vec3 p = vWorldPos + ld * t;
+                vec3 uvw = (p - uBboxMin) / size;
+                if (uvw.x >= 0.0 && uvw.x <= 1.0 && uvw.y >= 0.0 && uvw.y <= 1.0 && uvw.z >= 0.0 && uvw.z <= 1.0)
+                    totalD += texture3D(uDensity, uvw).r * uDensityMult;
+            }
+            volShadow = exp(-totalD * 3.0);
+        }
+    }
+
+    float shadow = min(geoShadow, volShadow);
+    vec3 diffuse = uMatColor * uLightCol * NdL * shadow;
+    vec3 ambient = uMatColor * uAmbient * (0.5 + 0.5 * shadow);
+    gl_FragColor = vec4(diffuse + ambient, 1.0);
+}
+)";
+
+// Shadow map depth pass — renders geometry from light POV
+static const char* kShadowDepthVS = R"(
+#version 120
+uniform mat4 uLightVP;
+void main() {
+    gl_Position = uLightVP * gl_Vertex;
+}
+)";
+
+static const char* kShadowDepthFS = R"(
+#version 120
+void main() {
+    // depth is written automatically
 }
 )";
 
@@ -3742,6 +3911,83 @@ void SpectralRenderIop::_InitGLVolShader()
         char log[512]; glGetProgramInfoLog(_glVolProg, 512, nullptr, log);
         fprintf(stderr, "SpectralRender: GL link error: %s\n", log);
         glDeleteProgram(_glVolProg); _glVolProg = 0;
+    }
+
+    // Shadow shader
+    if (!_glShadowProg) {
+        GLuint svs = _CompileShader(GL_VERTEX_SHADER, kShadowVS);
+        GLuint sfs = _CompileShader(GL_FRAGMENT_SHADER, kShadowFS);
+        if (svs && sfs) {
+            _glShadowProg = glCreateProgram();
+            glAttachShader(_glShadowProg, svs); glAttachShader(_glShadowProg, sfs);
+            glLinkProgram(_glShadowProg);
+            glDeleteShader(svs); glDeleteShader(sfs);
+            GLint sok; glGetProgramiv(_glShadowProg, GL_LINK_STATUS, &sok);
+            if (!sok) { glDeleteProgram(_glShadowProg); _glShadowProg = 0; }
+        } else {
+            if (svs) glDeleteShader(svs); if (sfs) glDeleteShader(sfs);
+        }
+    }
+
+    // Geometry shading shader
+    if (!_glGeoProg) {
+        GLuint gvs = _CompileShader(GL_VERTEX_SHADER, kGeoVS);
+        GLuint gfs = _CompileShader(GL_FRAGMENT_SHADER, kGeoFS);
+        if (gvs && gfs) {
+            _glGeoProg = glCreateProgram();
+            glAttachShader(_glGeoProg, gvs); glAttachShader(_glGeoProg, gfs);
+            glLinkProgram(_glGeoProg);
+            glDeleteShader(gvs); glDeleteShader(gfs);
+            GLint gok; glGetProgramiv(_glGeoProg, GL_LINK_STATUS, &gok);
+            if (!gok) { glDeleteProgram(_glGeoProg); _glGeoProg = 0; }
+        } else {
+            if (gvs) glDeleteShader(gvs); if (gfs) glDeleteShader(gfs);
+        }
+    }
+
+    // Shadow map depth program
+    if (!_glShadowDepthProg) {
+        GLuint dvs = _CompileShader(GL_VERTEX_SHADER, kShadowDepthVS);
+        GLuint dfs = _CompileShader(GL_FRAGMENT_SHADER, kShadowDepthFS);
+        if (dvs && dfs) {
+            _glShadowDepthProg = glCreateProgram();
+            glAttachShader(_glShadowDepthProg, dvs); glAttachShader(_glShadowDepthProg, dfs);
+            glLinkProgram(_glShadowDepthProg);
+            glDeleteShader(dvs); glDeleteShader(dfs);
+            GLint dok; glGetProgramiv(_glShadowDepthProg, GL_LINK_STATUS, &dok);
+            if (!dok) { glDeleteProgram(_glShadowDepthProg); _glShadowDepthProg = 0; }
+        } else {
+            if (dvs) glDeleteShader(dvs); if (dfs) glDeleteShader(dfs);
+        }
+    }
+
+    // Shadow map FBO + depth texture
+    if (!_glShadowFBO && _glShadowDepthProg) {
+        glGenTextures(1, &_glShadowDepthTex);
+        glBindTexture(GL_TEXTURE_2D, _glShadowDepthTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, kShadowMapSize, kShadowMapSize,
+                     0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+        float borderColor[] = {1.f, 1.f, 1.f, 1.f};
+        glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+
+        glGenFramebuffers(1, &_glShadowFBO);
+        glBindFramebuffer(GL_FRAMEBUFFER, _glShadowFBO);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, _glShadowDepthTex, 0);
+        glDrawBuffer(GL_NONE);
+        glReadBuffer(GL_NONE);
+        GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (status != GL_FRAMEBUFFER_COMPLETE) {
+            fprintf(stderr, "SpectralRender: shadow FBO incomplete: 0x%x\n", status);
+            glDeleteFramebuffers(1, &_glShadowFBO); _glShadowFBO = 0;
+            glDeleteTextures(1, &_glShadowDepthTex); _glShadowDepthTex = 0;
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
 }
 
@@ -3818,41 +4064,44 @@ void SpectralRenderIop::_DrawVolumeShaded(ViewerContext* ctx)
     pxr::GfVec3f bMax = vol->GetBboxMax();
 
     // Compute light direction and color from scene lights
-    float lightDirX = 0.f, lightDirY = 1.f, lightDirZ = 0.f;  // default: straight up
-    float lightR = 1.f, lightG = 0.95f, lightB = 0.9f;
-    float ambR = 0.15f, ambG = 0.2f, ambB = 0.3f;
+    float lightDirX = 0.f, lightDirY = 1.f, lightDirZ = 0.f;
+    float lightR = 0.f, lightG = 0.f, lightB = 0.f;
+    float ambR = 0.05f, ambG = 0.06f, ambB = 0.08f;
 
-    double sunElev = _sunElevation, sunAz = _sunAzimuth;
-    double sunInt = _sunIntensity, turbidity = _turbidity;
-    if (_cachedEnvLight) {
-        sunElev = _cachedEnvLight->sunElevation;
-        sunAz = _cachedEnvLight->sunAzimuth;
-        sunInt = _cachedEnvLight->sunIntensity;
-    }
+    bool vpHasLight = _cachedEnvLight || _useBuiltinLight;
+    if (vpHasLight) {
+        double sunElev = _sunElevation, sunAz = _sunAzimuth;
+        double sunInt = _sunIntensity, turbidity = _turbidity;
+        if (_cachedEnvLight) {
+            sunElev = _cachedEnvLight->sunElevation;
+            sunAz = _cachedEnvLight->sunAzimuth;
+            sunInt = _cachedEnvLight->sunIntensity;
+        }
 
-    // Sun direction: negate dirFromElevAzim (shader marches toward light)
-    {
-        double er = sunElev * M_PI / 180.0, ar = sunAz * M_PI / 180.0;
-        lightDirX = float(-std::cos(er) * std::sin(ar));
-        lightDirY = float(std::sin(er));
-        lightDirZ = float(std::cos(er) * std::cos(ar));
-        float len = std::sqrt(lightDirX*lightDirX + lightDirY*lightDirY + lightDirZ*lightDirZ);
-        if (len > 1e-6f) { lightDirX /= len; lightDirY /= len; lightDirZ /= len; }
-    }
+        // Sun direction: negate dirFromElevAzim (shader marches toward light)
+        {
+            double er = sunElev * M_PI / 180.0, ar = sunAz * M_PI / 180.0;
+            lightDirX = float(-std::cos(er) * std::sin(ar));
+            lightDirY = float(std::sin(er));
+            lightDirZ = float(std::cos(er) * std::cos(ar));
+            float len = std::sqrt(lightDirX*lightDirX + lightDirY*lightDirY + lightDirZ*lightDirZ);
+            if (len > 1e-6f) { lightDirX /= len; lightDirY /= len; lightDirZ /= len; }
+        }
 
-    // Sun color from elevation
-    {
-        double r, g, b;
-        sunColorFromElevation(sunElev, turbidity, r, g, b);
-        float si = float(std::min(sunInt / 5.0, 1.5));
-        lightR = float(r * si); lightG = float(g * si); lightB = float(b * si);
-    }
+        // Sun color from elevation
+        {
+            double r, g, b;
+            sunColorFromElevation(sunElev, turbidity, r, g, b);
+            float si = float(std::min(sunInt / 5.0, 1.5));
+            lightR = float(r * si); lightG = float(g * si); lightB = float(b * si);
+        }
 
-    // Sky ambient from elevation
-    {
-        double r, g, b;
-        skyColorFromElevation(sunElev, turbidity, r, g, b);
-        ambR = float(r * 0.3); ambG = float(g * 0.3); ambB = float(b * 0.3);
+        // Sky ambient from elevation
+        {
+            double r, g, b;
+            skyColorFromElevation(sunElev, turbidity, r, g, b);
+            ambR = float(r * 0.3); ambG = float(g * 0.3); ambB = float(b * 0.3);
+        }
     }
 
     // Save GL state
@@ -4202,6 +4451,215 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
             thinCone(kx,ky,kz,_cachedStudioLight->keyColor[0],_cachedStudioLight->keyColor[1],_cachedStudioLight->keyColor[2],0.06f*m);
             thinCone(fx,fy,fz,_cachedStudioLight->fillColor[0],_cachedStudioLight->fillColor[1],_cachedStudioLight->fillColor[2],0.03f*m);
             thinCone(rx,ry,rz,_cachedStudioLight->rimColor[0],_cachedStudioLight->rimColor[1],_cachedStudioLight->rimColor[2],0.03f*m);
+        }
+    }
+
+    // ─── Geometry shading (loaded meshes from USD stage) ──────────────────
+    if (_scene && _scene->TotalTriangles() > 0) {
+        _InitGLVolShader();
+
+        // Ensure volume texture is uploaded for shadow casting (even if shaded vol preview is off)
+        if (!_volumes.empty() && _volumes[0] && _volumes[0]->IsValid() && !_glVolDensityTex) {
+            _UploadGLVolTex(_volumes[0].get());
+        }
+
+        if (_glGeoProg) {
+            glPushAttrib(GL_ALL_ATTRIB_BITS);
+            GLint prevProg; glGetIntegerv(GL_CURRENT_PROGRAM, &prevProg);
+
+            glEnable(GL_DEPTH_TEST);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+            glUseProgram(_glGeoProg);
+
+            // Light uniforms (reuse viewport light computation from _DrawVolumeShaded context)
+            float gLightDirX = 0.f, gLightDirY = 1.f, gLightDirZ = 0.f;
+            float gLightR = 0.7f, gLightG = 0.65f, gLightB = 0.6f;
+            float gAmbR = 0.15f, gAmbG = 0.18f, gAmbB = 0.22f;
+            bool gHasLight = _cachedEnvLight || _useBuiltinLight;
+            if (gHasLight) {
+                double sunElev = _cachedEnvLight ? _cachedEnvLight->sunElevation : _sunElevation;
+                double sunAz = _cachedEnvLight ? _cachedEnvLight->sunAzimuth : _sunAzimuth;
+                double sunInt = _cachedEnvLight ? _cachedEnvLight->sunIntensity : _sunIntensity;
+                double turbidity = _turbidity;
+                double er = sunElev * M_PI / 180.0, ar = sunAz * M_PI / 180.0;
+                gLightDirX = float(-std::cos(er) * std::sin(ar));
+                gLightDirY = float(std::sin(er));
+                gLightDirZ = float(std::cos(er) * std::cos(ar));
+                float len = std::sqrt(gLightDirX*gLightDirX + gLightDirY*gLightDirY + gLightDirZ*gLightDirZ);
+                if (len > 1e-6f) { gLightDirX /= len; gLightDirY /= len; gLightDirZ /= len; }
+                double r, g, b;
+                sunColorFromElevation(sunElev, turbidity, r, g, b);
+                float si = float(std::min(sunInt / 5.0, 1.5));
+                gLightR = float(r * si); gLightG = float(g * si); gLightB = float(b * si);
+                skyColorFromElevation(sunElev, turbidity, r, g, b);
+                gAmbR = float(r * 0.3); gAmbG = float(g * 0.3); gAmbB = float(b * 0.3);
+            }
+
+            glUniform3f(glGetUniformLocation(_glGeoProg, "uLightDir"), gLightDirX, gLightDirY, gLightDirZ);
+            glUniform3f(glGetUniformLocation(_glGeoProg, "uLightCol"), gLightR, gLightG, gLightB);
+            glUniform3f(glGetUniformLocation(_glGeoProg, "uAmbient"), gAmbR, gAmbG, gAmbB);
+
+            // ─── Shadow map pass: render geometry from light POV ───
+            float lightVP[16] = {};
+            bool hasShadowMap = false;
+            if (_glShadowFBO && _glShadowDepthProg && _glShadowDepthTex && gHasLight) {
+                // Compute scene bounds from all meshes
+                float scnMin[3] = {1e30f, 1e30f, 1e30f};
+                float scnMax[3] = {-1e30f, -1e30f, -1e30f};
+                for (const auto& kv : _scene->GetMeshes()) {
+                    for (const auto& tri : kv.second.triangles) {
+                        for (int a = 0; a < 3; a++) {
+                            scnMin[a] = std::min({scnMin[a], tri.v0[a], tri.v1[a], tri.v2[a]});
+                            scnMax[a] = std::max({scnMax[a], tri.v0[a], tri.v1[a], tri.v2[a]});
+                        }
+                    }
+                }
+                // Include volume bbox
+                if (!_volumes.empty() && _volumes[0]) {
+                    auto vMin = _volumes[0]->GetBboxMin();
+                    auto vMax = _volumes[0]->GetBboxMax();
+                    for (int a = 0; a < 3; a++) {
+                        scnMin[a] = std::min(scnMin[a], vMin[a]);
+                        scnMax[a] = std::max(scnMax[a], vMax[a]);
+                    }
+                }
+                float cx = (scnMin[0]+scnMax[0])*0.5f, cy = (scnMin[1]+scnMax[1])*0.5f, cz = (scnMin[2]+scnMax[2])*0.5f;
+                float extent = 0.f;
+                for (int a = 0; a < 3; a++) extent = std::max(extent, scnMax[a] - scnMin[a]);
+                extent *= 0.6f;
+
+                // Light view: look from far away along light direction toward scene center
+                float lx = cx + gLightDirX * extent * 2.f;
+                float ly = cy + gLightDirY * extent * 2.f;
+                float lz = cz + gLightDirZ * extent * 2.f;
+
+                // Build light view matrix (lookAt)
+                float fwd[3] = {cx-lx, cy-ly, cz-lz};
+                float fLen = std::sqrt(fwd[0]*fwd[0]+fwd[1]*fwd[1]+fwd[2]*fwd[2]);
+                if (fLen > 1e-6f) { fwd[0]/=fLen; fwd[1]/=fLen; fwd[2]/=fLen; }
+                float up[3] = {0,1,0};
+                if (std::abs(fwd[1]) > 0.99f) { up[0]=1; up[1]=0; up[2]=0; }
+                float right[3] = {fwd[1]*up[2]-fwd[2]*up[1], fwd[2]*up[0]-fwd[0]*up[2], fwd[0]*up[1]-fwd[1]*up[0]};
+                float rLen = std::sqrt(right[0]*right[0]+right[1]*right[1]+right[2]*right[2]);
+                if (rLen > 1e-6f) { right[0]/=rLen; right[1]/=rLen; right[2]/=rLen; }
+                float up2[3] = {right[1]*fwd[2]-right[2]*fwd[1], right[2]*fwd[0]-right[0]*fwd[2], right[0]*fwd[1]-right[1]*fwd[0]};
+
+                // View matrix (column-major for GL)
+                float view[16] = {
+                    right[0], up2[0], -fwd[0], 0,
+                    right[1], up2[1], -fwd[1], 0,
+                    right[2], up2[2], -fwd[2], 0,
+                    -(right[0]*lx+right[1]*ly+right[2]*lz),
+                    -(up2[0]*lx+up2[1]*ly+up2[2]*lz),
+                    (fwd[0]*lx+fwd[1]*ly+fwd[2]*lz), 1
+                };
+
+                // Ortho projection (column-major)
+                float zNear = 0.1f, zFar = extent * 5.f;
+                float proj[16] = {
+                    1.f/extent, 0, 0, 0,
+                    0, 1.f/extent, 0, 0,
+                    0, 0, -2.f/(zFar-zNear), 0,
+                    0, 0, -(zFar+zNear)/(zFar-zNear), 1
+                };
+
+                // lightVP = proj * view (column-major multiply)
+                for (int r = 0; r < 4; r++)
+                    for (int c = 0; c < 4; c++) {
+                        lightVP[c*4+r] = 0;
+                        for (int k = 0; k < 4; k++)
+                            lightVP[c*4+r] += proj[k*4+r] * view[c*4+k];
+                    }
+
+                // Render shadow map
+                GLint prevFBO; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+                GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
+
+                glBindFramebuffer(GL_FRAMEBUFFER, _glShadowFBO);
+                glViewport(0, 0, kShadowMapSize, kShadowMapSize);
+                glClear(GL_DEPTH_BUFFER_BIT);
+                glEnable(GL_DEPTH_TEST);
+                glDisable(GL_BLEND);
+                glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+
+                glUseProgram(_glShadowDepthProg);
+                glUniformMatrix4fv(glGetUniformLocation(_glShadowDepthProg, "uLightVP"), 1, GL_FALSE, lightVP);
+
+                for (const auto& kv : _scene->GetMeshes()) {
+                    if (!kv.second.visible) continue;
+                    glBegin(GL_TRIANGLES);
+                    for (const auto& tri : kv.second.triangles) {
+                        glVertex3f(tri.v0[0], tri.v0[1], tri.v0[2]);
+                        glVertex3f(tri.v1[0], tri.v1[1], tri.v1[2]);
+                        glVertex3f(tri.v2[0], tri.v2[1], tri.v2[2]);
+                    }
+                    glEnd();
+                }
+
+                glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+                glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
+                glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);
+                hasShadowMap = true;
+            }
+
+            // Re-bind geo shader after shadow pass
+            glUseProgram(_glGeoProg);
+            glUniform3f(glGetUniformLocation(_glGeoProg, "uLightDir"), gLightDirX, gLightDirY, gLightDirZ);
+            glUniform3f(glGetUniformLocation(_glGeoProg, "uLightCol"), gLightR, gLightG, gLightB);
+            glUniform3f(glGetUniformLocation(_glGeoProg, "uAmbient"), gAmbR, gAmbG, gAmbB);
+            glUniform1f(glGetUniformLocation(_glGeoProg, "uHasShadowMap"), hasShadowMap ? 1.f : 0.f);
+            if (hasShadowMap) {
+                glUniformMatrix4fv(glGetUniformLocation(_glGeoProg, "uLightVP"), 1, GL_FALSE, lightVP);
+                glActiveTexture(GL_TEXTURE2);
+                glBindTexture(GL_TEXTURE_2D, _glShadowDepthTex);
+                glUniform1i(glGetUniformLocation(_glGeoProg, "uShadowMap"), 2);
+            }
+
+            // Volume shadow texture (if available)
+            bool hasVolTex = _glVolDensityTex && !_volumes.empty();
+            glUniform1f(glGetUniformLocation(_glGeoProg, "uHasVolume"), hasVolTex ? 1.f : 0.f);
+            if (hasVolTex) {
+                auto& vol = _volumes[0];
+                pxr::GfVec3f bMin = vol->GetBboxMin(), bMax = vol->GetBboxMax();
+                glUniform3f(glGetUniformLocation(_glGeoProg, "uBboxMin"), bMin[0], bMin[1], bMin[2]);
+                glUniform3f(glGetUniformLocation(_glGeoProg, "uBboxMax"), bMax[0], bMax[1], bMax[2]);
+                glUniform1f(glGetUniformLocation(_glGeoProg, "uDensityMult"), 1.f / _glVolMaxDensity);
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_3D, _glVolDensityTex);
+                glUniform1i(glGetUniformLocation(_glGeoProg, "uDensity"), 0);
+            }
+
+            for (const auto& kv : _scene->GetMeshes()) {
+                if (!kv.second.visible) continue;
+                // Get material color
+                float mr = 0.7f, mg = 0.7f, mb = 0.7f;
+                if (!kv.second.triangles.empty()) {
+                    int matId = kv.second.triangles[0].materialId;
+                    const auto& mat = _scene->GetMaterial(matId);
+                    mr = mat.baseColor[0]; mg = mat.baseColor[1]; mb = mat.baseColor[2];
+                }
+                glUniform3f(glGetUniformLocation(_glGeoProg, "uMatColor"), mr, mg, mb);
+
+                glBegin(GL_TRIANGLES);
+                for (const auto& tri : kv.second.triangles) {
+                    // Face normal for flat shading
+                    pxr::GfVec3f e1 = tri.v1 - tri.v0, e2 = tri.v2 - tri.v0;
+                    pxr::GfVec3f fn(e1[1]*e2[2]-e1[2]*e2[1], e1[2]*e2[0]-e1[0]*e2[2], e1[0]*e2[1]-e1[1]*e2[0]);
+                    glNormal3f(fn[0], fn[1], fn[2]);
+                    glVertex3f(tri.v0[0], tri.v0[1], tri.v0[2]);
+                    glVertex3f(tri.v1[0], tri.v1[1], tri.v1[2]);
+                    glVertex3f(tri.v2[0], tri.v2[1], tri.v2[2]);
+                }
+                glEnd();
+            }
+
+            if (hasVolTex) { glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_3D, 0); }
+            if (hasShadowMap) { glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, 0); }
+            glActiveTexture(GL_TEXTURE0);
+            glUseProgram(prevProg);
+            glPopAttrib();
         }
     }
 
@@ -4917,6 +5375,7 @@ void SpectralRenderIop::_BuildLightRig()
     _cachedStudioLight = !_allStudioLights.empty() ? _allStudioLights[0] : nullptr;
 
     // Remove previous rig lights but preserve scene input lights.
+    // SpectralEnvLight is additive — scene graph lights (GeoDiskLight etc.) are kept.
     auto& lights = _scene->GetLights();
     std::vector<pxr::SpectralLight> sceneLights;
     for (const auto& L : lights) {
@@ -4948,7 +5407,10 @@ void SpectralRenderIop::_BuildLightRig()
             GfVec3f sunDir = dirFromElevAzim(el->sunElevation, el->sunAzimuth);
 
             double sunPow = el->sunIntensity * el->sunIntensity;
-            double si = sunPow * std::max(0.1, std::min(el->sunElevation / 12.0, 1.0)) * skyMix;
+            double elevFactor = std::max(0.1, std::min(el->sunElevation / 12.0, 1.0));
+            double si = sunPow * elevFactor * skyMix;
+            // Ensure minimum sun brightness so scene isn't black at low elevations
+            si = std::max(si, 0.5 * skyMix);
             if (si > 0.001) {
                 SpectralLight sun;
                 if (el->sunShadowSoftness > 0.01) {
@@ -4970,6 +5432,8 @@ void SpectralRenderIop::_BuildLightRig()
 
             double skyPow = el->skyIntensity * el->skyIntensity;
             double ski = skyPow * skyMix;
+            // Ensure minimum sky ambient so geometry isn't black
+            ski = std::max(ski, 0.1 * skyMix);
             if (ski > 0.001) {
                 SpectralLight sky;
                 sky.type = SpectralLight::Type::Dome;
@@ -5119,7 +5583,7 @@ void SpectralRenderIop::_BuildLightRig()
     }
 
     // ---- Fallback: use SpectralRender's own lighting knobs if no light nodes connected ----
-    if (_allEnvLights.empty() && _allStudioLights.empty()) {
+    if (_useBuiltinLight && _allEnvLights.empty() && _allStudioLights.empty()) {
         // Sun/sky from local knobs
         if (_skyPreset > 0 && _skyMix > 0.001) {
             double m = _skyMix;
@@ -5216,6 +5680,27 @@ void SpectralRenderIop::_BuildLightRig()
                     _scene->AddLight(hdriDome);
                 }
             }
+        }
+    }
+
+    // Safety net: ensure scene has minimum illumination for spectral rendering.
+    // Very dim/unbalanced lighting causes severe noise in GPU spectral path.
+    {
+        const auto& allLights = _scene->GetLights();
+        float totalLum = 0.f;
+        for (const auto& L : allLights) {
+            float lum = L.color[0] * 0.2126f + L.color[1] * 0.7152f + L.color[2] * 0.0722f;
+            totalLum += lum * L.intensity;
+        }
+        if (totalLum < 0.5f) {
+            // Add a subtle balanced dome to prevent black/noisy renders
+            pxr::SpectralLight fallbackDome;
+            fallbackDome.type = pxr::SpectralLight::Type::Dome;
+            float fill = std::max(0.1f, 0.5f - totalLum);
+            fallbackDome.color = GfVec3f(fill * 0.8f, fill * 0.85f, fill);
+            fallbackDome.intensity = 1.f;
+            _scene->AddLight(fallbackDome);
+            SLOG("SpectralRender: added fallback dome (totalLum=%.3f fill=%.3f)\n", totalLum, fill);
         }
     }
 
@@ -5324,6 +5809,7 @@ void SpectralRenderIop::_EnsureFrameRendered()
     cam.blueNoise = _blueNoise;
     cam.fStop = _fStop;
     cam.focusDistance = _focusDistance;
+    cam.volumeSpp = _volumeSpp;
 
     // Progressive rendering: first pass is a fast preview
     int renderSpp = _samples;
@@ -5343,14 +5829,16 @@ void SpectralRenderIop::_EnsureFrameRendered()
     }
 #endif
 
-    // Auto-preview: GPU-only (CPU spp=1 has no volume rendering)
-    bool hasVolumeScene = !_volumes.empty() || (_volume && _volume->IsValid());
-    if (hasVolumeScene && _progressiveSppDone == 0 && _samples > 1 && useGPU) {
-        renderSpp = 1;
-        isPreviewPass = true;
-    }
+    // Auto-preview disabled — GPU renders fast enough at full spp (28-100ms).
+    // spp=1 preview showed normals-as-color that persisted because Nuke's
+    // pull-based Iop model doesn't rescan after async quality completes.
+    // if (hasVolumeScene && _progressiveSppDone == 0 && _samples > 1 && useGPU) {
+    //     renderSpp = 1;
+    //     isPreviewPass = true;
+    // }
     if (_progressive && _progressiveSppDone == 0 && _samples > 2 && useGPU) {
-        renderSpp = 1;
+        // Only use progressive for explicitly enabled progressive mode
+        renderSpp = std::max(1, _samples / 4);  // quarter spp, not 1
         isPreviewPass = true;
     }
 

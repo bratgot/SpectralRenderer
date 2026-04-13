@@ -1609,17 +1609,19 @@ extern "C" __global__ void __raygen__spectral()
                 }
             }
 
-            // GPU volume ray marching — single pass for radiance + transmittance
+            // GPU volume ray marching — gated by volumeSpp
             float sampleAlpha = isHit ? 1.f : 0.f;
             float vx=0.f, vy=0.f, vz=0.f;
-            if (params.numGpuVolumes > 0) {
+            if (params.numGpuVolumes > 0 && s < params.volumeSpp) {
                 float surfT = isHit ? depth : 1e30f;
                 float3 volRGB = make_float3(0.f,0.f,0.f); float volTrans = 1.f;
                 marchVolume(origin, dir, surfT, lambda, seed + 200u, volRGB, volTrans);
+                // Scale volume contribution to compensate for fewer samples
+                float volScale = float(spp) / float(params.volumeSpp);
                 // Volume RGB → XYZ directly (sRGB D65 matrix)
-                vx = 0.4124f*volRGB.x + 0.3576f*volRGB.y + 0.1805f*volRGB.z;
-                vy = 0.2126f*volRGB.x + 0.7152f*volRGB.y + 0.0722f*volRGB.z;
-                vz = 0.0193f*volRGB.x + 0.1192f*volRGB.y + 0.9505f*volRGB.z;
+                vx = (0.4124f*volRGB.x + 0.3576f*volRGB.y + 0.1805f*volRGB.z) * volScale;
+                vy = (0.2126f*volRGB.x + 0.7152f*volRGB.y + 0.0722f*volRGB.z) * volScale;
+                vz = (0.0193f*volRGB.x + 0.1192f*volRGB.y + 0.9505f*volRGB.z) * volScale;
                 radiance *= volTrans;
                 sampleAlpha = 1.f - volTrans * (1.f - sampleAlpha);
             }

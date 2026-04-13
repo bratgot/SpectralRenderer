@@ -64,6 +64,7 @@ struct SpectralCamera {
     float  focalLength       = 50.f; // mm
     float  fStop             = 0.f;  // 0 = pinhole (no DOF)
     float  focusDistance     = 100.f; // world units
+    int    volumeSpp         = 0;    // 0 = use main spp, else separate vol samples
 };
 
 // ---------------------------------------------------------------------------

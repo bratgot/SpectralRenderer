@@ -775,6 +775,7 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     launchParams.height      = height;
     launchParams.traversable = _gasHandle;
     launchParams.spp         = spp;
+    launchParams.volumeSpp   = camera.volumeSpp > 0 ? camera.volumeSpp : spp;
     launchParams.maxBounces  = maxBounces;
     launchParams.colorSpace  = colorSpace;
     launchParams.previewMode = (spp <= 8) ? 1 : 0;  // shadows only at high spp

@@ -135,10 +135,12 @@ private:
     const char* _usdFilePath = "";
     int   _frame      = 1;
     int   _samples    = 4;            // spectral needs 2+ (default 4)
+    int   _volumeSpp  = 0;            // 0 = use _samples, else separate vol spp
     int   _maxBounces = 4;
     int   _refractionBounces = 8;  // separate limit for glass paths
 
     // Built-in lighting rig
+    bool   _useBuiltinLight = true;  // enable built-in sun/sky when no EnvLight connected
     int    _skyPreset = 2;         // 0=off, 1=custom, 2=Clear Day, 3+ presets
     double _skyMix = 1.0;
     double _sunElevation = 45.0;
@@ -267,6 +269,12 @@ private:
     bool   _vdbShadedPreview = false;
     int    _vdbViewportRes = 2;      // 0=32, 1=64, 2=128, 3=256
     GLuint _glVolProg = 0;
+    GLuint _glShadowProg = 0;
+    GLuint _glGeoProg = 0;
+    GLuint _glShadowDepthProg = 0;
+    GLuint _glShadowFBO = 0;
+    GLuint _glShadowDepthTex = 0;
+    static const int kShadowMapSize = 1024;
     GLuint _glVolDensityTex = 0;
     GLuint _glVolTempTex = 0;
     int    _glVolTexFrame = -1;

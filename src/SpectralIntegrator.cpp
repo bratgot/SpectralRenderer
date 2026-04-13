@@ -325,6 +325,8 @@ void SpectralIntegrator::RenderFrame(
                             // Volume ray marching — DIRECT RGB (not spectral)
                             // Volumes render in RGB for proper color at any spp.
                             // Surface radiance still uses spectral wavelength sampling.
+                            int effectiveVolSpp = (camera.volumeSpp > 0) ? camera.volumeSpp : spp;
+                            float volSppScale = float(spp) / float(effectiveVolSpp);
                             float finalVolTrans = 1.f;
                             GfVec3f totalVolRGB(0.f);
                             float vx = 0.f, vy = 0.f, vz = 0.f;
