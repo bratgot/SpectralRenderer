@@ -328,6 +328,13 @@ int SpectralSurfaceOp::knob_changed(Knob* k)
 {
     if (k->is("preset")) {
         _ApplyPreset(_spectralPreset);
+        // Update node label with preset name
+        if (Knob* lk = knob("label")) {
+            const char* name = kSpectralPresetNames[_spectralPreset];
+            // Skip header entries (they start with box-drawing chars)
+            bool isHeader = (name[0] == '\xe2');
+            lk->set_text(isHeader ? "" : name);
+        }
         return 1;
     }
     return ShaderOp::knob_changed(k);

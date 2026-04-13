@@ -842,16 +842,17 @@ void SpectralRenderIop::knobs(Knob_Callback f)
     // ─── Shadows ─────────────────────────────────────────────────────
     Divider(f, "Viewport Shadows");
     {
-        static const char* const smResOpts[] = {
-            "256", "512", "1024", "2048", nullptr
+        static const char* const pcfOpts[] = {
+            "sharp", "3x3", "5x5", "7x7", nullptr
         };
-        Enumeration_knob(f, &_vpShadowMapRes, smResOpts, "vp_shadow_res", "shadow map");
-        Tooltip(f, "Resolution of the geometry shadow map.\n"
-                   "256 = fast, soft shadows\n"
-                   "1024 = good balance (default)\n"
-                   "2048 = sharp, crisp shadows\n\n"
-                   "This controls geometry-to-geometry shadows only\n"
-                   "(e.g. a cylinder casting shadow on a card).");
+        Enumeration_knob(f, &_vpShadowPCF, pcfOpts, "vp_shadow_pcf", "shadow quality");
+        Tooltip(f, "Viewport shadow softness.\n"
+                   "sharp = hard single-sample shadow\n"
+                   "3x3 = 9 samples, light penumbra\n"
+                   "5x5 = 25 samples, soft (default)\n"
+                   "7x7 = 49 samples, very soft\n\n"
+                   "Combine with the env light's shadow softness\n"
+                   "to control penumbra width.");
     }
     {
         static const char* const volShadOpts[] = {
@@ -867,6 +868,49 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                    "8 = default\n"
                    "16 = best quality");
     }
+
+    // ─── Reflections ─────────────────────────────────────────────────
+    Divider(f, "Reflections");
+    Bool_knob(f, &_vpReflections, "vp_reflections", "viewport reflections");
+    Tooltip(f, "Screen-space reflections on metallic/specular surfaces.\n"
+               "Renders a pre-pass then traces reflections in screen space.\n"
+               "Works best on smooth surfaces facing other geometry.");
+    {
+        static const char* const reflOpts[] = {
+            "4 steps", "8 steps", "16 steps", "32 steps", nullptr
+        };
+        Enumeration_knob(f, &_vpReflSteps, reflOpts, "vp_refl_steps", "quality");
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Number of screen-space ray march steps.\n"
+                   "More steps = longer reflections but slower.\n"
+                   "4 = fast preview, 32 = full-length reflections.");
+    }
+
+    // ─── Guide Appearance ────────────────────────────────────────────
+    Divider(f, "Guide Appearance");
+    Double_knob(f, &_guideLineWidth, "guide_line_width", "line width");
+    SetRange(f, 0.5, 4.0);
+    Tooltip(f, "Thickness of viewport guide lines (dome, compass, arc).");
+    Double_knob(f, &_guideIconScale, "guide_icon_scale", "icon scale");
+    ClearFlags(f, Knob::STARTLINE);
+    SetRange(f, 0.5, 3.0);
+    Tooltip(f, "Scale of viewport icons (sun, light indicators).");
+    {
+        static const char* const dashOpts[] = {
+            "solid", "dashed", "dotted", nullptr
+        };
+        Enumeration_knob(f, &_guideDashPattern, dashOpts, "guide_dash", "line style");
+        Tooltip(f, "Line style for the sun day arc and dome guides.");
+    }
+    Newline(f);
+    Color_knob(f, &_guideSunR, IRange(0,1), "guide_sun_color", "sun");
+    Tooltip(f, "Colour of the sun icon and connecting line.");
+    Color_knob(f, &_guideDomeR, IRange(0,1), "guide_dome_color", "dome");
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "Colour of the sky dome wireframe and altitude rings.");
+    Color_knob(f, &_guideArcR, IRange(0,1), "guide_arc_color", "arc");
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "Colour of the sun day arc path.");
 
     // ─── Performance ─────────────────────────────────────────────────
     Divider(f, "Performance");
@@ -891,8 +935,9 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         "<font color='#556' size='-1'><br>"
         "\xe2\x80\xa2 Shaded preview uses the SpectralEnvLight sun direction and colour.<br>"
         "\xe2\x80\xa2 Without an EnvLight, the built-in light checkbox on the Lighting tab controls the sun.<br>"
-        "\xe2\x80\xa2 Volume shadows in the viewport are approximate \xe2\x80\x94 the final render uses full path tracing.<br>"
-        "\xe2\x80\xa2 Geometry shadow mapping is real-time but doesn't support transparency or refraction.<br>"
+        "\xe2\x80\xa2 Reflections show one bounce of geometry in screen space \xe2\x80\x94 only visible surfaces reflect.<br>"
+        "\xe2\x80\xa2 Viewport shadows and reflections are approximate \xe2\x80\x94 the final render uses full path tracing.<br>"
+        "\xe2\x80\xa2 Guide colours, line width, and icon scale affect dome, sun arc, and compass overlays.<br>"
         "\xe2\x80\xa2 High volume res (256) with shaded preview can be slow \xe2\x80\x94 use 64 for animation work."
         "</font>"
     );
@@ -1193,7 +1238,7 @@ int SpectralRenderIop::knob_changed(Knob* k)
         }
         return 1;
     }
-    if (k->is("vdb_3d_preview") || k->is("vdb_show_points") || k->is("vdb_shaded") || k->is("vdb_viewport_res") || k->is("vdb_point_density") || k->is("vdb_point_size") || k->is("vdb_show_bbox") || k->is("vdb_fast_scrub") || k->is("vp_shadow_res") || k->is("vp_vol_shadow")) {
+    if (k->is("vdb_3d_preview") || k->is("vdb_show_points") || k->is("vdb_shaded") || k->is("vdb_viewport_res") || k->is("vdb_point_density") || k->is("vdb_point_size") || k->is("vdb_show_bbox") || k->is("vdb_fast_scrub") || k->is("vp_shadow_pcf") || k->is("vp_vol_shadow") || k->is("vp_reflections") || k->is("vp_refl_steps") || k->is("guide_line_width") || k->is("guide_icon_scale") || k->is("guide_dash") || k->is("guide_sun_color") || k->is("guide_dome_color") || k->is("guide_arc_color")) {
         _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
         if (k->is("vdb_fast_scrub") || k->is("vdb_viewport_res")) _vdbLoadedPath.clear();
         return 1;
@@ -3899,21 +3944,60 @@ uniform vec3 uLightDir;
 uniform vec3 uLightCol;
 uniform vec3 uAmbient;
 uniform vec3 uMatColor;
+uniform float uMetallic;
+uniform float uRoughness;
 uniform float uHasVolume;
 uniform float uHasShadowMap;
+uniform float uHasReflTex;
+uniform sampler2D uReflTex;
+uniform mat4 uMVP;
+uniform int uReflSteps;
 uniform mat4 uLightVP;
 uniform float uShadowTexelSize;
 uniform float uShadowSoftness;
+uniform int uShadowPCFRadius;
 uniform int uVolShadowSamples;
 varying vec3 vWorldPos;
 varying vec3 vNormal;
 
+// Simple sky environment for reflections
+vec3 envColor(vec3 dir) {
+    float y = dir.y;
+    // Sky gradient: blue above, warm haze at horizon, dark below
+    vec3 skyTop = uAmbient * 3.0 + vec3(0.1, 0.15, 0.3);
+    vec3 skyHorizon = uLightCol * 0.3 + vec3(0.15, 0.12, 0.1);
+    vec3 ground = vec3(0.02, 0.02, 0.03);
+    if (y > 0.0) {
+        float t = sqrt(max(0.0, y));
+        return mix(skyHorizon, skyTop, t);
+    } else {
+        return mix(skyHorizon, ground, min(1.0, -y * 4.0));
+    }
+}
+
 void main() {
     vec3 N = normalize(vNormal);
-    vec3 camDir = normalize((gl_ModelViewMatrixInverse * vec4(0.0,0.0,0.0,1.0)).xyz - vWorldPos);
-    if (dot(N, camDir) < 0.0) N = -N;
+    vec3 V = normalize((gl_ModelViewMatrixInverse * vec4(0.0,0.0,0.0,1.0)).xyz - vWorldPos);
+    if (dot(N, V) < 0.0) N = -N;
 
-    float NdL = max(dot(N, normalize(uLightDir)), 0.0);
+    vec3 L = normalize(uLightDir);
+    float NdL = max(dot(N, L), 0.0);
+    float NdV = max(dot(N, V), 0.001);
+
+    // Reflection vector
+    vec3 R = reflect(-V, N);
+
+    // Schlick Fresnel
+    float F0base = 0.04;
+    float F0 = mix(F0base, 1.0, uMetallic);
+    float cosTheta = max(dot(V, N), 0.0);
+    float fresnel = F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
+
+    // Specular highlight (Blinn-Phong approximation)
+    vec3 H = normalize(V + L);
+    float NdH = max(dot(N, H), 0.0);
+    float specPow = max(2.0, 2.0 / (uRoughness * uRoughness + 0.001));
+    float spec = pow(NdH, specPow) * (specPow + 2.0) / 8.0;
 
     // Geometry shadow map
     float geoShadow = 1.0;
@@ -3924,16 +4008,26 @@ void main() {
         float fragDepth = lightNDC.z * 0.5 + 0.5;
 
         if (shadowUV.x >= 0.0 && shadowUV.x <= 1.0 && shadowUV.y >= 0.0 && shadowUV.y <= 1.0) {
-            // PCF 3x3 with softness-scaled radius
-            float shadow = 0.0;
-            float pcfRadius = uShadowTexelSize * (1.0 + uShadowSoftness * 20.0);
-            for (int y = -1; y <= 1; y++) {
-                for (int x = -1; x <= 1; x++) {
-                    float mapDepth = texture2D(uShadowMap, shadowUV + vec2(float(x), float(y)) * pcfRadius).r;
-                    shadow += (fragDepth - 0.002 > mapDepth) ? 0.0 : 1.0;
+            float pcfStep = uShadowTexelSize * (1.0 + uShadowSoftness * 15.0);
+            if (uShadowPCFRadius == 0) {
+                // Sharp — single sample
+                float mapDepth = texture2D(uShadowMap, shadowUV).r;
+                geoShadow = (fragDepth - 0.002 > mapDepth) ? 0.0 : 1.0;
+            } else {
+                // NxN PCF (radius 1=3x3, 2=5x5, 3=7x7)
+                float shadow = 0.0;
+                float count = 0.0;
+                for (int y = -3; y <= 3; y++) {
+                    if (y < -uShadowPCFRadius || y > uShadowPCFRadius) continue;
+                    for (int x = -3; x <= 3; x++) {
+                        if (x < -uShadowPCFRadius || x > uShadowPCFRadius) continue;
+                        float mapDepth = texture2D(uShadowMap, shadowUV + vec2(float(x), float(y)) * pcfStep).r;
+                        shadow += (fragDepth - 0.002 > mapDepth) ? 0.0 : 1.0;
+                        count += 1.0;
+                    }
                 }
+                geoShadow = shadow / max(count, 1.0);
             }
-            geoShadow = shadow / 9.0;
         }
     }
 
@@ -3970,9 +4064,59 @@ void main() {
     }
 
     float shadow = min(geoShadow, volShadow);
-    vec3 diffuse = uMatColor * uLightCol * NdL * shadow;
-    vec3 ambient = uMatColor * uAmbient * (0.5 + 0.5 * shadow);
-    gl_FragColor = vec4(diffuse + ambient, 1.0);
+
+    // Diffuse (reduced by metallic — metals don't diffuse)
+    vec3 diffuse = uMatColor * (1.0 - uMetallic) * uLightCol * NdL * shadow;
+    vec3 ambient = uMatColor * (1.0 - uMetallic) * uAmbient;
+
+    // Environment reflection (blurred by roughness)
+    vec3 envRefl = envColor(R);
+    // Rough surfaces see a blurred/averaged env
+    vec3 envBlur = envColor(N);  // normal direction ≈ heavily blurred reflection
+    vec3 refl = mix(envRefl, envBlur, uRoughness * uRoughness);
+
+    // Screen-space reflection of geometry (one-bounce)
+    if (uHasReflTex > 0.5 && uRoughness < 0.7) {
+        vec4 startClip = uMVP * vec4(vWorldPos, 1.0);
+        vec2 startUV = startClip.xy / startClip.w * 0.5 + 0.5;
+        float startDepth = startClip.z / startClip.w;
+        float stepLen = 2.0;  // world-space step length
+        bool hit = false;
+        for (int i = 1; i <= 32; i++) {
+            if (i > uReflSteps) break;
+            vec3 samplePos = vWorldPos + R * stepLen * float(i);
+            vec4 sClip = uMVP * vec4(samplePos, 1.0);
+            if (sClip.w < 0.001) break;
+            vec2 sUV = sClip.xy / sClip.w * 0.5 + 0.5;
+            float sDepth = sClip.z / sClip.w;
+            if (sUV.x < 0.0 || sUV.x > 1.0 || sUV.y < 0.0 || sUV.y > 1.0) break;
+            // Sample the pre-pass depth to check for intersection
+            vec4 reflSample = texture2D(uReflTex, sUV);
+            float sceneDepth = reflSample.a;
+            if (sDepth > sceneDepth && sceneDepth > 0.0) {
+                // Hit — use pre-pass color
+                float fade = 1.0 - float(i) / float(uReflSteps);
+                float roughFade = 1.0 - uRoughness * 1.5;
+                refl = mix(refl, reflSample.rgb, fade * max(0.0, roughFade));
+                hit = true;
+                break;
+            }
+        }
+    }
+
+    // Metallic tints reflections with base color, dielectric is white
+    vec3 specColor = mix(vec3(1.0), uMatColor, uMetallic);
+
+    // Specular: sun highlight + environment reflection
+    vec3 specular = specColor * (spec * uLightCol * shadow + refl * fresnel);
+
+    // Write depth to alpha for SSR pre-pass (uHasReflTex==0 means we're the pre-pass)
+    float outAlpha = 1.0;
+    if (uHasReflTex < 0.5) {
+        vec4 clipPos = uMVP * vec4(vWorldPos, 1.0);
+        outAlpha = clipPos.z / clipPos.w * 0.5 + 0.5;
+    }
+    gl_FragColor = vec4(diffuse + ambient + specular, outAlpha);
 }
 )";
 
@@ -4070,16 +4214,11 @@ void SpectralRenderIop::_InitGLVolShader()
         }
     }
 
-    // Shadow map FBO + depth texture (recreate if size changed)
-    int smSize = _GetShadowMapSize();
-    if (_glShadowFBO && _glShadowMapCurSize != smSize) {
-        glDeleteFramebuffers(1, &_glShadowFBO); _glShadowFBO = 0;
-        glDeleteTextures(1, &_glShadowDepthTex); _glShadowDepthTex = 0;
-    }
+    // Shadow map FBO + depth texture (fixed 1024x1024)
     if (!_glShadowFBO && _glShadowDepthProg) {
         glGenTextures(1, &_glShadowDepthTex);
         glBindTexture(GL_TEXTURE_2D, _glShadowDepthTex);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, smSize, smSize,
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, kShadowMapSize, kShadowMapSize,
                      0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -4101,7 +4240,7 @@ void SpectralRenderIop::_InitGLVolShader()
             glDeleteFramebuffers(1, &_glShadowFBO); _glShadowFBO = 0;
             glDeleteTextures(1, &_glShadowDepthTex); _glShadowDepthTex = 0;
         }
-        _glShadowMapCurSize = smSize;
+        _glShadowMapCurSize = kShadowMapSize;
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
 }
@@ -4205,19 +4344,21 @@ void SpectralRenderIop::_DrawVolumeShaded(ViewerContext* ctx)
             if (len > 1e-6f) { lightDirX /= len; lightDirY /= len; lightDirZ /= len; }
         }
 
-        // Sun color from elevation
+        // Sun color from elevation — match render intensity curve (sunInt² / pi)
         {
             double r, g, b;
             sunColorFromElevation(sunElev, turbidity, r, g, b);
-            float si = float(std::min(sunInt / 5.0, 1.5));
+            double elevFactor = std::max(0.1, std::min(sunElev / 12.0, 1.0));
+            float si = float(sunInt * sunInt * elevFactor * 0.32);  // 1/pi ≈ 0.32
             lightR = float(r * si); lightG = float(g * si); lightB = float(b * si);
         }
 
         // Sky ambient from elevation, scaled by sky fill intensity
+        // Lower multiplier to match render — viewport ambient is flat, render uses proper GI
         {
             double r, g, b;
             skyColorFromElevation(sunElev, turbidity, r, g, b);
-            float skyMul = float(std::min(skyInt * 0.3, 2.0));
+            float skyMul = float(std::min(skyInt * 0.12, 1.5));
             ambR = float(r * skyMul); ambG = float(g * skyMul); ambB = float(b * skyMul);
         }
     }
@@ -4474,13 +4615,15 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
     if (_cachedEnvLight && _cachedEnvLight->skyPreset > 0) {
         float R = float(_cachedEnvLight->domeRadius);
         if (_cachedEnvLight->showDome) {
+            float dR=float(_guideDomeR), dG=float(_guideDomeG), dB=float(_guideDomeB);
+            float lw = float(_guideLineWidth);
             // Ground horizon circle — bright
-            glColor4f(0.5f, 0.6f, 1.0f, 0.8f); glLineWidth(2.f);
+            glColor4f(dR*1.2f, dG*1.2f, dB*1.2f, 0.8f); glLineWidth(lw*2.f);
             glBegin(GL_LINE_LOOP);
             for (int i=0;i<64;++i){float a=float(i)/64.f*2.f*kPi;glVertex3f(R*std::cos(a),0,R*std::sin(a));}
             glEnd();
             // 45deg latitude
-            glColor4f(0.4f, 0.6f, 1.0f, 0.6f); glLineWidth(1.5f);
+            glColor4f(dR, dG, dB, 0.6f); glLineWidth(lw*1.5f);
             float elR45 = 45.f*kPi/180.f;
             float rr45 = R*std::cos(elR45), y45 = R*std::sin(elR45);
             glBegin(GL_LINE_LOOP);
@@ -4489,12 +4632,12 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
             // 30deg latitude
             float elR30 = 30.f*kPi/180.f;
             float rr30 = R*std::cos(elR30), y30 = R*std::sin(elR30);
-            glColor4f(0.4f, 0.6f, 1.0f, 0.4f);
+            glColor4f(dR, dG, dB, 0.4f);
             glBegin(GL_LINE_LOOP);
             for (int i=0;i<48;++i){float a=float(i)/48.f*2.f*kPi;glVertex3f(rr30*std::cos(a),y30,rr30*std::sin(a));}
             glEnd();
             // Zenith cross
-            glColor4f(0.4f, 0.6f, 1.0f, 0.3f); glLineWidth(1.f);
+            glColor4f(dR, dG, dB, 0.3f); glLineWidth(lw);
             float zr = R*0.08f;
             glBegin(GL_LINES);
             glVertex3f(-zr,R,0); glVertex3f(zr,R,0);
@@ -4505,14 +4648,114 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
             float sunI = std::min(1.f, float(_cachedEnvLight->sunIntensity) / 5.f);
             float elR = float(_cachedEnvLight->sunElevation)*kPi/180.f;
             float azR = float(_cachedEnvLight->sunAzimuth)*kPi/180.f;
-            float sx=R*std::cos(elR)*std::sin(azR), sy=R*std::sin(elR), sz=R*std::cos(elR)*std::cos(azR);
+            // Sun position: toward-sun direction (matches shadow/shading light dir)
+            float sx=-R*std::cos(elR)*std::sin(azR), sy=R*std::sin(elR), sz=R*std::cos(elR)*std::cos(azR);
+
+            // ─── Sun path arc (day arc) ───────────────────────────
+            // Dashed arc from east through zenith to west at current azimuth plane
+            glColor4f(float(_guideArcR), float(_guideArcG), float(_guideArcB), 0.12f + sunI * 0.08f);
+            glLineWidth(float(_guideLineWidth));
+            int arcSegs = 64;
+            int dashSkip = (_guideDashPattern == 0) ? 999 : (_guideDashPattern == 2) ? 2 : 3;
+            for (int i = 0; i < arcSegs; i++) {
+                if (i % dashSkip >= (dashSkip-1)) continue;
+                float e0 = float(i) / float(arcSegs) * kPi;      // 0 to pi (horizon to horizon)
+                float e1 = float(i+1) / float(arcSegs) * kPi;
+                glBegin(GL_LINES);
+                glVertex3f(-R*std::cos(e0)*std::sin(azR), R*std::sin(e0), R*std::cos(e0)*std::cos(azR));
+                glVertex3f(-R*std::cos(e1)*std::sin(azR), R*std::sin(e1), R*std::cos(e1)*std::cos(azR));
+                glEnd();
+            }
+            // Horizon ticks at arc endpoints
+            float htk = R * 0.04f;
+            glBegin(GL_LINES);
+            glVertex3f(-R*std::sin(azR)-htk*std::cos(azR), 0, R*std::cos(azR)+htk*std::sin(azR));
+            glVertex3f(-R*std::sin(azR)+htk*std::cos(azR), 0, R*std::cos(azR)-htk*std::sin(azR));
+            glVertex3f(R*std::sin(azR)-htk*std::cos(azR), 0, -R*std::cos(azR)+htk*std::sin(azR));
+            glVertex3f(R*std::sin(azR)+htk*std::cos(azR), 0, -R*std::cos(azR)-htk*std::sin(azR));
+            glEnd();
+
             // Thin line from origin to sun
-            glColor4f(1.f, 0.85f, 0.4f, 0.15f+sunI*0.2f); glLineWidth(1.f);
+            glColor4f(float(_guideSunR), float(_guideSunG), float(_guideSunB), 0.15f+sunI*0.2f);
+            glLineWidth(float(_guideLineWidth));
             glBegin(GL_LINES);glVertex3f(0,0,0);glVertex3f(sx,sy,sz);glEnd();
-            // Clean sun dot — size from intensity
-            float sunSz = 4.f + sunI * 8.f;
-            glColor4f(1.f, 0.9f, 0.5f, 0.5f+sunI*0.4f); glPointSize(sunSz);
-            glBegin(GL_POINTS);glVertex3f(sx,sy,sz);glEnd();
+
+            // ─── Ra sun icon ──────────────────────────────────────
+            // Billboard: compute right/up vectors facing camera
+            float mvInv[16];
+            {
+                float mv[16];
+                glGetFloatv(GL_MODELVIEW_MATRIX, mv);
+                // Extract camera position from modelview (inv translation)
+                // For billboard we just need the view direction from sun
+                // Camera pos = -R^T * t where R is upper-left 3x3, t is column 3
+                float cx2 = -(mv[0]*mv[12]+mv[1]*mv[13]+mv[2]*mv[14]);
+                float cy2 = -(mv[4]*mv[12]+mv[5]*mv[13]+mv[6]*mv[14]);
+                float cz2 = -(mv[8]*mv[12]+mv[9]*mv[13]+mv[10]*mv[14]);
+                mvInv[0]=cx2; mvInv[1]=cy2; mvInv[2]=cz2;
+            }
+            float cx=mvInv[0], cy=mvInv[1], cz=mvInv[2];
+            // View direction from sun to camera
+            float vx=cx-sx, vy=cy-sy, vz=cz-sz;
+            float vlen=std::sqrt(vx*vx+vy*vy+vz*vz);
+            if (vlen>1e-6f){vx/=vlen;vy/=vlen;vz/=vlen;}
+            // Right = normalize(cross(up, view))
+            float ux=0,uy=1,uz=0;
+            if(std::abs(vy)>0.99f){ux=1;uy=0;uz=0;}
+            float rx=uy*vz-uz*vy, ry=uz*vx-ux*vz, rz=ux*vy-uy*vx;
+            float rlen=std::sqrt(rx*rx+ry*ry+rz*rz);
+            if(rlen>1e-6f){rx/=rlen;ry/=rlen;rz/=rlen;}
+            // Up = cross(view, right)
+            float ux2=vy*rz-vz*ry, uy2=vz*rx-vx*rz, uz2=vx*ry-vy*rx;
+
+            float sunR0 = R * 0.035f * float(_guideIconScale);  // inner disk radius
+            float sunR1 = R * 0.065f * float(_guideIconScale);  // ray tip radius
+            float alpha = 0.6f + sunI * 0.3f;
+
+            // Inner disk (filled triangle fan)
+            glColor4f(float(_guideSunR), float(_guideSunG), float(_guideSunB), alpha);
+            int diskSegs = 16;
+            glBegin(GL_TRIANGLE_FAN);
+            glVertex3f(sx, sy, sz);  // center
+            for (int i = 0; i <= diskSegs; i++) {
+                float a = float(i) / float(diskSegs) * 2.f * kPi;
+                float px = sx + (rx*std::cos(a) + ux2*std::sin(a)) * sunR0;
+                float py = sy + (ry*std::cos(a) + uy2*std::sin(a)) * sunR0;
+                float pz = sz + (rz*std::cos(a) + uz2*std::sin(a)) * sunR0;
+                glVertex3f(px, py, pz);
+            }
+            glEnd();
+
+            // Outer ring
+            glColor4f(float(_guideSunR)*0.9f, float(_guideSunG)*0.8f, float(_guideSunB)*0.7f, alpha * 0.6f);
+            glLineWidth(float(_guideLineWidth) * 1.5f);
+            float ringR = sunR0 * 1.3f;
+            glBegin(GL_LINE_LOOP);
+            for (int i = 0; i < 24; i++) {
+                float a = float(i) / 24.f * 2.f * kPi;
+                float px = sx + (rx*std::cos(a) + ux2*std::sin(a)) * ringR;
+                float py = sy + (ry*std::cos(a) + uy2*std::sin(a)) * ringR;
+                float pz = sz + (rz*std::cos(a) + uz2*std::sin(a)) * ringR;
+                glVertex3f(px, py, pz);
+            }
+            glEnd();
+
+            // Radiating rays (12 rays, alternating long/short like Ra's crown)
+            glColor4f(float(_guideSunR), float(_guideSunG)*0.95f, float(_guideSunB)*1.3f, alpha * 0.8f);
+            glLineWidth(float(_guideLineWidth) * 1.5f);
+            int numRays = 12;
+            for (int i = 0; i < numRays; i++) {
+                float a = float(i) / float(numRays) * 2.f * kPi;
+                float rayLen = (i % 2 == 0) ? sunR1 : sunR1 * 0.7f;
+                float inner = sunR0 * 1.1f;
+                float ix = sx + (rx*std::cos(a) + ux2*std::sin(a)) * inner;
+                float iy = sy + (ry*std::cos(a) + uy2*std::sin(a)) * inner;
+                float iz = sz + (rz*std::cos(a) + uz2*std::sin(a)) * inner;
+                float ox = sx + (rx*std::cos(a) + ux2*std::sin(a)) * rayLen;
+                float oy = sy + (ry*std::cos(a) + uy2*std::sin(a)) * rayLen;
+                float oz = sz + (rz*std::cos(a) + uz2*std::sin(a)) * rayLen;
+                glBegin(GL_LINES);glVertex3f(ix,iy,iz);glVertex3f(ox,oy,oz);glEnd();
+            }
         }
         if (_cachedEnvLight->showCompass) {
             float cr = R*1.05f, ci = R*0.95f;
@@ -4624,10 +4867,11 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
                 if (len > 1e-6f) { gLightDirX /= len; gLightDirY /= len; gLightDirZ /= len; }
                 double r, g, b;
                 sunColorFromElevation(sunElev, turbidity, r, g, b);
-                float si = float(std::min(sunInt / 5.0, 1.5));
+                double elevFactor = std::max(0.1, std::min(sunElev / 12.0, 1.0));
+                float si = float(sunInt * sunInt * elevFactor * 0.32);
                 gLightR = float(r * si); gLightG = float(g * si); gLightB = float(b * si);
                 skyColorFromElevation(sunElev, turbidity, r, g, b);
-                float skyMul = float(std::min(skyInt * 0.3, 2.0));
+                float skyMul = float(std::min(skyInt * 0.12, 1.5));
                 gAmbR = float(r * skyMul); gAmbG = float(g * skyMul); gAmbB = float(b * skyMul);
             }
 
@@ -4712,7 +4956,7 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
                 GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
 
                 glBindFramebuffer(GL_FRAMEBUFFER, _glShadowFBO);
-                glViewport(0, 0, _GetShadowMapSize(), _GetShadowMapSize());
+                glViewport(0, 0, kShadowMapSize, kShadowMapSize);
                 glClear(GL_DEPTH_BUFFER_BIT);
                 glEnable(GL_DEPTH_TEST);
                 glDisable(GL_BLEND);
@@ -4744,8 +4988,10 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
             glUniform3f(glGetUniformLocation(_glGeoProg, "uLightCol"), gLightR, gLightG, gLightB);
             glUniform3f(glGetUniformLocation(_glGeoProg, "uAmbient"), gAmbR, gAmbG, gAmbB);
             glUniform1f(glGetUniformLocation(_glGeoProg, "uHasShadowMap"), hasShadowMap ? 1.f : 0.f);
-            glUniform1f(glGetUniformLocation(_glGeoProg, "uShadowTexelSize"), 1.f / float(_GetShadowMapSize()));
+            glUniform1f(glGetUniformLocation(_glGeoProg, "uShadowTexelSize"), 1.f / float(kShadowMapSize));
             glUniform1f(glGetUniformLocation(_glGeoProg, "uShadowSoftness"), vpShadowSoft);
+            glUniform1i(glGetUniformLocation(_glGeoProg, "uShadowPCFRadius"),
+                        std::min(std::max(_vpShadowPCF, 0), 3));
             static const int volShadLUT[] = {0, 4, 8, 16};
             glUniform1i(glGetUniformLocation(_glGeoProg, "uVolShadowSamples"),
                         volShadLUT[std::min(std::max(_vpVolShadowSamples, 0), 3)]);
@@ -4770,16 +5016,130 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
                 glUniform1i(glGetUniformLocation(_glGeoProg, "uDensity"), 0);
             }
 
+            // ─── Reflection pre-pass (render scene to FBO for SSR) ───
+            bool hasReflTex = false;
+            float mvpMatrix[16] = {};
+            if (_vpReflections && _glGeoProg) {
+                GLint vpDims[4]; glGetIntegerv(GL_VIEWPORT, vpDims);
+                int rW = vpDims[2] / 2, rH = vpDims[3] / 2;  // half-res for perf
+                if (rW < 64) rW = 64; if (rH < 64) rH = 64;
+
+                // Recreate FBO if size changed
+                if (_glReflFBO && (_glReflW != rW || _glReflH != rH)) {
+                    glDeleteFramebuffers(1, &_glReflFBO); _glReflFBO = 0;
+                    glDeleteTextures(1, &_glReflColorTex); _glReflColorTex = 0;
+                    glDeleteTextures(1, &_glReflDepthTex); _glReflDepthTex = 0;
+                }
+                if (!_glReflFBO) {
+                    glGenTextures(1, &_glReflColorTex);
+                    glBindTexture(GL_TEXTURE_2D, _glReflColorTex);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, rW, rH, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+                    glGenTextures(1, &_glReflDepthTex);
+                    glBindTexture(GL_TEXTURE_2D, _glReflDepthTex);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, rW, rH, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+                    glGenFramebuffers(1, &_glReflFBO);
+                    glBindFramebuffer(GL_FRAMEBUFFER, _glReflFBO);
+                    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, _glReflColorTex, 0);
+                    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, _glReflDepthTex, 0);
+                    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+                        glDeleteFramebuffers(1, &_glReflFBO); _glReflFBO = 0;
+                    }
+                    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                    _glReflW = rW; _glReflH = rH;
+                }
+
+                // Build MVP matrix from current GL state
+                float mvMat[16], projMat[16];
+                glGetFloatv(GL_MODELVIEW_MATRIX, mvMat);
+                glGetFloatv(GL_PROJECTION_MATRIX, projMat);
+                for (int r2 = 0; r2 < 4; r2++)
+                    for (int c2 = 0; c2 < 4; c2++) {
+                        mvpMatrix[c2*4+r2] = 0;
+                        for (int k2 = 0; k2 < 4; k2++)
+                            mvpMatrix[c2*4+r2] += projMat[k2*4+r2] * mvMat[c2*4+k2];
+                    }
+
+                // Render pre-pass to reflection FBO
+                if (_glReflFBO) {
+                    GLint prevFBO2; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO2);
+                    glBindFramebuffer(GL_FRAMEBUFFER, _glReflFBO);
+                    glViewport(0, 0, rW, rH);
+                    glClearColor(0,0,0,0);
+                    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+                    glEnable(GL_DEPTH_TEST);
+                    glDisable(GL_BLEND);  // need raw alpha for depth storage
+
+                    // Set MVP and disable reflections for pre-pass
+                    glUniformMatrix4fv(glGetUniformLocation(_glGeoProg, "uMVP"), 1, GL_FALSE, mvpMatrix);
+                    glUniform1f(glGetUniformLocation(_glGeoProg, "uHasReflTex"), 0.f);
+
+                    for (const auto& kv2 : _scene->GetMeshes()) {
+                        if (!kv2.second.visible) continue;
+                        float pmr=0.7f,pmg=0.7f,pmb=0.7f;
+                        float pmet=0.f, prou=0.5f;
+                        if (!kv2.second.triangles.empty()) {
+                            int pmatId = kv2.second.triangles[0].materialId;
+                            const auto& pmat = _scene->GetMaterial(pmatId);
+                            pmr=pmat.baseColor[0]; pmg=pmat.baseColor[1]; pmb=pmat.baseColor[2];
+                            pmet=pmat.metallic; prou=pmat.roughness;
+                        }
+                        glUniform3f(glGetUniformLocation(_glGeoProg, "uMatColor"), pmr, pmg, pmb);
+                        glUniform1f(glGetUniformLocation(_glGeoProg, "uMetallic"), pmet);
+                        glUniform1f(glGetUniformLocation(_glGeoProg, "uRoughness"), prou);
+                        glBegin(GL_TRIANGLES);
+                        for (const auto& tri : kv2.second.triangles) {
+                            pxr::GfVec3f e1=tri.v1-tri.v0, e2=tri.v2-tri.v0;
+                            pxr::GfVec3f fn(e1[1]*e2[2]-e1[2]*e2[1],e1[2]*e2[0]-e1[0]*e2[2],e1[0]*e2[1]-e1[1]*e2[0]);
+                            glNormal3f(fn[0],fn[1],fn[2]);
+                            glVertex3f(tri.v0[0],tri.v0[1],tri.v0[2]);
+                            glVertex3f(tri.v1[0],tri.v1[1],tri.v1[2]);
+                            glVertex3f(tri.v2[0],tri.v2[1],tri.v2[2]);
+                        }
+                        glEnd();
+                    }
+
+                    glBindFramebuffer(GL_FRAMEBUFFER, prevFBO2);
+                    glViewport(vpDims[0], vpDims[1], vpDims[2], vpDims[3]);
+                    glEnable(GL_BLEND);
+                    hasReflTex = true;
+                }
+            }
+
+            // ─── Main pass: set reflection uniforms ───
+            glUniform1f(glGetUniformLocation(_glGeoProg, "uHasReflTex"), hasReflTex ? 1.f : 0.f);
+            if (hasReflTex) {
+                glUniformMatrix4fv(glGetUniformLocation(_glGeoProg, "uMVP"), 1, GL_FALSE, mvpMatrix);
+                static const int reflLUT[] = {4, 8, 16, 32};
+                glUniform1i(glGetUniformLocation(_glGeoProg, "uReflSteps"),
+                            reflLUT[std::min(std::max(_vpReflSteps, 0), 3)]);
+                glActiveTexture(GL_TEXTURE3);
+                glBindTexture(GL_TEXTURE_2D, _glReflColorTex);
+                glUniform1i(glGetUniformLocation(_glGeoProg, "uReflTex"), 3);
+            }
+
             for (const auto& kv : _scene->GetMeshes()) {
                 if (!kv.second.visible) continue;
-                // Get material color
+                // Get material properties
                 float mr = 0.7f, mg = 0.7f, mb = 0.7f;
+                float metallic = 0.f, roughness = 0.5f;
                 if (!kv.second.triangles.empty()) {
                     int matId = kv.second.triangles[0].materialId;
                     const auto& mat = _scene->GetMaterial(matId);
                     mr = mat.baseColor[0]; mg = mat.baseColor[1]; mb = mat.baseColor[2];
+                    metallic = mat.metallic;
+                    roughness = mat.roughness;
                 }
                 glUniform3f(glGetUniformLocation(_glGeoProg, "uMatColor"), mr, mg, mb);
+                glUniform1f(glGetUniformLocation(_glGeoProg, "uMetallic"), metallic);
+                glUniform1f(glGetUniformLocation(_glGeoProg, "uRoughness"), roughness);
 
                 glBegin(GL_TRIANGLES);
                 for (const auto& tri : kv.second.triangles) {
@@ -4796,6 +5156,7 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
 
             if (hasVolTex) { glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_3D, 0); }
             if (hasShadowMap) { glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, 0); }
+            if (hasReflTex) { glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, 0); }
             glActiveTexture(GL_TEXTURE0);
             glUseProgram(prevProg);
             glPopAttrib();

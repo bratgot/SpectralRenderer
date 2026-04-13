@@ -376,8 +376,10 @@ void SpectralEnvLight::knobs(Knob_Callback f)
     SetRange(f, 0, 20);
     Tooltip(f, "Sun brightness (squared for exponential response).");
     Double_knob(f, &skyIntensity, "sky_intensity", "sky fill");
-    ClearFlags(f, Knob::STARTLINE); SetRange(f, 0, 20);
-    Tooltip(f, "Sky dome fill brightness.");
+    ClearFlags(f, Knob::STARTLINE); SetRange(f, 0, 5);
+    Tooltip(f, "Sky dome fill brightness.\n"
+               "Controls ambient fill in shadows.\n"
+               "0-1 = subtle fill, 1-3 = strong, 3-5 = overcast.");
 
     Double_knob(f, &sunElevation, "sun_elevation", "elevation");
     SetRange(f, -10, 90);
