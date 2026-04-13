@@ -247,6 +247,8 @@ static __forceinline__ __device__ float lightAttenuation(const GPULight& light, 
     if (light.type == 0 || light.type == 3) return 1.f;
     float3 d = make_float3(light.position.x-hitPos.x, light.position.y-hitPos.y, light.position.z-hitPos.z);
     float dist2 = d.x*d.x + d.y*d.y + d.z*d.z;
+    // Sphere lights far from scene (>100 units) are "distant with soft shadow" — no falloff
+    if (light.type == 1 && dist2 > 10000.f) return 1.f;
     float atten = 1.f / fmaxf(dist2, 0.001f);
     if (light.type == 4) atten *= spotAttenuation(light, hitPos);
     return atten;

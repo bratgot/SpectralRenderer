@@ -592,6 +592,8 @@ struct SpectralLight
         if (type == Type::Distant || type == Type::Dome) return 1.f;
         GfVec3f d = position - surfacePos;
         float dist2 = d[0]*d[0] + d[1]*d[1] + d[2]*d[2];
+        // Sphere lights far from scene (>100 units) are "distant with soft shadow" — no falloff
+        if (type == Type::Sphere && dist2 > 10000.f) return 1.f;
         float atten = 1.f / std::max(dist2, 0.001f);
         if (type == Type::Spot) atten *= SpotAttenuation(surfacePos);
         return atten;
