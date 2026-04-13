@@ -11,3 +11,4 @@ C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralRender\Iex-3_
 C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralRender\OpenEXRCore-3_4.dll
 C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralRender\deflate.dll
 C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralRender\openjph.0.26.dll
+C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralRender.dir\Release\Spectral.D98D3163.Up2Date

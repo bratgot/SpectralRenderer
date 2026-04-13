@@ -95,6 +95,22 @@ SpectralRenderIop::SpectralRenderIop(Node* node)
 {
     // 3 inputs: scene, cam, bg (set by min/max_inputs)
     SLOG("SpectralRender: DLL build %s %s\n", __DATE__, __TIME__);
+
+    // Warm up OptiX in background — PTX compilation takes ~10-15s on first run.
+    // Subsequent runs use the disk cache and are instant.
+#ifdef SPECTRAL_HAS_OPTIX
+    static std::once_flag s_gpuWarmup;
+    std::call_once(s_gpuWarmup, []() {
+        std::thread([]() {
+            SLOG("SpectralRender: warming up GPU (background)...\n");
+            auto t0 = std::chrono::high_resolution_clock::now();
+            SpectralIntegrator::IsGPUAvailable();
+            auto t1 = std::chrono::high_resolution_clock::now();
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1-t0).count();
+            SLOG("SpectralRender: GPU warmup complete (%lldms)\n", ms);
+        }).detach();
+    });
+#endif
 }
 
 SpectralRenderIop::~SpectralRenderIop() {
@@ -3887,6 +3903,7 @@ uniform float uHasVolume;
 uniform float uHasShadowMap;
 uniform mat4 uLightVP;
 uniform float uShadowTexelSize;
+uniform float uShadowSoftness;
 uniform int uVolShadowSamples;
 varying vec3 vWorldPos;
 varying vec3 vNormal;
@@ -3907,12 +3924,12 @@ void main() {
         float fragDepth = lightNDC.z * 0.5 + 0.5;
 
         if (shadowUV.x >= 0.0 && shadowUV.x <= 1.0 && shadowUV.y >= 0.0 && shadowUV.y <= 1.0) {
-            // PCF 3x3 for soft edges
+            // PCF 3x3 with softness-scaled radius
             float shadow = 0.0;
-            float texelSize = uShadowTexelSize;
+            float pcfRadius = uShadowTexelSize * (1.0 + uShadowSoftness * 20.0);
             for (int y = -1; y <= 1; y++) {
                 for (int x = -1; x <= 1; x++) {
-                    float mapDepth = texture2D(uShadowMap, shadowUV + vec2(float(x), float(y)) * texelSize).r;
+                    float mapDepth = texture2D(uShadowMap, shadowUV + vec2(float(x), float(y)) * pcfRadius).r;
                     shadow += (fragDepth - 0.002 > mapDepth) ? 0.0 : 1.0;
                 }
             }
@@ -4170,10 +4187,12 @@ void SpectralRenderIop::_DrawVolumeShaded(ViewerContext* ctx)
     if (vpHasLight) {
         double sunElev = _sunElevation, sunAz = _sunAzimuth;
         double sunInt = _sunIntensity, turbidity = _turbidity;
+        double skyInt = _skyIntensity;
         if (_cachedEnvLight) {
             sunElev = _cachedEnvLight->sunElevation;
             sunAz = _cachedEnvLight->sunAzimuth;
             sunInt = _cachedEnvLight->sunIntensity;
+            skyInt = _cachedEnvLight->skyIntensity;
         }
 
         // Sun direction: negate dirFromElevAzim (shader marches toward light)
@@ -4194,11 +4213,12 @@ void SpectralRenderIop::_DrawVolumeShaded(ViewerContext* ctx)
             lightR = float(r * si); lightG = float(g * si); lightB = float(b * si);
         }
 
-        // Sky ambient from elevation
+        // Sky ambient from elevation, scaled by sky fill intensity
         {
             double r, g, b;
             skyColorFromElevation(sunElev, turbidity, r, g, b);
-            ambR = float(r * 0.3); ambG = float(g * 0.3); ambB = float(b * 0.3);
+            float skyMul = float(std::min(skyInt * 0.3, 2.0));
+            ambR = float(r * skyMul); ambG = float(g * skyMul); ambB = float(b * skyMul);
         }
     }
 
@@ -4587,12 +4607,15 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
             float gLightDirX = 0.f, gLightDirY = 1.f, gLightDirZ = 0.f;
             float gLightR = 0.f, gLightG = 0.f, gLightB = 0.f;
             float gAmbR = 0.f, gAmbG = 0.f, gAmbB = 0.f;
+            float vpShadowSoft = 0.f;
             bool gHasLight = _cachedEnvLight || _useBuiltinLight;
             if (gHasLight) {
                 double sunElev = _cachedEnvLight ? _cachedEnvLight->sunElevation : _sunElevation;
                 double sunAz = _cachedEnvLight ? _cachedEnvLight->sunAzimuth : _sunAzimuth;
                 double sunInt = _cachedEnvLight ? _cachedEnvLight->sunIntensity : _sunIntensity;
+                double skyInt = _cachedEnvLight ? _cachedEnvLight->skyIntensity : _skyIntensity;
                 double turbidity = _turbidity;
+                vpShadowSoft = float(_cachedEnvLight ? _cachedEnvLight->sunShadowSoftness : _shadowSoftness);
                 double er = sunElev * M_PI / 180.0, ar = sunAz * M_PI / 180.0;
                 gLightDirX = float(-std::cos(er) * std::sin(ar));
                 gLightDirY = float(std::sin(er));
@@ -4604,7 +4627,8 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
                 float si = float(std::min(sunInt / 5.0, 1.5));
                 gLightR = float(r * si); gLightG = float(g * si); gLightB = float(b * si);
                 skyColorFromElevation(sunElev, turbidity, r, g, b);
-                gAmbR = float(r * 0.3); gAmbG = float(g * 0.3); gAmbB = float(b * 0.3);
+                float skyMul = float(std::min(skyInt * 0.3, 2.0));
+                gAmbR = float(r * skyMul); gAmbG = float(g * skyMul); gAmbB = float(b * skyMul);
             }
 
             glUniform3f(glGetUniformLocation(_glGeoProg, "uLightDir"), gLightDirX, gLightDirY, gLightDirZ);
@@ -4721,6 +4745,7 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
             glUniform3f(glGetUniformLocation(_glGeoProg, "uAmbient"), gAmbR, gAmbG, gAmbB);
             glUniform1f(glGetUniformLocation(_glGeoProg, "uHasShadowMap"), hasShadowMap ? 1.f : 0.f);
             glUniform1f(glGetUniformLocation(_glGeoProg, "uShadowTexelSize"), 1.f / float(_GetShadowMapSize()));
+            glUniform1f(glGetUniformLocation(_glGeoProg, "uShadowSoftness"), vpShadowSoft);
             static const int volShadLUT[] = {0, 4, 8, 16};
             glUniform1i(glGetUniformLocation(_glGeoProg, "uVolShadowSamples"),
                         volShadLUT[std::min(std::max(_vpVolShadowSamples, 0), 3)]);

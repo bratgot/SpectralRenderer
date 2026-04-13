@@ -666,14 +666,8 @@ static __forceinline__ __device__ float shadeHit(
 
                 float bsdf = evalBSDF(mat, N, V, L, lambda);
                 float emission = lightEmission(light, lambda) * lightAttenuation(light, hitPos);
-                // Dome uses cosine-weighted hemisphere sampling — divide by PDF (cos/pi)
-                if (light.type == 3) {
-                    float NdL = dot3raw(N, L);
-                    if (NdL > 0.001f)
-                        emission *= 3.14159f / NdL;
-                    else
-                        emission = 0.f;
-                }
+                // Dome: scale by 0.5 to match CPU MIS (other half comes from bounce miss)
+                if (light.type == 3) emission *= 0.5f;
                 radiance += bsdf * emission * shadowTransmit;
             }
         }
@@ -1576,12 +1570,11 @@ extern "C" __global__ void __raygen__spectral()
                                OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0, bp0,bp1,bp2,bp3,bp4,bp5,bp6);
 
                     if (bp4 == 0u) {
-                        // Miss — add dome light contribution (matches CPU bounce miss path)
+                        // Bounce miss — add dome contribution (MIS weight 0.5, other half in direct)
                         for (unsigned int li = 0; li < params.lightCount; ++li) {
                             const GPULight& domeL = params.lights[li];
                             if (domeL.type != 3) continue;
-                            float domeRad = lightEmission(domeL, lambda);
-                            radiance += throughput * domeRad;
+                            radiance += throughput * lightEmission(domeL, lambda) * 0.5f;
                         }
                         break;
                     }
