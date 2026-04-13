@@ -222,6 +222,20 @@ static __forceinline__ __device__ float lightEmission(const GPULight& light, flo
     float spectrum;
     if (light.useColorTemp) {
         spectrum = blackbodyNorm(lambda, light.colorTemperature);
+    } else if (light.useD65) {
+        // CIE D65 daylight approximation — cool blue-white
+        // Normalized: peak at ~460nm, warm rolloff at long wavelengths
+        float d65;
+        if (lambda < 400.f) d65 = 0.6f;
+        else if (lambda < 440.f) d65 = 0.6f + (lambda - 400.f) / 40.f * 0.5f;
+        else if (lambda < 470.f) d65 = 1.1f;  // blue peak
+        else if (lambda < 530.f) d65 = 1.0f;
+        else if (lambda < 560.f) d65 = 0.96f;
+        else if (lambda < 600.f) d65 = 0.9f;
+        else if (lambda < 650.f) d65 = 0.82f;
+        else d65 = 0.7f;
+        float lum = light.color.x * 0.2126f + light.color.y * 0.7152f + light.color.z * 0.0722f;
+        spectrum = d65 * lum;
     } else {
         spectrum = light.color.x*spectralGauss(lambda,630.f,30.f)
                  + light.color.y*spectralGauss(lambda,532.f,30.f)
@@ -651,7 +665,16 @@ static __forceinline__ __device__ float shadeHit(
                 }
 
                 float bsdf = evalBSDF(mat, N, V, L, lambda);
-                radiance += bsdf * lightEmission(light, lambda) * lightAttenuation(light, hitPos) * shadowTransmit;
+                float emission = lightEmission(light, lambda) * lightAttenuation(light, hitPos);
+                // Dome uses cosine-weighted hemisphere sampling — divide by PDF (cos/pi)
+                if (light.type == 3) {
+                    float NdL = dot3raw(N, L);
+                    if (NdL > 0.001f)
+                        emission *= 3.14159f / NdL;
+                    else
+                        emission = 0.f;
+                }
+                radiance += bsdf * emission * shadowTransmit;
             }
         }
     }
@@ -1552,7 +1575,16 @@ extern "C" __global__ void __raygen__spectral()
                     optixTrace(params.traversable, bOrig, bounceDir, 1e-4f,1e30f,0.f,
                                OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0, bp0,bp1,bp2,bp3,bp4,bp5,bp6);
 
-                    if (bp4 == 0u) break;  // miss — no sky
+                    if (bp4 == 0u) {
+                        // Miss — add dome light contribution (matches CPU bounce miss path)
+                        for (unsigned int li = 0; li < params.lightCount; ++li) {
+                            const GPULight& domeL = params.lights[li];
+                            if (domeL.type != 3) continue;
+                            float domeRad = lightEmission(domeL, lambda);
+                            radiance += throughput * domeRad;
+                        }
+                        break;
+                    }
 
                     float bDepth = __uint_as_float(bp3);
                     int bMatId = int(bp4)-1;

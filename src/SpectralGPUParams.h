@@ -67,6 +67,7 @@ struct GPULight {
     float  height;
     float  cosConeAngle;  // cos(halfAngle) for spot
     float  cosPenumbra;   // cos(innerHalfAngle) for spot
+    int    useD65;        // 1 = D65 daylight spectrum instead of RGB Gaussians
 };
 
 struct CameraParams {

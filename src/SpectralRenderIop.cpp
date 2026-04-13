@@ -403,7 +403,7 @@ void SpectralRenderIop::knobs(Knob_Callback f)
             Tooltip(f, "Direct sun brightness (squared for exponential feel).\n"
                        "Effective = value^2. So 3->9, 5->25, 10->100.\n"
                        "1 = dim fill. 5 = overcast. 8 = bright sun. 15+ = intense.");
-            Double_knob(f, &_skyIntensity, "sky_intensity", "sky fill"); SetRange(f, 0, 20);
+            Double_knob(f, &_skyIntensity, "sky_intensity", "sky fill"); SetRange(f, 0, 5);
             SetFlags(f, Knob::LOG_SLIDER);
             Tooltip(f, "Sky dome fill brightness (squared).\n"
                        "Effective = value^2. So 2->4, 5->25.\n"
@@ -655,70 +655,7 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                    "CPU only -- GPU always uses RGB mode.\n"
                    "Surfaces always use full spectral regardless of this setting.");
 
-        // ─── Viewport ───────────────────────────────────────────────────
-        Divider(f, "3D Viewport");
-        Bool_knob(f, &_vdb3dPreview, "vdb_3d_preview", "3D preview");
-        Tooltip(f, "Draw volume bbox and point cloud in the 3D viewer.\n"
-                   "Uses the same render mode coloring as the final render.\n"
-                   "Transform follows GeoTransform from the scene graph.");
-        Bool_knob(f, &_vdbShowBbox, "vdb_show_bbox", "bbox");
-        ClearFlags(f, Knob::STARTLINE);
-        Tooltip(f, "Green wireframe bounding box in the 3D viewer.\n"
-                   "Useful for camera placement before rendering.");
-        Bool_knob(f, &_vdbShowPoints, "vdb_show_points", "points");
-        ClearFlags(f, Knob::STARTLINE);
-        Tooltip(f, "Coloured point cloud preview.\n"
-                   "Colour scheme follows the current Render Mode.");
-        Bool_knob(f, &_vdbShadedPreview, "vdb_shaded", "shaded");
-        ClearFlags(f, Knob::STARTLINE);
-        Tooltip(f, "GPU ray-marched volume preview in the 3D viewport.\n"
-                   "Shows absorption + fire emission with real shading.\n"
-                   "Requires temperature/flame grids for fire colour.");
-        static const char* const vpResOpts[] = {
-            "32", "64", "128", "256", nullptr
-        };
-        Enumeration_knob(f, &_vdbViewportRes, vpResOpts, "vdb_viewport_res", "vp res");
-        ClearFlags(f, Knob::STARTLINE);
-        Tooltip(f, "Viewport volume resolution for shaded preview.\n"
-                   "Higher = sharper but slower to load.\n"
-                   "32 = fastest scrub, 256 = near-render quality.");
-        static const char* const smResOpts[] = {
-            "256", "512", "1024", "2048", nullptr
-        };
-        Enumeration_knob(f, &_vpShadowMapRes, smResOpts, "vp_shadow_res", "shadow res");
-        ClearFlags(f, Knob::STARTLINE);
-        Tooltip(f, "Viewport shadow map resolution.\n"
-                   "Higher = sharper geometry shadows but slower.\n"
-                   "256 = fast preview, 2048 = crisp shadows.");
-        static const char* const volShadOpts[] = {
-            "off", "4", "8", "16", nullptr
-        };
-        Enumeration_knob(f, &_vpVolShadowSamples, volShadOpts, "vp_vol_shadow", "vol shadow");
-        ClearFlags(f, Knob::STARTLINE);
-        Tooltip(f, "Volume self-shadow samples in viewport.\n"
-                   "off = no self-shadow, 16 = best quality.\n"
-                   "Also controls volume shadow on geometry.");
-        Double_knob(f, &_vdbPointDensity, "vdb_point_density", "density");
-        ClearFlags(f, Knob::STARTLINE);
-        SetRange(f, 0.1, 1.0);
-        Tooltip(f, "Point sampling: 0.1 = sparse/fast, 1.0 = all voxels.");
-        Double_knob(f, &_vdbPointSize, "vdb_point_size", "size");
-        ClearFlags(f, Knob::STARTLINE);
-        SetRange(f, 1, 8);
-        Tooltip(f, "GL point size in pixels.");
-        Newline(f);
-        Bool_knob(f, &_vdbFastScrub, "vdb_fast_scrub", "fast scrub");
-        Tooltip(f, "Bbox-only during timeline scrub.\n"
-                   "Full point cloud loads when playback stops.");
-        Bool_knob(f, &_vdbCacheEnabled, "vdb_cache_enabled", "cache");
-        ClearFlags(f, Knob::STARTLINE);
-        Int_knob(f, &_vdbCacheMax, "vdb_cache_max", "");
-        ClearFlags(f, Knob::STARTLINE);
-        SetRange(f, 1, 32);
-        Text_knob(f, "frames");
-        ClearFlags(f, Knob::STARTLINE);
-        Button(f, "vdb_cache_clear", "Clear Cache");
-        ClearFlags(f, Knob::STARTLINE);
+        // ─── Viewport controls moved to 3D Viewport tab ───────────────
 
         // ─── Grids (moved to SpectralVDBRead) ─────────────────────────
         // Hidden but kept for backward compatibility with saved scripts
@@ -826,6 +763,123 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         EndGroup(f);
 
     }
+
+    // =====================================================================
+    // 3D VIEWPORT TAB
+    // =====================================================================
+    Tab_knob(f, "3D Viewport");
+
+    Text_knob(f,
+        "<font color='#777' size='-1'>"
+        "Real-time preview of volumes and geometry in Nuke's 3D viewer.<br>"
+        "Shaded mode ray-marches volumes with scene lighting, shadows, and fire emission.<br>"
+        "All preview settings are viewport-only \xe2\x80\x94 they do not affect the final render."
+        "</font>"
+    );
+
+    // ─── Display ─────────────────────────────────────────────────────
+    Divider(f, "Display");
+    Bool_knob(f, &_vdb3dPreview, "vdb_3d_preview", "enable 3D preview");
+    Tooltip(f, "Master switch for all 3D viewport drawing.\n"
+               "When OFF, no volume or geometry preview appears in the viewer.");
+    Bool_knob(f, &_vdbShowBbox, "vdb_show_bbox", "bbox");
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "Green wireframe bounding box.\n"
+               "Useful for camera framing before rendering.");
+    Bool_knob(f, &_vdbShowPoints, "vdb_show_points", "points");
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "Coloured point cloud preview.\n"
+               "Colour follows the current Volume Render Mode.\n"
+               "Fast and lightweight \xe2\x80\x94 good for scrubbing.");
+
+    // ─── Shaded Preview ──────────────────────────────────────────────
+    Divider(f, "Shaded Volume");
+    Bool_knob(f, &_vdbShadedPreview, "vdb_shaded", "shaded preview");
+    Tooltip(f, "GPU ray-marched volume in the 3D viewport.\n"
+               "Renders absorption, self-shadowing, and fire emission\n"
+               "using the connected SpectralEnvLight or built-in sun.\n\n"
+               "TIP: Disable 'points' when using shaded for a cleaner look.");
+    {
+        static const char* const vpResOpts[] = {
+            "32", "64", "128", "256", nullptr
+        };
+        Enumeration_knob(f, &_vdbViewportRes, vpResOpts, "vdb_viewport_res", "volume res");
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Resolution of the 3D volume texture.\n"
+                   "32 = fastest scrubbing, blocky look\n"
+                   "64 = good balance for animation work\n"
+                   "128 = detailed preview (default)\n"
+                   "256 = near-render quality, slower to load\n\n"
+                   "Higher values load temp/flame grids for fire colours.");
+    }
+    Newline(f);
+    Double_knob(f, &_vdbPointDensity, "vdb_point_density", "point density");
+    SetRange(f, 0.1, 1.0);
+    Tooltip(f, "Density of the point cloud sampling.\n"
+               "0.1 = very sparse (fast), 1.0 = all voxels (slow).\n"
+               "Only affects point cloud mode, not shaded preview.");
+    Double_knob(f, &_vdbPointSize, "vdb_point_size", "point size");
+    ClearFlags(f, Knob::STARTLINE);
+    SetRange(f, 1, 8);
+    Tooltip(f, "GL point size in pixels for the point cloud.");
+
+    // ─── Shadows ─────────────────────────────────────────────────────
+    Divider(f, "Viewport Shadows");
+    {
+        static const char* const smResOpts[] = {
+            "256", "512", "1024", "2048", nullptr
+        };
+        Enumeration_knob(f, &_vpShadowMapRes, smResOpts, "vp_shadow_res", "shadow map");
+        Tooltip(f, "Resolution of the geometry shadow map.\n"
+                   "256 = fast, soft shadows\n"
+                   "1024 = good balance (default)\n"
+                   "2048 = sharp, crisp shadows\n\n"
+                   "This controls geometry-to-geometry shadows only\n"
+                   "(e.g. a cylinder casting shadow on a card).");
+    }
+    {
+        static const char* const volShadOpts[] = {
+            "off", "4", "8", "16", nullptr
+        };
+        Enumeration_knob(f, &_vpVolShadowSamples, volShadOpts, "vp_vol_shadow", "vol shadow");
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Volume shadow samples on geometry.\n"
+                   "Marches through the volume toward the light to\n"
+                   "determine how much light is blocked by the cloud.\n\n"
+                   "off = no volume shadows on geometry\n"
+                   "4 = fast preview\n"
+                   "8 = default\n"
+                   "16 = best quality");
+    }
+
+    // ─── Performance ─────────────────────────────────────────────────
+    Divider(f, "Performance");
+    Bool_knob(f, &_vdbFastScrub, "vdb_fast_scrub", "fast scrub");
+    Tooltip(f, "Show bbox-only during timeline scrub.\n"
+               "Full preview loads when playback stops.\n"
+               "Keeps the timeline responsive with heavy VDB sequences.");
+    Bool_knob(f, &_vdbCacheEnabled, "vdb_cache_enabled", "frame cache");
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "Cache loaded VDB frames for instant scrub-back.\n"
+               "Each cached frame stores the resampled density grid.");
+    Int_knob(f, &_vdbCacheMax, "vdb_cache_max", "");
+    ClearFlags(f, Knob::STARTLINE);
+    SetRange(f, 1, 32);
+    Text_knob(f, "frames");
+    ClearFlags(f, Knob::STARTLINE);
+    Button(f, "vdb_cache_clear", "Clear Cache");
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "Flush all cached VDB frames from memory.");
+
+    Text_knob(f,
+        "<font color='#556' size='-1'><br>"
+        "\xe2\x80\xa2 Shaded preview uses the SpectralEnvLight sun direction and colour.<br>"
+        "\xe2\x80\xa2 Without an EnvLight, the built-in light checkbox on the Lighting tab controls the sun.<br>"
+        "\xe2\x80\xa2 Volume shadows in the viewport are approximate \xe2\x80\x94 the final render uses full path tracing.<br>"
+        "\xe2\x80\xa2 Geometry shadow mapping is real-time but doesn't support transparency or refraction.<br>"
+        "\xe2\x80\xa2 High volume res (256) with shaded preview can be slow \xe2\x80\x94 use 64 for animation work."
+        "</font>"
+    );
 
     Tab_knob(f, "AOV");
 
@@ -4110,7 +4164,7 @@ void SpectralRenderIop::_DrawVolumeShaded(ViewerContext* ctx)
     // Compute light direction and color from scene lights
     float lightDirX = 0.f, lightDirY = 1.f, lightDirZ = 0.f;
     float lightR = 0.f, lightG = 0.f, lightB = 0.f;
-    float ambR = 0.05f, ambG = 0.06f, ambB = 0.08f;
+    float ambR = 0.f, ambG = 0.f, ambB = 0.f;
 
     bool vpHasLight = _cachedEnvLight || _useBuiltinLight;
     if (vpHasLight) {
@@ -4389,7 +4443,8 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
     }
 
     // ─── Shaded volume preview (GL ray march) ──────────────────────
-    if (_vdbShadedPreview && !_volumes.empty() && _volumes[0] && _volumes[0]->IsValid()) {
+    bool vpHasAnyLight = _cachedEnvLight || _useBuiltinLight;
+    if (_vdbShadedPreview && !_volumes.empty() && _volumes[0] && _volumes[0]->IsValid() && vpHasAnyLight) {
         _DrawVolumeShaded(ctx);
     }
 
@@ -4530,8 +4585,8 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
 
             // Light uniforms (reuse viewport light computation from _DrawVolumeShaded context)
             float gLightDirX = 0.f, gLightDirY = 1.f, gLightDirZ = 0.f;
-            float gLightR = 0.7f, gLightG = 0.65f, gLightB = 0.6f;
-            float gAmbR = 0.15f, gAmbG = 0.18f, gAmbB = 0.22f;
+            float gLightR = 0.f, gLightG = 0.f, gLightB = 0.f;
+            float gAmbR = 0.f, gAmbG = 0.f, gAmbB = 0.f;
             bool gHasLight = _cachedEnvLight || _useBuiltinLight;
             if (gHasLight) {
                 double sunElev = _cachedEnvLight ? _cachedEnvLight->sunElevation : _sunElevation;
@@ -5468,8 +5523,9 @@ void SpectralRenderIop::_BuildLightRig()
             double sunPow = el->sunIntensity * el->sunIntensity;
             double elevFactor = std::max(0.1, std::min(el->sunElevation / 12.0, 1.0));
             double si = sunPow * elevFactor * skyMix;
-            // Ensure minimum sun brightness so scene isn't black at low elevations
-            si = std::max(si, 0.5 * skyMix);
+            // Ensure minimum sun brightness at low elevations (only if sun enabled)
+            if (el->sunIntensity > 0.01)
+                si = std::max(si, 0.5 * skyMix);
             if (si > 0.001) {
                 SpectralLight sun;
                 if (el->sunShadowSoftness > 0.01) {
@@ -5482,6 +5538,7 @@ void SpectralRenderIop::_BuildLightRig()
                     sun.direction = sunDir;
                 }
                 sun.color = GfVec3f(float(sunR * si), float(sunG * si), float(sunB * si));
+                sun.illuminant = SpectralLight::Illuminant::RGB;
                 sun.intensity = 1.f;
                 _scene->AddLight(sun);
                 SLOG("SpectralRender: env sky sun type=%s softness=%.2f radius=%.1f\n",
@@ -5489,15 +5546,16 @@ void SpectralRenderIop::_BuildLightRig()
                     el->sunShadowSoftness, sun.radius);
             }
 
-            double skyPow = el->skyIntensity * el->skyIntensity;
-            double ski = skyPow * skyMix;
-            // Ensure minimum sky ambient so geometry isn't black
-            ski = std::max(ski, 0.1 * skyMix);
+            double ski = el->skyIntensity * skyMix;
+            // Ensure minimum sky ambient (only if sky enabled)
+            if (el->skyIntensity > 0.01)
+                ski = std::max(ski, 0.1 * skyMix);
             if (ski > 0.001) {
                 SpectralLight sky;
                 sky.type = SpectralLight::Type::Dome;
                 sky.color = GfVec3f(float(skyR * ski), float(skyG * ski), float(skyB * ski));
                 sky.intensity = 1.f;
+                sky.illuminant = SpectralLight::Illuminant::RGB;
 
                 // Planet sky colour overrides
                 if (el->skyPreset == 13) sky.color = GfVec3f(float(0.8*ski), float(0.55*ski), float(0.3*ski));
@@ -5614,6 +5672,7 @@ void SpectralRenderIop::_BuildLightRig()
                 key.direction = keyDir;
             }
             key.color = GfVec3f(float(ki), float(ki * 0.95), float(ki * 0.9));
+            key.illuminant = SpectralLight::Illuminant::RGB;
             key.intensity = 1.f;
             _scene->AddLight(key);
         }
@@ -5625,6 +5684,7 @@ void SpectralRenderIop::_BuildLightRig()
             fill.type = SpectralLight::Type::Distant;
             fill.direction = dirFromElevAzim(sl->keyElevation * 0.5, sl->keyAzimuth + 180);
             fill.color = GfVec3f(float(fi * 0.9), float(fi * 0.92), float(fi));
+            fill.illuminant = SpectralLight::Illuminant::RGB;
             fill.intensity = 1.f;
             _scene->AddLight(fill);
         }
@@ -5636,6 +5696,7 @@ void SpectralRenderIop::_BuildLightRig()
             rim.type = SpectralLight::Type::Distant;
             rim.direction = dirFromElevAzim(sl->keyElevation + 15, sl->keyAzimuth + 160);
             rim.color = GfVec3f(float(ri));
+            rim.illuminant = SpectralLight::Illuminant::RGB;
             rim.intensity = 1.f;
             _scene->AddLight(rim);
         }
@@ -5665,16 +5726,17 @@ void SpectralRenderIop::_BuildLightRig()
                     sun.direction = sunDir;
                 }
                 sun.color = GfVec3f(float(sunR * si), float(sunG * si), float(sunB * si));
+                sun.illuminant = SpectralLight::Illuminant::RGB;
                 sun.intensity = 1.f;
                 _scene->AddLight(sun);
             }
 
-            double skyPow = _skyIntensity * _skyIntensity;
-            double ski = skyPow * m;
+            double ski = _skyIntensity * m;
             if (ski > 0.001) {
                 SpectralLight sky;
                 sky.type = SpectralLight::Type::Dome;
                 sky.color = GfVec3f(float(skyR * ski), float(skyG * ski), float(skyB * ski));
+                sky.illuminant = SpectralLight::Illuminant::RGB;
                 sky.intensity = 1.f;
                 _scene->AddLight(sky);
             }
@@ -5697,6 +5759,7 @@ void SpectralRenderIop::_BuildLightRig()
                     key.direction = keyDir;
                 }
                 key.color = GfVec3f(float(ki), float(ki * 0.95), float(ki * 0.9));
+                key.illuminant = SpectralLight::Illuminant::RGB;
                 key.intensity = 1.f;
                 _scene->AddLight(key);
             }
@@ -5706,6 +5769,7 @@ void SpectralRenderIop::_BuildLightRig()
                 fill.type = SpectralLight::Type::Distant;
                 fill.direction = dirFromElevAzim(_studioKeyElevation * 0.5, _studioKeyAzimuth + 180);
                 fill.color = GfVec3f(float(fi * 0.9), float(fi * 0.92), float(fi));
+                fill.illuminant = SpectralLight::Illuminant::RGB;
                 fill.intensity = 1.f;
                 _scene->AddLight(fill);
             }
@@ -5715,6 +5779,7 @@ void SpectralRenderIop::_BuildLightRig()
                 rim.type = SpectralLight::Type::Distant;
                 rim.direction = dirFromElevAzim(_studioKeyElevation + 15, _studioKeyAzimuth + 160);
                 rim.color = GfVec3f(float(ri));
+                rim.illuminant = SpectralLight::Illuminant::RGB;
                 rim.intensity = 1.f;
                 _scene->AddLight(rim);
             }
@@ -5743,6 +5808,8 @@ void SpectralRenderIop::_BuildLightRig()
     }
 
     // Safety net: ensure scene has minimum illumination for spectral rendering.
+    // Only when built-in light is enabled.
+    if (_useBuiltinLight) {
     // Very dim/unbalanced lighting causes severe noise in GPU spectral path.
     {
         const auto& allLights = _scene->GetLights();
@@ -5757,11 +5824,13 @@ void SpectralRenderIop::_BuildLightRig()
             fallbackDome.type = pxr::SpectralLight::Type::Dome;
             float fill = std::max(0.1f, 0.5f - totalLum);
             fallbackDome.color = GfVec3f(fill * 0.8f, fill * 0.85f, fill);
+            fallbackDome.illuminant = pxr::SpectralLight::Illuminant::RGB;
             fallbackDome.intensity = 1.f;
             _scene->AddLight(fallbackDome);
             SLOG("SpectralRender: added fallback dome (totalLum=%.3f fill=%.3f)\n", totalLum, fill);
         }
     }
+    }  // _useBuiltinLight
 
     // Log all lights
     {
