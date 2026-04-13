@@ -682,6 +682,22 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         Tooltip(f, "Viewport volume resolution for shaded preview.\n"
                    "Higher = sharper but slower to load.\n"
                    "32 = fastest scrub, 256 = near-render quality.");
+        static const char* const smResOpts[] = {
+            "256", "512", "1024", "2048", nullptr
+        };
+        Enumeration_knob(f, &_vpShadowMapRes, smResOpts, "vp_shadow_res", "shadow res");
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Viewport shadow map resolution.\n"
+                   "Higher = sharper geometry shadows but slower.\n"
+                   "256 = fast preview, 2048 = crisp shadows.");
+        static const char* const volShadOpts[] = {
+            "off", "4", "8", "16", nullptr
+        };
+        Enumeration_knob(f, &_vpVolShadowSamples, volShadOpts, "vp_vol_shadow", "vol shadow");
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Volume self-shadow samples in viewport.\n"
+                   "off = no self-shadow, 16 = best quality.\n"
+                   "Also controls volume shadow on geometry.");
         Double_knob(f, &_vdbPointDensity, "vdb_point_density", "density");
         ClearFlags(f, Knob::STARTLINE);
         SetRange(f, 0.1, 1.0);
@@ -1107,7 +1123,7 @@ int SpectralRenderIop::knob_changed(Knob* k)
         }
         return 1;
     }
-    if (k->is("vdb_3d_preview") || k->is("vdb_show_points") || k->is("vdb_shaded") || k->is("vdb_viewport_res") || k->is("vdb_point_density") || k->is("vdb_point_size") || k->is("vdb_show_bbox") || k->is("vdb_fast_scrub")) {
+    if (k->is("vdb_3d_preview") || k->is("vdb_show_points") || k->is("vdb_shaded") || k->is("vdb_viewport_res") || k->is("vdb_point_density") || k->is("vdb_point_size") || k->is("vdb_show_bbox") || k->is("vdb_fast_scrub") || k->is("vp_shadow_res") || k->is("vp_vol_shadow")) {
         _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
         if (k->is("vdb_fast_scrub") || k->is("vdb_viewport_res")) _vdbLoadedPath.clear();
         return 1;
@@ -3656,7 +3672,28 @@ uniform int uMaxSteps;
 uniform vec3 uLightDir;
 uniform vec3 uLightCol;
 uniform vec3 uAmbient;
+// Volume transform
+uniform float uHasXform;
+uniform vec3 uVolCenter;
+uniform mat3 uInvRotM;
+uniform vec3 uInvScale;
+uniform vec3 uOrigMin;
+uniform vec3 uOrigMax;
 varying vec3 vWorldPos;
+
+vec3 worldToUVW(vec3 p) {
+    if (uHasXform > 0.5) {
+        vec3 local = p - uVolCenter;
+        vec3 unrot = uInvRotM * local;
+        vec3 unscaled = unrot * uInvScale;
+        vec3 origCenter = (uOrigMin + uOrigMax) * 0.5;
+        vec3 origHalf = (uOrigMax - uOrigMin) * 0.5;
+        vec3 orig = unscaled + origCenter;
+        return (orig - uOrigMin) / (origHalf * 2.0);
+    } else {
+        return (p - uBboxMin) / (uBboxMax - uBboxMin);
+    }
+}
 
 void main() {
     vec3 camPos = (gl_ModelViewMatrixInverse * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
@@ -3683,13 +3720,15 @@ void main() {
         if (t > tFar) break;
 
         vec3 p = camPos + rd * t;
-        vec3 uvw = (p - uBboxMin) / size;
+        vec3 uvw = worldToUVW(p);
+
+        // Skip if outside [0,1]³ (rotated volume doesn't fill axis-aligned bbox)
+        if (uvw.x < 0.0 || uvw.x > 1.0 || uvw.y < 0.0 || uvw.y > 1.0 || uvw.z < 0.0 || uvw.z > 1.0) continue;
 
         float d = texture3D(uDensity, uvw).r * uDensityMult;
         float tmp = texture3D(uTemp, uvw).r * uTempMult;
         if (d < 0.02) continue;
 
-        // Fire emission from temperature
         vec3 emit = vec3(0.0);
         if (tmp > 0.01) {
             emit.r = min(1.0, tmp * 3.0);
@@ -3698,21 +3737,17 @@ void main() {
             emit *= tmp * 2.0;
         }
 
-        // Shadow: 6 samples along light direction (longer reach)
+        // Shadow in UVW space
         float shadowD = 0.0;
+        vec3 shadowStep = worldToUVW(p + lightDir * diag * 0.04) - uvw;
         for (int s = 1; s <= 6; s++) {
-            vec3 sp = uvw + lightDir * (float(s) * 0.04);
+            vec3 sp = uvw + shadowStep * float(s);
             if (sp.x >= 0.0 && sp.x <= 1.0 && sp.y >= 0.0 && sp.y <= 1.0 && sp.z >= 0.0 && sp.z <= 1.0)
                 shadowD += texture3D(uDensity, sp).r * uDensityMult;
         }
         float shadow = exp(-shadowD * 1.2);
 
-        // In-scattered radiance from scene lights
-        vec3 Li = uLightCol * shadow * 0.3
-                + uAmbient
-                + emit;
-
-        // Absorption — density controls opacity only
+        vec3 Li = uLightCol * shadow * 0.3 + uAmbient + emit;
         float sigma = d * step * 0.6;
         float tr = exp(-sigma);
         color += transmittance * Li * (1.0 - tr);
@@ -3797,6 +3832,8 @@ uniform vec3 uMatColor;
 uniform float uHasVolume;
 uniform float uHasShadowMap;
 uniform mat4 uLightVP;
+uniform float uShadowTexelSize;
+uniform int uVolShadowSamples;
 varying vec3 vWorldPos;
 varying vec3 vNormal;
 
@@ -3818,7 +3855,7 @@ void main() {
         if (shadowUV.x >= 0.0 && shadowUV.x <= 1.0 && shadowUV.y >= 0.0 && shadowUV.y <= 1.0) {
             // PCF 3x3 for soft edges
             float shadow = 0.0;
-            float texelSize = 1.0 / 1024.0;
+            float texelSize = uShadowTexelSize;
             for (int y = -1; y <= 1; y++) {
                 for (int x = -1; x <= 1; x++) {
                     float mapDepth = texture2D(uShadowMap, shadowUV + vec2(float(x), float(y)) * texelSize).r;
@@ -3831,7 +3868,7 @@ void main() {
 
     // Volume shadow on geometry
     float volShadow = 1.0;
-    if (uHasVolume > 0.5) {
+    if (uHasVolume > 0.5 && uVolShadowSamples > 0) {
         vec3 size = uBboxMax - uBboxMin;
         vec3 ld = normalize(uLightDir);
         vec3 inv = vec3(
@@ -3848,8 +3885,9 @@ void main() {
         tNear = max(tNear, 0.001);
         if (tNear < tFar && tFar > 0.0) {
             float totalD = 0.0;
-            float marchStep = (tFar - tNear) / 16.0;
-            for (int i = 0; i < 16; i++) {
+            float marchStep = (tFar - tNear) / float(uVolShadowSamples);
+            for (int i = 0; i < 32; i++) {
+                if (i >= uVolShadowSamples) break;
                 float t = tNear + (float(i) + 0.5) * marchStep;
                 vec3 p = vWorldPos + ld * t;
                 vec3 uvw = (p - uBboxMin) / size;
@@ -3961,11 +3999,16 @@ void SpectralRenderIop::_InitGLVolShader()
         }
     }
 
-    // Shadow map FBO + depth texture
+    // Shadow map FBO + depth texture (recreate if size changed)
+    int smSize = _GetShadowMapSize();
+    if (_glShadowFBO && _glShadowMapCurSize != smSize) {
+        glDeleteFramebuffers(1, &_glShadowFBO); _glShadowFBO = 0;
+        glDeleteTextures(1, &_glShadowDepthTex); _glShadowDepthTex = 0;
+    }
     if (!_glShadowFBO && _glShadowDepthProg) {
         glGenTextures(1, &_glShadowDepthTex);
         glBindTexture(GL_TEXTURE_2D, _glShadowDepthTex);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, kShadowMapSize, kShadowMapSize,
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, smSize, smSize,
                      0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -3987,6 +4030,7 @@ void SpectralRenderIop::_InitGLVolShader()
             glDeleteFramebuffers(1, &_glShadowFBO); _glShadowFBO = 0;
             glDeleteTextures(1, &_glShadowDepthTex); _glShadowDepthTex = 0;
         }
+        _glShadowMapCurSize = smSize;
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
 }
@@ -4127,6 +4171,17 @@ void SpectralRenderIop::_DrawVolumeShaded(ViewerContext* ctx)
     glUniform3f(glGetUniformLocation(_glVolProg, "uLightDir"), lightDirX, lightDirY, lightDirZ);
     glUniform3f(glGetUniformLocation(_glVolProg, "uLightCol"), lightR, lightG, lightB);
     glUniform3f(glGetUniformLocation(_glVolProg, "uAmbient"), ambR, ambG, ambB);
+
+    // Volume transform uniforms
+    glUniform1f(glGetUniformLocation(_glVolProg, "uHasXform"), vol->hasTransform ? 1.f : 0.f);
+    if (vol->hasTransform) {
+        glUniform3f(glGetUniformLocation(_glVolProg, "uVolCenter"), vol->_center[0], vol->_center[1], vol->_center[2]);
+        glUniform3f(glGetUniformLocation(_glVolProg, "uInvScale"), vol->_invScale[0], vol->_invScale[1], vol->_invScale[2]);
+        glUniform3f(glGetUniformLocation(_glVolProg, "uOrigMin"), vol->bboxMin[0], vol->bboxMin[1], vol->bboxMin[2]);
+        glUniform3f(glGetUniformLocation(_glVolProg, "uOrigMax"), vol->bboxMax[0], vol->bboxMax[1], vol->bboxMax[2]);
+        // Inverse rotation: _rotM is row-major, GL interprets as column-major = transpose = inverse
+        glUniformMatrix3fv(glGetUniformLocation(_glVolProg, "uInvRotM"), 1, GL_FALSE, vol->_rotM);
+    }
 
     // Bind textures
     glActiveTexture(GL_TEXTURE0);
@@ -4578,7 +4633,7 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
                 GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
 
                 glBindFramebuffer(GL_FRAMEBUFFER, _glShadowFBO);
-                glViewport(0, 0, kShadowMapSize, kShadowMapSize);
+                glViewport(0, 0, _GetShadowMapSize(), _GetShadowMapSize());
                 glClear(GL_DEPTH_BUFFER_BIT);
                 glEnable(GL_DEPTH_TEST);
                 glDisable(GL_BLEND);
@@ -4610,6 +4665,10 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
             glUniform3f(glGetUniformLocation(_glGeoProg, "uLightCol"), gLightR, gLightG, gLightB);
             glUniform3f(glGetUniformLocation(_glGeoProg, "uAmbient"), gAmbR, gAmbG, gAmbB);
             glUniform1f(glGetUniformLocation(_glGeoProg, "uHasShadowMap"), hasShadowMap ? 1.f : 0.f);
+            glUniform1f(glGetUniformLocation(_glGeoProg, "uShadowTexelSize"), 1.f / float(_GetShadowMapSize()));
+            static const int volShadLUT[] = {0, 4, 8, 16};
+            glUniform1i(glGetUniformLocation(_glGeoProg, "uVolShadowSamples"),
+                        volShadLUT[std::min(std::max(_vpVolShadowSamples, 0), 3)]);
             if (hasShadowMap) {
                 glUniformMatrix4fv(glGetUniformLocation(_glGeoProg, "uLightVP"), 1, GL_FALSE, lightVP);
                 glActiveTexture(GL_TEXTURE2);

@@ -105,9 +105,9 @@ static bool _CreateVolumeTex3D(const float* data, int resX, int resY, int resZ,
     resDesc.res.array.array = outArray;
 
     cudaTextureDesc texDesc = {};
-    texDesc.addressMode[0] = cudaAddressModeClamp;
-    texDesc.addressMode[1] = cudaAddressModeClamp;
-    texDesc.addressMode[2] = cudaAddressModeClamp;
+    texDesc.addressMode[0] = cudaAddressModeBorder;
+    texDesc.addressMode[1] = cudaAddressModeBorder;
+    texDesc.addressMode[2] = cudaAddressModeBorder;
     texDesc.filterMode = cudaFilterModeLinear;  // hardware trilinear!
     texDesc.readMode = cudaReadModeElementType;
     texDesc.normalizedCoords = 1;  // use [0,1] coordinates
@@ -936,9 +936,9 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
                     resDesc.resType = cudaResourceTypeArray;
                     resDesc.res.array.array = arr;
                     cudaTextureDesc texDesc = {};
-                    texDesc.addressMode[0] = cudaAddressModeClamp;
-                    texDesc.addressMode[1] = cudaAddressModeClamp;
-                    texDesc.addressMode[2] = cudaAddressModeClamp;
+                    texDesc.addressMode[0] = cudaAddressModeBorder;
+                    texDesc.addressMode[1] = cudaAddressModeBorder;
+                    texDesc.addressMode[2] = cudaAddressModeBorder;
                     texDesc.filterMode = cudaFilterModeLinear;
                     texDesc.readMode = cudaReadModeElementType;
                     texDesc.normalizedCoords = 1;

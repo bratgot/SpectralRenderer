@@ -268,13 +268,19 @@ private:
     // GL volume ray march shader
     bool   _vdbShadedPreview = false;
     int    _vdbViewportRes = 2;      // 0=32, 1=64, 2=128, 3=256
+    int    _vpShadowMapRes = 2;     // 0=256, 1=512, 2=1024, 3=2048
+    int    _vpVolShadowSamples = 2; // 0=off, 1=4, 2=8, 3=16
     GLuint _glVolProg = 0;
     GLuint _glShadowProg = 0;
     GLuint _glGeoProg = 0;
     GLuint _glShadowDepthProg = 0;
     GLuint _glShadowFBO = 0;
     GLuint _glShadowDepthTex = 0;
-    static const int kShadowMapSize = 1024;
+    int    _glShadowMapCurSize = 0;  // current FBO size (recreate if changed)
+    int _GetShadowMapSize() const {
+        static const int lut[] = {256, 512, 1024, 2048};
+        return lut[std::min(std::max(_vpShadowMapRes, 0), 3)];
+    }
     GLuint _glVolDensityTex = 0;
     GLuint _glVolTempTex = 0;
     int    _glVolTexFrame = -1;
