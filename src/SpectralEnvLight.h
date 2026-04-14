@@ -51,6 +51,7 @@ public:
     // Guide appearance
     double guideLineWidth = 1.0;
     double guideIconScale = 1.0;
+    double guideOpacity = 0.6;
     int    guideDashPattern = 1;   // 0=solid, 1=dashed, 2=dotted
     double guideSunColor[3] = {1.0, 0.85, 0.3};
     double guideDomeColor[3] = {0.3, 0.5, 0.8};

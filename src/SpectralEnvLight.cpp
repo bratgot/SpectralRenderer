@@ -478,28 +478,32 @@ void SpectralEnvLight::knobs(Knob_Callback f)
         SetRange(f, 10, 500);
 
         Divider(f, "Guide Appearance");
+
+        Double_knob(f, &guideOpacity, "guide_opacity", "opacity");
+        SetRange(f, 0.0, 1.0);
+        Tooltip(f, "Overall opacity of all viewport guides.");
         Double_knob(f, &guideLineWidth, "guide_line_width", "line width");
+        ClearFlags(f, Knob::STARTLINE);
         SetRange(f, 0.5, 4.0);
-        Tooltip(f, "Thickness of viewport guide lines (dome, compass, arc).");
+        Tooltip(f, "Thickness of viewport guide lines.");
         Double_knob(f, &guideIconScale, "guide_icon_scale", "icon scale");
         ClearFlags(f, Knob::STARTLINE);
         SetRange(f, 0.5, 3.0);
-        Tooltip(f, "Scale of the sun icon in the viewport.");
+        Tooltip(f, "Scale of the sun icon.");
+
         {
             static const char* const dashOpts[] = {
                 "solid", "dashed", "dotted", nullptr
             };
-            Enumeration_knob(f, &guideDashPattern, dashOpts, "guide_dash", "line style");
-            Tooltip(f, "Line style for the sun day arc.");
+            Enumeration_knob(f, &guideDashPattern, dashOpts, "guide_dash", "sun path");
+            Tooltip(f, "Line style for the sun day arc path.");
         }
-        Newline(f);
-        Color_knob(f, guideSunColor, IRange(0,1), "guide_sun_color", "sun");
+
+        Color_knob(f, guideSunColor, IRange(0,1), "guide_sun_color", "sun colour");
         Tooltip(f, "Colour of the sun icon and connecting line.");
-        Color_knob(f, guideDomeColor, IRange(0,1), "guide_dome_color", "dome");
-        ClearFlags(f, Knob::STARTLINE);
-        Tooltip(f, "Colour of the sky dome wireframe.");
-        Color_knob(f, guideArcColor, IRange(0,1), "guide_arc_color", "arc");
-        ClearFlags(f, Knob::STARTLINE);
+        Color_knob(f, guideDomeColor, IRange(0,1), "guide_dome_color", "dome colour");
+        Tooltip(f, "Colour of the sky dome wireframe and altitude rings.");
+        Color_knob(f, guideArcColor, IRange(0,1), "guide_arc_color", "arc colour");
         Tooltip(f, "Colour of the sun day arc path.");
     }
     EndGroup(f);
