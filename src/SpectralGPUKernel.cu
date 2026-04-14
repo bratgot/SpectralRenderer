@@ -1204,9 +1204,11 @@ static __forceinline__ __device__ void marchSingleVolume(
                 stepRGB.z+=vlCol.z*vol.scatterColor.z*vScatW;
             }
 
-            // Dome ambient — SH or flat average
+            // Dome ambient — SH or flat average (only if dome has actual intensity)
             for (unsigned li=0; li<params.lightCount; ++li) {
                 if (params.lights[li].type==3) {
+                    float domeI = params.lights[li].intensity;
+                    if (domeI < 0.001f) break;  // dome disabled
                     float dW=vol.scattering*density;
                     float3 domeCol;
                     if (params.hasEnvSH) {
@@ -1234,12 +1236,15 @@ static __forceinline__ __device__ void marchSingleVolume(
                 }
             }
             // Phase 14: analytical MS approximation (Wrenninge 2015)
-            if (vol.msApprox && vol.scattering > 0.01f) {
+            // Only applies when there's actual incident light (not self-illuminating)
+            if (vol.msApprox && vol.scattering > 0.01f && (stepRGB.x + stepRGB.y + stepRGB.z) > 0.001f) {
                 float albedo = vol.scattering / fmaxf(vol.extinction, 0.01f);
                 float msB = albedo / fmaxf(1.f - albedo * vol.gForward * vol.lobeMix, 0.01f);
-                stepRGB.x += vol.msTint.x * density * vol.scattering * msB * 0.3f;
-                stepRGB.y += vol.msTint.y * density * vol.scattering * msB * 0.3f;
-                stepRGB.z += vol.msTint.z * density * vol.scattering * msB * 0.3f;
+                // Scale MS by ratio of actual light to expected light (so it's proportional)
+                float lightScale = fminf((stepRGB.x + stepRGB.y + stepRGB.z) * 0.5f, 1.f);
+                stepRGB.x += vol.msTint.x * density * vol.scattering * msB * 0.3f * lightScale;
+                stepRGB.y += vol.msTint.y * density * vol.scattering * msB * 0.3f * lightScale;
+                stepRGB.z += vol.msTint.z * density * vol.scattering * msB * 0.3f * lightScale;
             }
             stepRGB.x*=vol.intensity; stepRGB.y*=vol.intensity; stepRGB.z*=vol.intensity;
         }
