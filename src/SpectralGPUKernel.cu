@@ -1642,9 +1642,10 @@ extern "C" __global__ void __raygen__spectral()
                         float NdotL = fmaxf(0.f, N.x*L.x+N.y*L.y+N.z*L.z);
                         float atten = 1.f/(dist*dist);
                         float intensity = params.lights[li].intensity;
-                        rgb.x += baseCol.x*params.lights[li].color.x*NdotL*atten*intensity;
-                        rgb.y += baseCol.y*params.lights[li].color.y*NdotL*atten*intensity;
-                        rgb.z += baseCol.z*params.lights[li].color.z*NdotL*atten*intensity;
+                        float contrib = NdotL*atten*intensity*0.31830988618f; // 1/pi
+                        rgb.x += baseCol.x*params.lights[li].color.x*contrib;
+                        rgb.y += baseCol.y*params.lights[li].color.y*contrib;
+                        rgb.z += baseCol.z*params.lights[li].color.z*contrib;
                     }
                 }
                 rgb.x *= mat.opacity; rgb.y *= mat.opacity; rgb.z *= mat.opacity;
@@ -1746,9 +1747,10 @@ extern "C" __global__ void __raygen__spectral()
                         float NdotL = fmaxf(0.f, N.x*L.x+N.y*L.y+N.z*L.z);
                         float atten = 1.f/(dist*dist);
                         float intensity = params.lights[li].intensity;
-                        rgb.x += baseCol.x*params.lights[li].color.x*NdotL*atten*intensity;
-                        rgb.y += baseCol.y*params.lights[li].color.y*NdotL*atten*intensity;
-                        rgb.z += baseCol.z*params.lights[li].color.z*NdotL*atten*intensity;
+                        float contrib = NdotL*atten*intensity*0.31830988618f; // 1/pi
+                        rgb.x += baseCol.x*params.lights[li].color.x*contrib;
+                        rgb.y += baseCol.y*params.lights[li].color.y*contrib;
+                        rgb.z += baseCol.z*params.lights[li].color.z*contrib;
                     }
                 }
                 rgb.x += mat.emissiveColor.x; rgb.y += mat.emissiveColor.y; rgb.z += mat.emissiveColor.z;

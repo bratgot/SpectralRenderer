@@ -393,9 +393,10 @@ void SpectralIntegrator::RenderFrame(
                                             float NdotL = std::max(0.f, N[0]*L[0] + N[1]*L[1] + N[2]*L[2]);
                                             float atten = 1.f / (dist * dist);
                                             float intensity = light.EffectiveIntensity();
-                                            rgb[0] += baseCol[0] * light.color[0] * NdotL * atten * intensity;
-                                            rgb[1] += baseCol[1] * light.color[1] * NdotL * atten * intensity;
-                                            rgb[2] += baseCol[2] * light.color[2] * NdotL * atten * intensity;
+                                            float contrib = NdotL * atten * intensity * float(1.0 / M_PI);
+                                            rgb[0] += baseCol[0] * light.color[0] * contrib;
+                                            rgb[1] += baseCol[1] * light.color[1] * contrib;
+                                            rgb[2] += baseCol[2] * light.color[2] * contrib;
                                         }
                                     }
                                     // Emissive
