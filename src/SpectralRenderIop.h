@@ -289,6 +289,10 @@ private:
     GLuint _glReflDepthTex = 0;  // R32F for proper depth
     int    _glReflW = 0, _glReflH = 0;
     GLuint _glVolDensityTex = 0;
+    GLuint _glBaseColorTex = 0;   // viewport base color texture
+
+    // Project3D: per-material projection camera matrices
+    std::unordered_map<int, pxr::GfMatrix4d> _projCameraVP;  // matId → viewProjection
     GLuint _glVolTempTex = 0;
     int    _glVolTexFrame = -1;
     int    _glVolTexResX = 0, _glVolTexResY = 0, _glVolTexResZ = 0;

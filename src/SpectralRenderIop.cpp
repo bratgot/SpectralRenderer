@@ -44,6 +44,7 @@ static bool s_spectralLogEnabled = true;
 #include <pxr/usd/sdf/path.h>
 #include <pxr/usd/sdf/assetPath.h>
 #include <pxr/base/gf/matrix4d.h>
+#include <pxr/base/gf/matrix4f.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/gf/vec3d.h>
 #include <pxr/base/gf/rotation.h>
@@ -337,6 +338,7 @@ void SpectralRenderIop::knobs(Knob_Callback f)
             "can replace Nuke\xe2\x80\x99s built-in ScanlineRender in existing comp trees:<br>"
             "<br>"
             "\xe2\x80\xa2 Reads native Nuke materials (BasicMaterial, Phong, NukeDefaultSurface)<br>"
+            "\xe2\x80\xa2 Supports MtlXStandardSurface, PreviewSurface, and ReflectiveSurface<br>"
             "\xe2\x80\xa2 Auto-smooth normals eliminate faceted shading on simple geometry<br>"
             "\xe2\x80\xa2 Texture alpha is respected for transparency cutouts on cards<br>"
             "\xe2\x80\xa2 Premultiplied output comps directly over plates with Over nodes<br>"
@@ -2147,6 +2149,7 @@ void SpectralRenderIop::engine(
 void SpectralRenderIop::_LoadStage()
 {
     _scene = std::make_unique<pxr::SpectralScene>();
+    _projCameraVP.clear();
     _camera = SpectralCamera();
     _vdbHasSceneXform = false;
     _volumeXforms.clear();
@@ -2840,22 +2843,34 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                         }
                     }
 
-                    // Read UsdPreviewSurface inputs
+                    // Read UsdPreviewSurface inputs (with type safety)
                     auto readFloat = [&](const char* inputName, float& val) {
-                        UsdShadeInput inp = surfaceShader.GetInput(TfToken(inputName));
-                        if (inp) {
+                        try {
+                            UsdShadeInput inp = surfaceShader.GetInput(TfToken(inputName));
+                            if (!inp) return;
                             VtValue v;
                             inp.Get(&v, timeCode);
                             if (v.IsHolding<float>()) val = v.UncheckedGet<float>();
-                        }
+                            else if (v.IsHolding<double>()) val = float(v.UncheckedGet<double>());
+                            else if (v.IsHolding<int>()) val = float(v.UncheckedGet<int>());
+                        } catch (...) {}
                     };
                     auto readColor = [&](const char* inputName, GfVec3f& val) {
-                        UsdShadeInput inp = surfaceShader.GetInput(TfToken(inputName));
-                        if (inp) {
+                        try {
+                            UsdShadeInput inp = surfaceShader.GetInput(TfToken(inputName));
+                            if (!inp) return;
                             VtValue v;
                             inp.Get(&v, timeCode);
                             if (v.IsHolding<GfVec3f>()) val = v.UncheckedGet<GfVec3f>();
-                        }
+                            else if (v.IsHolding<GfVec4f>()) {
+                                GfVec4f v4 = v.UncheckedGet<GfVec4f>();
+                                val = GfVec3f(v4[0], v4[1], v4[2]);
+                            }
+                            else if (v.IsHolding<float>()) {
+                                float f = v.UncheckedGet<float>();
+                                val = GfVec3f(f, f, f);
+                            }
+                        } catch (...) {}
                     };
 
                     readColor("diffuseColor", mat.baseColor);
@@ -2866,6 +2881,187 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                     readColor("emissiveColor", mat.emissiveColor);
                     readFloat("clearcoat", mat.clearcoat);
                     readFloat("clearcoatRoughness", mat.clearcoatRoughness);
+
+                    // ── MaterialX Standard Surface ──
+                    // MtlXStandardSurface uses different input names
+                    {
+                        GfVec3f mtlxBaseColor(0.f);
+                        readColor("base_color", mtlxBaseColor);
+                        if (mtlxBaseColor != GfVec3f(0.f)) {
+                            float baseWeight = 1.f;
+                            readFloat("base", baseWeight);
+                            mat.baseColor = mtlxBaseColor * baseWeight;
+                        }
+                        float metalness = -1.f;
+                        readFloat("metalness", metalness);
+                        if (metalness >= 0.f) mat.metallic = metalness;
+
+                        float specRough = -1.f;
+                        readFloat("specular_roughness", specRough);
+                        if (specRough >= 0.f) mat.roughness = specRough;
+
+                        float specIOR = -1.f;
+                        readFloat("specular_IOR", specIOR);
+                        if (specIOR > 0.f) mat.ior = specIOR;
+
+                        // Specular weight scales Fresnel response
+                        // Modulate IOR: specular=0 → IOR=1 (no reflection), specular=1 → original IOR
+                        float specWeight = 1.f;
+                        readFloat("specular", specWeight);
+                        if (specWeight < 0.99f && mat.ior > 1.0f) {
+                            mat.ior = 1.f + (mat.ior - 1.f) * specWeight;
+                        }
+
+                        // Specular color tints the reflection for dielectrics
+                        GfVec3f specColor(1.f);
+                        readColor("specular_color", specColor);
+                        // Apply specular tint: for metals it tints reflection, for dielectrics
+                        // it modulates F0. We approximate by blending base color toward specular
+                        // tint at high specular weight for metallic materials.
+                        if (mat.metallic > 0.5f && specColor != GfVec3f(1.f)) {
+                            GfVec3f tint(0.5f + specColor[0]*0.5f, 0.5f + specColor[1]*0.5f, 0.5f + specColor[2]*0.5f);
+                            mat.baseColor = GfVec3f(mat.baseColor[0]*tint[0], mat.baseColor[1]*tint[1], mat.baseColor[2]*tint[2]);
+                        }
+
+                        float coat = -1.f;
+                        readFloat("coat", coat);
+                        if (coat >= 0.f) mat.clearcoat = coat;
+
+                        float coatRough = -1.f;
+                        readFloat("coat_roughness", coatRough);
+                        if (coatRough >= 0.f) mat.clearcoatRoughness = coatRough;
+
+                        float emission = -1.f;
+                        readFloat("emission", emission);
+                        if (emission > 0.f) {
+                            GfVec3f emCol(1.f);
+                            readColor("emission_color", emCol);
+                            mat.emissiveColor = emCol * emission;
+                        }
+
+                        // MtlX opacity can be color3 or float
+                        {
+                            GfVec3f opacCol(1.f);
+                            readColor("opacity", opacCol);
+                            float opacAvg = (opacCol[0] + opacCol[1] + opacCol[2]) / 3.f;
+                            if (opacAvg < 0.99f) mat.opacity = opacAvg;
+                        }
+
+                        float transmission = 0.f;
+                        readFloat("transmission", transmission);
+                        if (transmission > 0.01f) {
+                            mat.opacity = std::max(0.f, mat.opacity * (1.f - transmission));
+                            GfVec3f transCol(1.f);
+                            readColor("transmission_color", transCol);
+                            mat.absorptionColor = GfVec3f(1.f) - transCol;
+                        }
+                    }
+
+                    // ── Preview Surface ──
+                    // Nuke's PreviewSurface — match ScanlineRender brightness
+                    if (surfShaderId == TfToken("PreviewSurface") ||
+                        surfShaderId == TfToken("NukePreviewSurface") ||
+                        surfShaderId == TfToken("UsdPreviewSurface")) {
+                        // ScanlineRender uses a simpler lighting model that produces
+                        // dimmer results than physically-based spectral rendering.
+                        // Scale diffuse down to match ScanlineRender output.
+                        mat.baseColor = GfVec3f(mat.baseColor[0]*0.6f, mat.baseColor[1]*0.6f, mat.baseColor[2]*0.6f);
+                    }
+
+                    // ── ReflectiveSurface ──
+                    // Nuke's reflective surface shader
+                    {
+                        float reflectivity = -1.f;
+                        readFloat("reflectivity", reflectivity);
+                        if (reflectivity >= 0.f) {
+                            mat.metallic = reflectivity;
+                            mat.roughness = std::max(0.05f, mat.roughness);
+                        }
+                        GfVec3f reflColor(0.f);
+                        readColor("reflection_color", reflColor);
+                        if (reflColor != GfVec3f(0.f)) {
+                            // Reflective surface uses reflection color as base for metallic look
+                            mat.baseColor = reflColor;
+                            if (mat.metallic < 0.5f) mat.metallic = 0.8f;
+                        }
+                    }
+
+                    // ── Project3D ──
+                    // Camera projection mapping: project texture through a camera
+                    if (surfShaderId == TfToken("NukeProject3D") ||
+                        surfShaderId == TfToken("Project3D") ||
+                        surfShaderId == TfToken("project3d")) {
+                        SLOG("SpectralRender: detected Project3D shader\n");
+
+                        // Try to read projection matrix from shader inputs
+                        GfMatrix4d projVP(1.0);
+                        bool gotProjection = false;
+
+                        // Method 1: direct matrix inputs
+                        auto readMatrix = [&](const char* name) -> GfMatrix4d {
+                            UsdShadeInput inp = surfaceShader.GetInput(TfToken(name));
+                            if (inp) {
+                                VtValue v; inp.Get(&v, timeCode);
+                                if (v.IsHolding<GfMatrix4d>()) return v.UncheckedGet<GfMatrix4d>();
+                            }
+                            return GfMatrix4d(1.0);
+                        };
+
+                        // Try cam_projection * cam_view
+                        {
+                            UsdShadeInput camInp = surfaceShader.GetInput(TfToken("cam"));
+                            if (!camInp) camInp = surfaceShader.GetInput(TfToken("camera"));
+                            if (camInp) {
+                                UsdShadeConnectableAPI camSrc;
+                                TfToken camName;
+                                UsdShadeAttributeType camType;
+                                if (UsdShadeConnectableAPI::GetConnectedSource(
+                                        camInp, &camSrc, &camName, &camType)) {
+                                    // Connected to a camera prim — get its matrices
+                                    UsdPrim camPrim = camSrc.GetPrim();
+                                    if (camPrim) {
+                                        UsdGeomCamera geomCam(camPrim);
+                                        if (geomCam) {
+                                            GfCamera gfCam = geomCam.GetCamera(timeCode);
+                                            GfMatrix4d view = gfCam.GetTransform().GetInverse();
+                                            GfFrustum frust = gfCam.GetFrustum();
+                                            GfMatrix4d proj = frust.ComputeProjectionMatrix();
+                                            projVP = view * proj;
+                                            gotProjection = true;
+                                            SLOG("SpectralRender: Project3D camera from USD prim '%s'\n",
+                                                    camPrim.GetPath().GetText());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Method 2: explicit matrix inputs on the shader
+                        if (!gotProjection) {
+                            GfMatrix4d mView = readMatrix("worldToCamera");
+                            GfMatrix4d mProj = readMatrix("projection");
+                            if (mView != GfMatrix4d(1.0) || mProj != GfMatrix4d(1.0)) {
+                                projVP = mView * mProj;
+                                gotProjection = true;
+                            }
+                        }
+
+                        // Method 3: try cam_world_to_ndc combined matrix
+                        if (!gotProjection) {
+                            GfMatrix4d mVP = readMatrix("cam_world_to_ndc");
+                            if (mVP != GfMatrix4d(1.0)) {
+                                projVP = mVP;
+                                gotProjection = true;
+                            }
+                        }
+
+                        if (gotProjection) {
+                            // Store the VP matrix — UVs will be recomputed after mesh loading
+                            // matId hasn't been assigned yet, so use _projCameraVP with a temp key
+                            // We'll remap after AddMaterial
+                            _projCameraVP[-1] = projVP;  // temp key, remapped below
+                        }
+                    }
 
                     // Fallback property names (BasicMaterial, Phong, generic)
                     if (mat.baseColor == GfVec3f(0.18f, 0.18f, 0.18f)) {
@@ -2906,11 +3102,24 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
 
                     if (surfShaderId == TfToken("NukeDefaultSurface") ||
                         surfShaderId == TfToken("NukeBasicMaterial") ||
-                        surfShaderId == TfToken("NukePhong")) {
+                        surfShaderId == TfToken("NukePhong") ||
+                        surfShaderId == TfToken("PreviewSurface") ||
+                        surfShaderId == TfToken("NukePreviewSurface") ||
+                        surfShaderId == TfToken("ReflectiveSurface") ||
+                        surfShaderId == TfToken("NukeReflectiveSurface")) {
                         // Nuke's shaders use different input names
                         diffuseTexInput = "tex_color";
                         roughTexInput = nullptr;
                         metalTexInput = nullptr;
+                    }
+
+                    // MaterialX Standard Surface texture inputs
+                    if (surfShaderId == TfToken("ND_standard_surface_surfaceshader") ||
+                        surfShaderId == TfToken("MtlXStandardSurface") ||
+                        surfShaderId == TfToken("standard_surface")) {
+                        diffuseTexInput = "base_color";
+                        roughTexInput = "specular_roughness";
+                        metalTexInput = "metalness";
                     }
 
                     // Check for texture connections (UsdUVTexture or Nuke Iop textures)
@@ -3038,28 +3247,28 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                                             pxr::SpectralTexture tex;
                                             tex._width = texW;
                                             tex._height = texH;
-                                            tex._channels = 3;
-                                            tex._pixels.resize(size_t(texW) * texH * 3);
+                                            tex._channels = 4;
+                                            tex._pixels.resize(size_t(texW) * texH * 4);
                                             tex._path = assetPath;
 
-                                            texIop->request(0, 0, texW, texH, Mask_RGB, 1);
+                                            texIop->request(0, 0, texW, texH, Mask_RGBA, 1);
                                             for (int y = 0; y < texH; ++y) {
                                                 Row row(0, texW);
-                                                texIop->get(y, 0, texW, Mask_RGB, row);
-                                                const float* rp = row[Chan_Red] ? row[Chan_Red] : nullptr;
-                                                const float* gp = row[Chan_Green] ? row[Chan_Green] : nullptr;
-                                                const float* bp = row[Chan_Blue] ? row[Chan_Blue] : nullptr;
-                                                // Store top-down (row 0 = top of image)
+                                                texIop->get(y, 0, texW, Mask_RGBA, row);
+                                                const float* rp = row[Chan_Red];
+                                                const float* gp = row[Chan_Green];
+                                                const float* bp = row[Chan_Blue];
+                                                const float* ap = row[Chan_Alpha];
                                                 int storeY = texH - 1 - y;
                                                 for (int x = 0; x < texW; ++x) {
-                                                    size_t idx = (size_t(storeY) * texW + x) * 3;
+                                                    size_t idx = (size_t(storeY) * texW + x) * 4;
                                                     tex._pixels[idx + 0] = rp ? rp[x] : 0.f;
                                                     tex._pixels[idx + 1] = gp ? gp[x] : 0.f;
                                                     tex._pixels[idx + 2] = bp ? bp[x] : 0.f;
+                                                    tex._pixels[idx + 3] = ap ? ap[x] : 1.f;
                                                 }
                                             }
 
-                                            // Add to texture table
                                             int texId = _scene->AddTexture(std::move(tex));
                                             SLOG("SpectralRender: Iop texture '%s' -> %s (%dx%d, id=%d)\n",
                                                     inputName, texIop->node_name(), texW, texH, texId);
@@ -3071,6 +3280,270 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                                     }
                                 }
                             }
+                        }
+
+                        // --- Path 3: Project3DTexture ---
+                        // Nuke's Project3D shader wraps the texture in a Project3DTexture node.
+                        // Walk its inputs to find the underlying image Iop AND projection camera.
+                        if (shaderId == TfToken("Project3DTexture")) {
+                            int foundTexId = -1;
+
+                            // Log all inputs for debugging
+                            auto proj3dInputs = texShader.GetInputs();
+                            for (const auto& p3inp : proj3dInputs) {
+                                SLOG("  Project3DTexture input '%s'\n", p3inp.GetBaseName().GetText());
+                            }
+
+                            // Read camera matrices directly from Project3DTexture inputs
+                            {
+                                auto readMat4 = [&](const char* name) -> GfMatrix4d {
+                                    UsdShadeInput inp = texShader.GetInput(TfToken(name));
+                                    if (!inp) { SLOG("  %s: not found\n", name); return GfMatrix4d(1.0); }
+
+                                    // Try direct value first
+                                    VtValue v; inp.Get(&v, timeCode);
+                                    if (v.IsHolding<GfMatrix4d>()) return v.UncheckedGet<GfMatrix4d>();
+                                    if (v.IsHolding<GfMatrix4f>()) {
+                                        GfMatrix4f mf = v.UncheckedGet<GfMatrix4f>();
+                                        GfMatrix4d md;
+                                        for (int r=0;r<4;r++) for (int c=0;c<4;c++) md[r][c]=mf[r][c];
+                                        return md;
+                                    }
+
+                                    // Follow connection if direct value is empty
+                                    UsdShadeConnectableAPI src;
+                                    TfToken srcName;
+                                    UsdShadeAttributeType srcType;
+                                    if (UsdShadeConnectableAPI::GetConnectedSource(inp, &src, &srcName, &srcType)) {
+                                        UsdPrim srcPrim = src.GetPrim();
+                                        SLOG("  %s: connected to '%s' output '%s'\n", name,
+                                                srcPrim.GetPath().GetText(), srcName.GetText());
+
+                                        // Try the specific named output first
+                                        std::string outName = "outputs:" + srcName.GetString();
+                                        UsdAttribute outAttr = srcPrim.GetAttribute(TfToken(outName));
+                                        if (outAttr) {
+                                            VtValue ov; outAttr.Get(&ov, timeCode);
+                                            SLOG("  %s: '%s' type='%s'\n", name, outName.c_str(), ov.GetTypeName().c_str());
+                                            if (ov.IsHolding<GfMatrix4d>()) return ov.UncheckedGet<GfMatrix4d>();
+                                        }
+
+                                        // Try inputs: prefixed version of the output name
+                                        std::string inpName = "inputs:" + srcName.GetString();
+                                        UsdAttribute inpAttr = srcPrim.GetAttribute(TfToken(inpName));
+                                        if (inpAttr) {
+                                            VtValue iv; inpAttr.Get(&iv, timeCode);
+                                            SLOG("  %s: '%s' type='%s'\n", name, inpName.c_str(), iv.GetTypeName().c_str());
+                                            if (iv.IsHolding<GfMatrix4d>()) return iv.UncheckedGet<GfMatrix4d>();
+                                        }
+
+                                        // Try bare attribute name
+                                        UsdAttribute bareAttr = srcPrim.GetAttribute(srcName);
+                                        if (bareAttr) {
+                                            VtValue bv; bareAttr.Get(&bv, timeCode);
+                                            if (bv.IsHolding<GfMatrix4d>()) return bv.UncheckedGet<GfMatrix4d>();
+                                        }
+
+                                        // Last resort: log all matrix attributes on source prim
+                                        for (const auto& attr : srcPrim.GetAttributes()) {
+                                            VtValue av; attr.Get(&av, timeCode);
+                                            if (av.IsHolding<GfMatrix4d>()) {
+                                                SLOG("  %s: prim has matrix attr '%s'\n", name,
+                                                        attr.GetName().GetText());
+                                            }
+                                        }
+                                    }
+
+                                    // Try reading from the underlying USD attribute directly
+                                    UsdAttribute rawAttr = texShader.GetPrim().GetAttribute(
+                                        TfToken("inputs:" + std::string(name)));
+                                    if (rawAttr) {
+                                        VtValue rv; rawAttr.Get(&rv, timeCode);
+                                        SLOG("  %s raw attr type='%s' empty=%d\n", name,
+                                                rv.GetTypeName().c_str(), rv.IsEmpty());
+                                        if (rv.IsHolding<GfMatrix4d>()) return rv.UncheckedGet<GfMatrix4d>();
+                                    }
+
+                                    SLOG("  %s: could not resolve (type='%s' empty=%d)\n", name,
+                                            v.GetTypeName().c_str(), v.IsEmpty());
+                                    return GfMatrix4d(1.0);
+                                };
+
+                                GfMatrix4d camProj = readMat4("cam_projection");
+                                GfMatrix4d camXform = readMat4("cam_xform");
+                                GfMatrix4d fmtXform = readMat4("format_xform");
+
+                                SLOG("  cam_projection[0][0]=%.4f [1][1]=%.4f\n", camProj[0][0], camProj[1][1]);
+                                SLOG("  cam_xform[3][0]=%.4f [3][1]=%.4f [3][2]=%.4f\n", camXform[3][0], camXform[3][1], camXform[3][2]);
+                                SLOG("  format_xform[0][0]=%.4f [1][1]=%.4f\n", fmtXform[0][0], fmtXform[1][1]);
+
+                                bool hasCamData = (camProj != GfMatrix4d(1.0) || camXform != GfMatrix4d(1.0));
+                                if (hasCamData) {
+                                    GfMatrix4d camView = camXform.GetInverse();
+                                    _projCameraVP[-1] = camView * camProj * fmtXform;
+                                    SLOG("SpectralRender: Project3D camera from USD matrices (cam_projection + cam_xform)\n");
+                                } else {
+                                    SLOG("SpectralRender: Project3D — cam matrices are identity, projection not applied\n");
+                                }
+                            }
+
+                            // Search for image Iop in inputs
+                            for (const auto& p3inp : proj3dInputs) {
+                                VtValue p3val;
+                                p3inp.Get(&p3val, timeCode);
+                                std::string p3path;
+                                if (p3val.IsHolding<SdfAssetPath>()) {
+                                    p3path = p3val.UncheckedGet<SdfAssetPath>().GetAssetPath();
+                                } else if (p3val.IsHolding<std::string>()) {
+                                    p3path = p3val.UncheckedGet<std::string>();
+                                }
+
+                                // Check for Nuke Iop reference (image or camera)
+                                if (!p3path.empty() && p3path.find("/NkRoot/") != std::string::npos) {
+                                    Op* p3op = ShaderOp::retrieveOpFromAssetPath(p3path);
+
+                                    // Check if it's a camera
+                                    CameraOp* p3cam = dynamic_cast<CameraOp*>(p3op);
+                                    if (p3cam) {
+                                        try {
+                                            p3cam->validate(true);
+                                            // Build VP matrix from camera
+                                            const Matrix4& camWorld = p3cam->matrix();
+                                            Matrix4 camView = camWorld.inverse();
+
+                                            // Build projection matrix from camera knobs
+                                            double fov = 45.0;
+                                            Knob* fovK = p3cam->knob("focal");
+                                            Knob* hapK = p3cam->knob("haperture");
+                                            if (fovK && hapK) {
+                                                double focal = fovK->get_value();
+                                                double hap = hapK->get_value();
+                                                if (focal > 0 && hap > 0)
+                                                    fov = 2.0 * std::atan(hap / (2.0 * focal)) * 180.0 / M_PI;
+                                            }
+                                            double aspect = 1.3162;
+                                            double zNear = 0.1, zFar = 10000.0;
+                                            double f = 1.0 / std::tan(fov * M_PI / 360.0);
+
+                                            GfMatrix4d proj(0.0);
+                                            proj[0][0] = f / aspect;
+                                            proj[1][1] = f;
+                                            proj[2][2] = -(zFar + zNear) / (zFar - zNear);
+                                            proj[2][3] = -1.0;
+                                            proj[3][2] = -2.0 * zFar * zNear / (zFar - zNear);
+
+                                            GfMatrix4d view(1.0);
+                                            for (int r = 0; r < 4; ++r)
+                                                for (int c = 0; c < 4; ++c)
+                                                    view[r][c] = camView[c][r]; // transpose for row-major
+
+                                            _projCameraVP[-1] = view * proj;
+                                            SLOG("SpectralRender: Project3D camera '%s' (fov=%.1f)\n",
+                                                    p3cam->node_name(), fov);
+                                        } catch (...) {
+                                            SLOG("SpectralRender: failed to read Project3D camera\n");
+                                        }
+                                        continue;
+                                    }
+
+                                    // Check if it's an image Iop
+                                    Iop* p3iop = dynamic_cast<Iop*>(p3op);
+                                    if (p3iop && foundTexId < 0) {
+                                        try {
+                                            p3iop->validate(true);
+                                            const int tw = p3iop->info().format().width();
+                                            const int th = p3iop->info().format().height();
+                                            if (tw > 0 && th > 0) {
+                                                pxr::SpectralTexture tex;
+                                                tex._width = tw; tex._height = th;
+                                                tex._channels = 4;
+                                                tex._pixels.resize(size_t(tw) * th * 4);
+                                                tex._path = p3path;
+                                                p3iop->request(0, 0, tw, th, Mask_RGBA, 1);
+                                                for (int y = 0; y < th; ++y) {
+                                                    Row row(0, tw);
+                                                    p3iop->get(y, 0, tw, Mask_RGBA, row);
+                                                    const float* rp = row[Chan_Red];
+                                                    const float* gp = row[Chan_Green];
+                                                    const float* bp = row[Chan_Blue];
+                                                    const float* ap = row[Chan_Alpha];
+                                                    int storeY = th - 1 - y;
+                                                    for (int x = 0; x < tw; ++x) {
+                                                        size_t idx = (size_t(storeY) * tw + x) * 4;
+                                                        tex._pixels[idx+0] = rp ? rp[x] : 0.f;
+                                                        tex._pixels[idx+1] = gp ? gp[x] : 0.f;
+                                                        tex._pixels[idx+2] = bp ? bp[x] : 0.f;
+                                                        tex._pixels[idx+3] = ap ? ap[x] : 1.f;
+                                                    }
+                                                }
+                                                foundTexId = _scene->AddTexture(std::move(tex));
+                                                SLOG("SpectralRender: Project3D texture '%s' -> %s (%dx%d, id=%d)\n",
+                                                        inputName, p3iop->node_name(), tw, th, foundTexId);
+                                            }
+                                        } catch (...) {
+                                            SLOG("SpectralRender: failed to read Project3D texture\n");
+                                        }
+                                    }
+                                }
+
+                                // Check connected shaders for file inputs
+                                UsdShadeConnectableAPI p3src;
+                                TfToken p3srcName;
+                                UsdShadeAttributeType p3srcType;
+                                if (foundTexId < 0 && UsdShadeConnectableAPI::GetConnectedSource(
+                                        p3inp, &p3src, &p3srcName, &p3srcType)) {
+                                    UsdShadeShader connShader(p3src.GetPrim());
+                                    if (connShader) {
+                                        UsdShadeInput connFile = connShader.GetInput(TfToken("file"));
+                                        if (connFile) {
+                                            VtValue cfv; connFile.Get(&cfv, timeCode);
+                                            std::string cfp;
+                                            if (cfv.IsHolding<SdfAssetPath>())
+                                                cfp = cfv.UncheckedGet<SdfAssetPath>().GetAssetPath();
+                                            if (!cfp.empty() && cfp.find("/NkRoot/") != std::string::npos) {
+                                                Op* cfOp = ShaderOp::retrieveOpFromAssetPath(cfp);
+                                                Iop* cfIop = dynamic_cast<Iop*>(cfOp);
+                                                if (cfIop) {
+                                                    try {
+                                                        cfIop->validate(true);
+                                                        const int tw = cfIop->info().format().width();
+                                                        const int th = cfIop->info().format().height();
+                                                        if (tw > 0 && th > 0) {
+                                                            pxr::SpectralTexture tex;
+                                                            tex._width = tw; tex._height = th;
+                                                            tex._channels = 4;
+                                                            tex._pixels.resize(size_t(tw) * th * 4);
+                                                            tex._path = cfp;
+                                                            cfIop->request(0, 0, tw, th, Mask_RGBA, 1);
+                                                            for (int y = 0; y < th; ++y) {
+                                                                Row row(0, tw);
+                                                                cfIop->get(y, 0, tw, Mask_RGBA, row);
+                                                                const float* rp = row[Chan_Red];
+                                                                const float* gp = row[Chan_Green];
+                                                                const float* bp = row[Chan_Blue];
+                                                                const float* ap = row[Chan_Alpha];
+                                                                int storeY = th - 1 - y;
+                                                                for (int x = 0; x < tw; ++x) {
+                                                                    size_t idx = (size_t(storeY)*tw+x)*4;
+                                                                    tex._pixels[idx+0] = rp ? rp[x] : 0.f;
+                                                                    tex._pixels[idx+1] = gp ? gp[x] : 0.f;
+                                                                    tex._pixels[idx+2] = bp ? bp[x] : 0.f;
+                                                                    tex._pixels[idx+3] = ap ? ap[x] : 1.f;
+                                                                }
+                                                            }
+                                                            foundTexId = _scene->AddTexture(std::move(tex));
+                                                            SLOG("SpectralRender: Project3D connected texture '%s' -> %s (%dx%d, id=%d)\n",
+                                                                    inputName, cfIop->node_name(), tw, th, foundTexId);
+                                                        }
+                                                    } catch (...) {}
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if (foundTexId >= 0) return foundTexId;
+                            SLOG("SpectralRender: Project3DTexture — could not find image Iop in inputs\n");
                         }
 
                         SLOG("SpectralRender: unsupported texture shader '%s' on '%s'\n",
@@ -3259,6 +3732,13 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                     }
 
                     matId = _scene->AddMaterial(mat);
+
+                    // Remap Project3D projection matrix from temp key to actual matId
+                    if (_projCameraVP.count(-1)) {
+                        _projCameraVP[matId] = _projCameraVP[-1];
+                        _projCameraVP.erase(-1);
+                        SLOG("SpectralRender: Project3D projection assigned to material %d\n", matId);
+                    }
 
                     SLOG("SpectralRender: material '%s' — color=(%.2f,%.2f,%.2f) metal=%.2f rough=%.2f opacity=%.2f\n",
                             mat.name.c_str(),
@@ -3852,6 +4332,30 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
         }
 
         if (!data.triangles.empty()) {
+            // Project3D: recompute UVs by projecting vertices through camera
+            if (!_projCameraVP.empty()) {
+                for (auto& tri : data.triangles) {
+                    auto it = _projCameraVP.find(tri.materialId);
+                    if (it == _projCameraVP.end()) continue;
+                    const GfMatrix4d& vp = it->second;
+                    auto projectUV = [&](const GfVec3f& pos) -> GfVec2f {
+                        // Row-vector multiplication: clip = point * VP (pxr convention)
+                        double px = pos[0], py = pos[1], pz = pos[2];
+                        double cx = px*vp[0][0] + py*vp[1][0] + pz*vp[2][0] + vp[3][0];
+                        double cy = px*vp[0][1] + py*vp[1][1] + pz*vp[2][1] + vp[3][1];
+                        double cw = px*vp[0][3] + py*vp[1][3] + pz*vp[2][3] + vp[3][3];
+                        if (std::abs(cw) < 1e-8) return GfVec2f(0.f);
+                        // format_xform already maps to UV space — just perspective divide
+                        float u = float(cx / cw);
+                        float v = float(cy / cw);
+                        return GfVec2f(u, v);
+                    };
+                    tri.uv0 = projectUV(tri.v0);
+                    tri.uv1 = projectUV(tri.v1);
+                    tri.uv2 = projectUV(tri.v2);
+                }
+            }
+
             // Auto-smooth normals: average face normals per shared vertex
             if (_scanlineCompat) {
                 // Build vertex → face normal accumulator using position hash
@@ -4446,10 +4950,12 @@ static const char* kGeoVS = R"(
 #version 330 compatibility
 varying vec3 vWorldPos;
 varying vec3 vNormal;
+varying vec2 vTexCoord;
 void main() {
     gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;
     vWorldPos = gl_Vertex.xyz;
     vNormal = gl_Normal;
+    vTexCoord = gl_MultiTexCoord0.xy;
 }
 )";
 
@@ -4485,8 +4991,12 @@ uniform float uShadowTexelSize;
 uniform float uShadowSoftness;
 uniform int uShadowPCFRadius;
 uniform int uVolShadowSamples;
+uniform int uConstantMode;
+uniform sampler2D uBaseColorTex;
+uniform int uHasBaseColorTex;
 varying vec3 vWorldPos;
 varying vec3 vNormal;
+varying vec2 vTexCoord;
 
 // Environment sky dome with sun disc for reflections
 vec3 envColor(vec3 dir, vec3 sunDir, vec3 sunCol) {
@@ -4518,6 +5028,20 @@ vec3 envColor(vec3 dir, vec3 sunDir, vec3 sunCol) {
 }
 
 void main() {
+    // ScanlineRender compat: no lights = constant shader (flat colour)
+    if (uConstantMode > 0) {
+        vec3 col = uMatColor;
+        float alpha = 1.0;
+        if (uHasBaseColorTex > 0) {
+            vec4 texSample = texture2D(uBaseColorTex, vTexCoord);
+            col = texSample.rgb;
+            alpha = texSample.a;
+        }
+        if (alpha < 0.01) discard;
+        gl_FragColor = vec4(col * alpha, alpha);
+        return;
+    }
+
     vec3 N = normalize(vNormal);
     vec3 V = normalize((gl_ModelViewMatrixInverse * vec4(0.0,0.0,0.0,1.0)).xyz - vWorldPos);
     if (dot(N, V) < 0.0) N = -N;
@@ -5447,6 +5971,14 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
             glUniform3f(glGetUniformLocation(_glGeoProg, "uLightCol"), gLightR, gLightG, gLightB);
             glUniform3f(glGetUniformLocation(_glGeoProg, "uAmbient"), gAmbR, gAmbG, gAmbB);
 
+            // Constant mode: scanlineCompat + no lights = flat colour in viewport
+            {
+                bool noLights = (gLightR < 0.001f && gLightG < 0.001f && gLightB < 0.001f &&
+                                 gAmbR < 0.001f && gAmbG < 0.001f && gAmbB < 0.001f);
+                glUniform1i(glGetUniformLocation(_glGeoProg, "uConstantMode"),
+                            (_scanlineCompat && noLights) ? 1 : 0);
+            }
+
             // ─── Shadow map pass: render geometry from light POV ───
             float lightVP[16] = {};
             bool hasShadowMap = false;
@@ -5555,6 +6087,12 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
             glUniform3f(glGetUniformLocation(_glGeoProg, "uLightDir"), gLightDirX, gLightDirY, gLightDirZ);
             glUniform3f(glGetUniformLocation(_glGeoProg, "uLightCol"), gLightR, gLightG, gLightB);
             glUniform3f(glGetUniformLocation(_glGeoProg, "uAmbient"), gAmbR, gAmbG, gAmbB);
+            {
+                bool noLights = (gLightR < 0.001f && gLightG < 0.001f && gLightB < 0.001f &&
+                                 gAmbR < 0.001f && gAmbG < 0.001f && gAmbB < 0.001f);
+                glUniform1i(glGetUniformLocation(_glGeoProg, "uConstantMode"),
+                            (_scanlineCompat && noLights) ? 1 : 0);
+            }
             glUniform1f(glGetUniformLocation(_glGeoProg, "uHasShadowMap"), hasShadowMap ? 1.f : 0.f);
             glUniform1f(glGetUniformLocation(_glGeoProg, "uShadowTexelSize"), 1.f / float(kShadowMapSize));
             glUniform1f(glGetUniformLocation(_glGeoProg, "uShadowSoftness"), vpShadowSoft);
@@ -5782,25 +6320,56 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
                 // Get material properties
                 float mr = 0.7f, mg = 0.7f, mb = 0.7f;
                 float metallic = 0.f, roughness = 0.5f;
+                int baseColorTexId = -1;
                 if (!kv.second.triangles.empty()) {
                     int matId = kv.second.triangles[0].materialId;
                     const auto& mat = _scene->GetMaterial(matId);
                     mr = mat.baseColor[0]; mg = mat.baseColor[1]; mb = mat.baseColor[2];
                     metallic = mat.metallic;
                     roughness = mat.roughness;
+                    baseColorTexId = mat.baseColorTexId;
                 }
                 glUniform3f(glGetUniformLocation(_glGeoProg, "uMatColor"), mr, mg, mb);
                 glUniform1f(glGetUniformLocation(_glGeoProg, "uMetallic"), metallic);
                 glUniform1f(glGetUniformLocation(_glGeoProg, "uRoughness"), roughness);
 
+                // Upload/bind base color texture for viewport
+                bool hasVpTex = false;
+                if (baseColorTexId >= 0 && _scene) {
+                    const auto* tex = _scene->GetTexture(baseColorTexId);
+                    if (tex && tex->IsValid() && tex->_width > 0 && tex->_height > 0) {
+                        if (!_glBaseColorTex) glGenTextures(1, &_glBaseColorTex);
+                        glActiveTexture(GL_TEXTURE5);
+                        glBindTexture(GL_TEXTURE_2D, _glBaseColorTex);
+                        // Upload RGBA (or RGB padded to RGBA)
+                        if (tex->_channels >= 4) {
+                            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tex->_width, tex->_height,
+                                         0, GL_RGBA, GL_FLOAT, tex->_pixels.data());
+                        } else {
+                            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, tex->_width, tex->_height,
+                                         0, GL_RGB, GL_FLOAT, tex->_pixels.data());
+                        }
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+                        glUniform1i(glGetUniformLocation(_glGeoProg, "uBaseColorTex"), 5);
+                        hasVpTex = true;
+                    }
+                }
+                glUniform1i(glGetUniformLocation(_glGeoProg, "uHasBaseColorTex"), hasVpTex ? 1 : 0);
+
                 glBegin(GL_TRIANGLES);
                 for (const auto& tri : kv.second.triangles) {
                     if (_scanlineCompat) {
-                        // Smooth vertex normals
+                        // Smooth vertex normals + UVs
+                        glTexCoord2f(tri.uv0[0], 1.f - tri.uv0[1]);
                         glNormal3f(tri.n0[0], tri.n0[1], tri.n0[2]);
                         glVertex3f(tri.v0[0], tri.v0[1], tri.v0[2]);
+                        glTexCoord2f(tri.uv1[0], 1.f - tri.uv1[1]);
                         glNormal3f(tri.n1[0], tri.n1[1], tri.n1[2]);
                         glVertex3f(tri.v1[0], tri.v1[1], tri.v1[2]);
+                        glTexCoord2f(tri.uv2[0], 1.f - tri.uv2[1]);
                         glNormal3f(tri.n2[0], tri.n2[1], tri.n2[2]);
                         glVertex3f(tri.v2[0], tri.v2[1], tri.v2[2]);
                     } else {
@@ -5818,6 +6387,7 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
 
             if (hasVolTex) { glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_3D, 0); }
             if (hasShadowMap) { glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, 0); }
+            if (_glBaseColorTex) { glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D, 0); }
             if (hasGeoRefl) {
                 glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, 0);
                 glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, 0);

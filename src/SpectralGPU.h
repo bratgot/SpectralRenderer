@@ -58,7 +58,7 @@ public:
     /// Build the GAS from current scene geometry.
     /// Call once per frame when geometry changes.
     bool BuildAccel(const SpectralScene& scene);
-    void InvalidateAccel() { _gasBuilt = false; _cachedSceneTriCount = UINT_MAX; _cachedLightChecksum = 0; _cachedMatChecksum = 0; _cachedTexChecksum = 0; }
+    void InvalidateAccel() { _gasBuilt = false; _cachedSceneTriCount = UINT_MAX; _cachedLightChecksum = 0; _cachedMatChecksum = 0; _cachedTexChecksum = 0; _cachedGeoChecksum = 0; }
 
     /// Render into host-side buffers.
     /// pixels: RGBA float, width*height*4 floats (pre-allocated)
@@ -166,6 +166,7 @@ private:
     unsigned int           _cachedLightChecksum = 0;
     unsigned int           _cachedMatChecksum = 0;
     unsigned int           _cachedTexChecksum = 0;
+    unsigned int           _cachedGeoChecksum = 0;
     unsigned int           _materialCount = 0;
     unsigned int           _lightCount = 0;
     unsigned int           _textureCount = 0;

@@ -354,6 +354,30 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
     // Skip full rebuild if geometry hasn't changed (volume-only scenes)
     unsigned int newTriCount = scene.TotalTriangles();
     if (_gasBuilt && newTriCount == _cachedSceneTriCount) {
+        // Checksum vertex positions to detect transforms
+        unsigned int geoCheck = 0;
+        {
+            int triSampled = 0;
+            for (const auto& mesh : scene.GetMeshes()) {
+                size_t step = std::max(size_t(1), mesh.second.triangles.size() / 8);
+                for (size_t i = 0; i < mesh.second.triangles.size(); i += step) {
+                    const auto& tri = mesh.second.triangles[i];
+                    union { float f; unsigned int u; } p;
+                    p.f = tri.v0[0]; geoCheck ^= p.u * (unsigned(triSampled)*73856093u+1u);
+                    p.f = tri.v0[1]; geoCheck ^= p.u * 19349663u;
+                    p.f = tri.v0[2]; geoCheck ^= p.u * 83492791u;
+                    p.f = tri.v1[0]; geoCheck ^= p.u * 49979693u;
+                    ++triSampled;
+                }
+            }
+        }
+        if (geoCheck != _cachedGeoChecksum) {
+            // Geometry changed — force full GAS rebuild
+            _cachedGeoChecksum = geoCheck;
+            _gasBuilt = false;
+            fprintf(stderr, "SpectralGPU: geometry changed (transform), rebuilding GAS\n");
+        } else {
+
         const auto& lights = scene.GetLights();
 
         // Checksum lights to skip re-upload when unchanged
@@ -540,6 +564,7 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
             fprintf(stderr, "SpectralGPU: GAS + lights + materials + textures cached\n");
         }
         return true;
+        } // end else (geometry unchanged)
     }
     _cachedSceneTriCount = newTriCount;
     _cachedLightChecksum = 0;
