@@ -476,6 +476,31 @@ void SpectralEnvLight::knobs(Knob_Callback f)
         ClearFlags(f, Knob::STARTLINE);
         Double_knob(f, &domeRadius, "dome_radius", "radius");
         SetRange(f, 10, 500);
+
+        Divider(f, "Guide Appearance");
+        Double_knob(f, &guideLineWidth, "guide_line_width", "line width");
+        SetRange(f, 0.5, 4.0);
+        Tooltip(f, "Thickness of viewport guide lines (dome, compass, arc).");
+        Double_knob(f, &guideIconScale, "guide_icon_scale", "icon scale");
+        ClearFlags(f, Knob::STARTLINE);
+        SetRange(f, 0.5, 3.0);
+        Tooltip(f, "Scale of the sun icon in the viewport.");
+        {
+            static const char* const dashOpts[] = {
+                "solid", "dashed", "dotted", nullptr
+            };
+            Enumeration_knob(f, &guideDashPattern, dashOpts, "guide_dash", "line style");
+            Tooltip(f, "Line style for the sun day arc.");
+        }
+        Newline(f);
+        Color_knob(f, guideSunColor, IRange(0,1), "guide_sun_color", "sun");
+        Tooltip(f, "Colour of the sun icon and connecting line.");
+        Color_knob(f, guideDomeColor, IRange(0,1), "guide_dome_color", "dome");
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Colour of the sky dome wireframe.");
+        Color_knob(f, guideArcColor, IRange(0,1), "guide_arc_color", "arc");
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Colour of the sun day arc path.");
     }
     EndGroup(f);
 

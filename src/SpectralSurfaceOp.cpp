@@ -8,11 +8,16 @@
 #include <DDImage/Op.h>
 #include <DDImage/Iop.h>
 #include <DDImage/Row.h>
+#include <atomic>
 
 #include "usg/geom/ShaderDesc.h"
 #include "usg/base/Value.h"
 
 using namespace DD::Image;
+
+// Global version counter — incremented on ANY SpectralSurface knob change
+static std::atomic<int> s_spectralSurfaceVersion{0};
+int GetSpectralSurfaceVersion() { return s_spectralSurfaceVersion.load(); }
 
 static const char* const kSpectralPresetNames[] = {
     "custom",
@@ -328,15 +333,15 @@ int SpectralSurfaceOp::knob_changed(Knob* k)
 {
     if (k->is("preset")) {
         _ApplyPreset(_spectralPreset);
-        // Update node label with preset name
         if (Knob* lk = knob("label")) {
             const char* name = kSpectralPresetNames[_spectralPreset];
-            // Skip header entries (they start with box-drawing chars)
             bool isHeader = (name[0] == '\xe2');
             lk->set_text(isHeader ? "" : name);
         }
-        return 1;
     }
+    // Always update registry + bump global version so SpectralRender detects changes
+    RegisterParams();
+    s_spectralSurfaceVersion.fetch_add(1);
     return ShaderOp::knob_changed(k);
 }
 

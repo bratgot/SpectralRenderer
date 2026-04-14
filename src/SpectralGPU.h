@@ -160,6 +160,7 @@ private:
     bool                   _gasBuilt = false;
     unsigned int           _cachedSceneTriCount = UINT_MAX;
     unsigned int           _cachedLightChecksum = 0;
+    unsigned int           _cachedMatChecksum = 0;
     unsigned int           _materialCount = 0;
     unsigned int           _lightCount = 0;
     unsigned int           _textureCount = 0;

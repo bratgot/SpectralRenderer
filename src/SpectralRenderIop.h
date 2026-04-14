@@ -270,8 +270,9 @@ private:
     int    _vdbViewportRes = 2;      // 0=32, 1=64, 2=128, 3=256
     int    _vpShadowPCF = 2;        // 0=sharp, 1=3x3, 2=5x5, 3=7x7
     int    _vpVolShadowSamples = 2; // 0=off, 1=4, 2=8, 3=16
-    bool   _vpReflections = true;
-    int    _vpReflSteps = 1;        // 0=4, 1=8, 2=16, 3=32 SSR steps
+    bool   _vpEnvReflections = true;
+    bool   _vpGeoReflections = true;
+    int    _vpReflSteps = 1;        // 0=8, 1=16, 2=32, 3=64
     GLuint _glVolProg = 0;
     GLuint _glShadowProg = 0;
     GLuint _glGeoProg = 0;
@@ -280,18 +281,11 @@ private:
     GLuint _glShadowDepthTex = 0;
     int    _glShadowMapCurSize = 0;
     static const int kShadowMapSize = 1024;
-    // Reflection FBO (screen-space reflections)
+    // Reflection pre-pass FBO
     GLuint _glReflFBO = 0;
     GLuint _glReflColorTex = 0;
-    GLuint _glReflDepthTex = 0;
+    GLuint _glReflDepthTex = 0;  // R32F for proper depth
     int    _glReflW = 0, _glReflH = 0;
-    // Guide appearance
-    double _guideLineWidth = 1.0;
-    double _guideIconScale = 1.0;
-    double _guideSunR = 1.0, _guideSunG = 0.85, _guideSunB = 0.3;
-    double _guideDomeR = 0.3, _guideDomeG = 0.5, _guideDomeB = 0.8;
-    double _guideArcR = 1.0, _guideArcG = 0.8, _guideArcB = 0.3;
-    int    _guideDashPattern = 1;   // 0=solid, 1=dashed, 2=dotted
     GLuint _glVolDensityTex = 0;
     GLuint _glVolTempTex = 0;
     int    _glVolTexFrame = -1;

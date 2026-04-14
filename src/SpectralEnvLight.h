@@ -48,6 +48,13 @@ public:
     bool   showSunArrow = true;
     bool   showCompass = true;
     double domeRadius = 100.0;
+    // Guide appearance
+    double guideLineWidth = 1.0;
+    double guideIconScale = 1.0;
+    int    guideDashPattern = 1;   // 0=solid, 1=dashed, 2=dotted
+    double guideSunColor[3] = {1.0, 0.85, 0.3};
+    double guideDomeColor[3] = {0.3, 0.5, 0.8};
+    double guideArcColor[3] = {1.0, 0.8, 0.3};
 
     // --- Sky Model ---
     int    skyPreset = 1;

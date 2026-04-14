@@ -374,7 +374,63 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
             lightCheck ^= static_cast<unsigned int>(L.envVirtualLights.size()) * 104729u;
         }
 
+        // Checksum materials to detect SpectralSurface changes
+        const auto& mats = scene.GetMaterials();
+        unsigned int matCheck = static_cast<unsigned int>(mats.size()) * 2246822519u;
+        for (size_t i = 0; i < mats.size(); ++i) {
+            union { float f; unsigned int u; } p;
+            p.f = mats[i].metallic; matCheck ^= p.u * (unsigned(i)*73856093u+1u);
+            p.f = mats[i].roughness; matCheck ^= p.u * 19349663u;
+            p.f = mats[i].ior; matCheck ^= p.u * 83492791u;
+            p.f = mats[i].opacity; matCheck ^= p.u * 49979693u;
+            p.f = mats[i].baseColor[0]; matCheck ^= p.u * 104729u;
+            p.f = mats[i].baseColor[1]; matCheck ^= p.u * 15485863u;
+            p.f = mats[i].baseColor[2]; matCheck ^= p.u * 32452843u;
+            p.f = mats[i].abbeNumber; matCheck ^= p.u * 6291469u;
+            p.f = mats[i].thinFilmThickness; matCheck ^= p.u * 3145739u;
+            p.f = mats[i].absorptionDensity; matCheck ^= p.u * 12582917u;
+            p.f = mats[i].gratingSpacing; matCheck ^= p.u * 25165843u;
+            p.f = mats[i].fluorStrength; matCheck ^= p.u * 50331653u;
+            matCheck ^= static_cast<unsigned int>(mats[i].metalType) * 7u;
+        }
+
         bool lightsChanged = (lightCheck != _cachedLightChecksum);
+        bool matsChanged = (matCheck != _cachedMatChecksum);
+
+        if (matsChanged) {
+            // Re-upload materials
+            if (_d_materials) { cudaFree(reinterpret_cast<void*>(_d_materials)); _d_materials = 0; }
+            std::vector<spectral_gpu::GPUMaterial> gpuMats(mats.size());
+            for (size_t i = 0; i < mats.size(); ++i) {
+                gpuMats[i].baseColor    = make_float3(mats[i].baseColor[0], mats[i].baseColor[1], mats[i].baseColor[2]);
+                gpuMats[i].metallic     = mats[i].metallic;
+                gpuMats[i].roughness    = mats[i].roughness;
+                gpuMats[i].ior          = mats[i].ior;
+                gpuMats[i].opacity      = mats[i].opacity;
+                gpuMats[i].emissiveColor = make_float3(mats[i].emissiveColor[0], mats[i].emissiveColor[1], mats[i].emissiveColor[2]);
+                gpuMats[i].abbeNumber        = mats[i].abbeNumber;
+                gpuMats[i].thinFilmThickness = mats[i].thinFilmThickness;
+                gpuMats[i].baseColorTexId    = mats[i].baseColorTexId;
+                gpuMats[i].textureBlend      = mats[i].textureBlend;
+                gpuMats[i].bumpMapTexId      = mats[i].bumpMapTexId;
+                gpuMats[i].bumpStrength      = mats[i].bumpStrength;
+                gpuMats[i].absorptionColor   = make_float3(mats[i].absorptionColor[0], mats[i].absorptionColor[1], mats[i].absorptionColor[2]);
+                gpuMats[i].absorptionDensity = mats[i].absorptionDensity;
+                gpuMats[i].gratingSpacing  = mats[i].gratingSpacing;
+                gpuMats[i].gratingStrength = mats[i].gratingStrength;
+                gpuMats[i].fluorAbsorb     = mats[i].fluorAbsorb;
+                gpuMats[i].fluorEmit       = mats[i].fluorEmit;
+                gpuMats[i].fluorStrength   = mats[i].fluorStrength;
+            }
+            const size_t matBytes = gpuMats.size() * sizeof(spectral_gpu::GPUMaterial);
+            CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_materials), matBytes));
+            CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_materials), gpuMats.data(),
+                                  matBytes, cudaMemcpyHostToDevice));
+            _materialCount = static_cast<unsigned int>(gpuMats.size());
+            _cachedMatChecksum = matCheck;
+            fprintf(stderr, "SpectralGPU: re-uploaded %zu materials (changed)\n", mats.size());
+        }
+
         if (lightsChanged) {
             if (_d_lights) { cudaFree(reinterpret_cast<void*>(_d_lights)); _d_lights = 0; }
             _lightCount = 0;
@@ -388,6 +444,7 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
                     gpuLights[i].intensity = lights[i].EffectiveIntensity();
                     gpuLights[i].colorTemperature = lights[i].colorTemperature;
                     gpuLights[i].useColorTemp = lights[i].enableColorTemperature ? 1 : 0;
+                    gpuLights[i].useD65 = (lights[i].illuminant == pxr::SpectralLight::Illuminant::D65 && !lights[i].enableColorTemperature) ? 1 : 0;
                     gpuLights[i].radius    = lights[i].radius;
                     gpuLights[i].width     = lights[i].width;
                     gpuLights[i].height    = lights[i].height;
@@ -430,12 +487,14 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
             }
             _cachedLightChecksum = lightCheck;
             fprintf(stderr, "SpectralGPU: GAS cached, uploaded %u lights\n", _lightCount);
-        } else {
-            fprintf(stderr, "SpectralGPU: GAS + lights cached\n");
+        } else if (!matsChanged) {
+            fprintf(stderr, "SpectralGPU: GAS + lights + materials cached\n");
         }
         return true;
     }
     _cachedSceneTriCount = newTriCount;
+    _cachedLightChecksum = 0;
+    _cachedMatChecksum = 0;
 
     _FreeAccel();
     if (_d_normals)     { cudaFree(reinterpret_cast<void*>(_d_normals));     _d_normals = 0; }
