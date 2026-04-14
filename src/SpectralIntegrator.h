@@ -58,6 +58,14 @@ struct SpectralCamera {
     float  shutterClose      = 0.f;   // 0,0 = no motion blur
     float  adaptiveThreshold = 0.05f; // 0 = disabled, 0.05 = default
     bool   blueNoise         = true;  // R2 quasi-random sampling
+    bool   scanlineCompat    = true;  // Direct RGB shading (no spectral XYZ)
+    int    projectionMode    = 0;     // 0=perspective, 1=UV, 2=spherical
+
+    // UV projection lookup (CPU-rasterized, passed to GPU)
+    const int*   uvTriIndex  = nullptr;
+    const float* uvBaryU     = nullptr;
+    const float* uvBaryV     = nullptr;
+    size_t       uvBufSize   = 0;   // W*H pixels
     int    aoSamples         = 8;    // ambient occlusion samples (0 = disabled)
     float  aoRadius          = 5.f;  // AO max ray distance
     int    refractionBounces = 8;    // separate limit for glass paths
@@ -157,6 +165,7 @@ public:
 
     static bool IsGPUAvailable();
     static void DenoiseGPU(unsigned int width, unsigned int height, float* pixels);
+    static void InvalidateGPUAccel();
 #endif
 
     /// Build a photon map for spectral caustics.

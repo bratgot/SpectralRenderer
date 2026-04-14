@@ -204,6 +204,184 @@ void SpectralRenderIop::knobs(Knob_Callback f)
     String_knob(f, &_cameraPath, "camera_path", "camera prim"); SetFlags(f, Knob::INVISIBLE);
     Format_knob(f, &_outputFormat, "format", "format");
 
+    // ─── Compatibility ──────────────────────────────────────────────
+    Divider(f, "Compatibility");
+    Bool_knob(f, &_scanlineCompat, "scanline_compat", "ScanlineRender compatible");
+    Tooltip(f, "Emulate ScanlineRender behaviours for drop-in replacement.\n\n"
+               "When enabled:\n"
+               "\xe2\x80\xa2 Smooth vertex normals (auto-averaged, not faceted)\n"
+               "\xe2\x80\xa2 Alpha cutout (transparent texture regions produce no shading)\n"
+               "\xe2\x80\xa2 Premultiplied alpha (colour \xc3\x97 opacity, ready for Over comp)\n"
+               "\xe2\x80\xa2 Black background (no dome colour in background)\n"
+               "\xe2\x80\xa2 Constant shader when no lights (flat material colour)\n\n"
+               "Disable for physically-based spectral rendering with face normals.");
+    Text_knob(f,
+        "<font color='#666' size='-1'>"
+        "Matches ScanlineRender output for geometry cards, textured planes,<br>"
+        "and simple lit scenes. Works with ReadGeo \xe2\x86\x92 GeoScene \xe2\x86\x92 SpectralRender<br>"
+        "without needing a SpectralSurface material."
+        "</font>"
+    );
+
+    // ─── Re-render ──────────────────────────────────────────────────
+    Divider(f, "");
+    Button(f, "rerender", "<font color='#c44'>Re-render</font>");
+    Tooltip(f, "Force a complete re-render from scratch.\n\n"
+               "This will:\n"
+               "\xe2\x80\xa2 Flush the entire scene cache\n"
+               "\xe2\x80\xa2 Re-read all input textures and geometry\n"
+               "\xe2\x80\xa2 Rebuild the GPU acceleration structure\n"
+               "\xe2\x80\xa2 Clear all material and light caches\n\n"
+               "Use when upstream changes are not detected automatically,\n"
+               "or after connecting/disconnecting nodes in the tree.");
+    Text_knob(f,
+        "<font color='#666' size='-1'>"
+        "Flushes all caches and forces a full re-read of the node graph.<br>"
+        "Use if the render appears stale after upstream edits."
+        "</font>"
+    );
+
+    // ─── Technical Notes ────────────────────────────────────────────
+    BeginClosedGroup(f, "tech_notes_grp", "Technical Notes");
+    {
+        Text_knob(f,
+            "<b><font size='+1'>SpectralRenderer</font></b><br>"
+            "<font color='#999'>Physically-based spectral path tracer for Nuke</font><br>"
+            "<br>"
+
+            "<b>Overview</b><br>"
+            "SpectralRenderer is a full spectral path tracer that simulates light transport<br>"
+            "at individual wavelengths across the visible spectrum (380\xe2\x80\x93" "780 nm). Unlike<br>"
+            "conventional RGB renderers that compute three colour channels independently,<br>"
+            "SpectralRenderer samples one wavelength per ray and accumulates radiance<br>"
+            "through CIE 1931 colour matching functions, producing physically accurate<br>"
+            "colour reproduction including dispersion, thin-film interference, fluorescence,<br>"
+            "and wavelength-dependent absorption.<br>"
+            "<br>"
+
+            "<b>Spectral Integration</b><br>"
+            "For each pixel, <i>N</i> samples are traced at wavelengths \xce\xbb drawn uniformly<br>"
+            "from [380, 780] nm. The spectral radiance <i>L</i>(\xce\xbb) at each hit is converted<br>"
+            "to CIE XYZ tristimulus values:<br>"
+            "<br>"
+            "<font face='monospace'>"
+            "&nbsp;&nbsp;X = (1/N) \xce\xa3 L(\xce\xbb\xe1\xb5\xa2) \xc2\xb7 x\xcc\x84(\xce\xbb\xe1\xb5\xa2) \xc2\xb7 \xce\x94\xce\xbb<br>"
+            "&nbsp;&nbsp;Y = (1/N) \xce\xa3 L(\xce\xbb\xe1\xb5\xa2) \xc2\xb7 y\xcc\x84(\xce\xbb\xe1\xb5\xa2) \xc2\xb7 \xce\x94\xce\xbb<br>"
+            "&nbsp;&nbsp;Z = (1/N) \xce\xa3 L(\xce\xbb\xe1\xb5\xa2) \xc2\xb7 z\xcc\x84(\xce\xbb\xe1\xb5\xa2) \xc2\xb7 \xce\x94\xce\xbb<br>"
+            "</font>"
+            "<br>"
+            "where x\xcc\x84, y\xcc\x84, z\xcc\x84 are the CIE 1931 colour matching functions and<br>"
+            "\xce\x94\xce\xbb = 400/106.857 is the normalisation factor. XYZ is then converted to<br>"
+            "the output colour space (sRGB, ACEScg, or ACES 2065-1).<br>"
+            "<br>"
+
+            "<b>Material Model</b><br>"
+            "Surfaces use a Disney/GGX BSDF with spectral extensions:<br>"
+            "<br>"
+            "<font face='monospace'>"
+            "&nbsp;&nbsp;f(\xce\xbb) = (1\xe2\x88\x92m) \xc2\xb7 f<sub>diff</sub>(\xce\xbb) + m \xc2\xb7 f<sub>spec</sub>(\xce\xbb)<br>"
+            "&nbsp;&nbsp;f<sub>spec</sub> = D(h,\xce\xb1) \xc2\xb7 G(v,l,\xce\xb1) \xc2\xb7 F(\xce\xbb,\xce\xb8) / (4 \xc2\xb7 N\xc2\xb7V \xc2\xb7 N\xc2\xb7L)<br>"
+            "</font>"
+            "<br>"
+            "where <i>m</i> = metallic, <i>D</i> = GGX normal distribution, <i>G</i> = Smith geometry<br>"
+            "term, <i>F</i> = wavelength-dependent Fresnel, and \xce\xb1 = roughness\xc2\xb2.<br>"
+            "<br>"
+            "Material colour is converted from RGB to a spectral reflectance curve<br>"
+            "using three Gaussian basis functions centred at the CIE primaries:<br>"
+            "<br>"
+            "<font face='monospace'>"
+            "&nbsp;&nbsp;R(\xce\xbb) = r \xc2\xb7 G(\xce\xbb, 630, 30) + g \xc2\xb7 G(\xce\xbb, 532, 30) + b \xc2\xb7 G(\xce\xbb, 460, 25)<br>"
+            "</font>"
+            "<br>"
+
+            "<b>Spectral Phenomena</b><br>"
+            "\xe2\x80\xa2 <b>Dispersion</b> \xe2\x80\x94 Wavelength-dependent IOR via the Cauchy equation:<br>"
+            "<font face='monospace'>"
+            "&nbsp;&nbsp;&nbsp;&nbsp;n(\xce\xbb) = n<sub>d</sub> + (n<sub>d</sub> \xe2\x88\x92 1) / V<sub>d</sub> \xc2\xb7 (C / \xce\xbb\xc2\xb2 \xe2\x88\x92 1)<br>"
+            "</font>"
+            "&nbsp;&nbsp;&nbsp;&nbsp;where V<sub>d</sub> is the Abbe number. Produces rainbow caustics in glass.<br>"
+            "<br>"
+            "\xe2\x80\xa2 <b>Thin-Film Interference</b> \xe2\x80\x94 Iridescent reflections from nanoscale coatings:<br>"
+            "<font face='monospace'>"
+            "&nbsp;&nbsp;&nbsp;&nbsp;\xce\xb4 = 2\xc2\xb7n<sub>film</sub>\xc2\xb7" "d\xc2\xb7" "cos(\xce\xb8<sub>t</sub>) / \xce\xbb<br>"
+            "&nbsp;&nbsp;&nbsp;&nbsp;R = R<sub>0</sub> + (1 \xe2\x88\x92 R<sub>0</sub>) \xc2\xb7 sin\xc2\xb2(\xcf\x80 \xc2\xb7 \xce\xb4)<br>"
+            "</font>"
+            "&nbsp;&nbsp;&nbsp;&nbsp;Produces oil-slick and soap-bubble colour shifts.<br>"
+            "<br>"
+            "\xe2\x80\xa2 <b>Fluorescence</b> \xe2\x80\x94 Absorbs at one wavelength, re-emits at another.<br>"
+            "\xe2\x80\xa2 <b>Diffraction Gratings</b> \xe2\x80\x94 Wavelength-dependent angular splitting.<br>"
+            "\xe2\x80\xa2 <b>Volume Absorption</b> \xe2\x80\x94 Beer-Lambert extinction through coloured media.<br>"
+            "<br>"
+
+            "<b>GPU Acceleration</b><br>"
+            "The GPU path uses NVIDIA OptiX 9 with RTX hardware ray tracing and<br>"
+            "Shader Execution Reordering (SER) for optimal warp coherence on<br>"
+            "Ada Lovelace and Blackwell architectures. CUDA 12.6 kernels handle<br>"
+            "spectral shading, volume ray marching, and NanoVDB sampling.<br>"
+            "<br>"
+            "The CPU path uses Intel Embree 4 with a BVH acceleration structure<br>"
+            "and std::execution::par_unseq for automatic SIMD parallelism.<br>"
+            "<br>"
+
+            "<b>Volume Rendering</b><br>"
+            "OpenVDB volumes are rendered with ray marching through density,<br>"
+            "temperature, and flame fields. The volume integrator supports:<br>"
+            "\xe2\x80\xa2 Single-scattering with Henyey-Greenstein phase function<br>"
+            "\xe2\x80\xa2 Blackbody emission from temperature grids (Planck\xe2\x80\x99s law)<br>"
+            "\xe2\x80\xa2 Multi-scattering approximation for dense clouds<br>"
+            "\xe2\x80\xa2 NanoVDB LOD streaming for out-of-core datasets<br>"
+            "<br>"
+
+            "<b>ScanlineRender Drop-In</b><br>"
+            "With the \xe2\x80\x98ScanlineRender compatible\xe2\x80\x99 checkbox enabled, SpectralRenderer<br>"
+            "can replace Nuke\xe2\x80\x99s built-in ScanlineRender in existing comp trees:<br>"
+            "<br>"
+            "\xe2\x80\xa2 Reads native Nuke materials (BasicMaterial, Phong, NukeDefaultSurface)<br>"
+            "\xe2\x80\xa2 Auto-smooth normals eliminate faceted shading on simple geometry<br>"
+            "\xe2\x80\xa2 Texture alpha is respected for transparency cutouts on cards<br>"
+            "\xe2\x80\xa2 Premultiplied output comps directly over plates with Over nodes<br>"
+            "\xe2\x80\xa2 No-light scenes render as constant flat colour (same as ScanlineRender)<br>"
+            "\xe2\x80\xa2 Works with ReadGeo \xe2\x86\x92 GeoScene \xe2\x86\x92 SpectralRender without SpectralSurface<br>"
+            "<br>"
+            "This means artists can upgrade from ScanlineRender to SpectralRenderer<br>"
+            "and immediately gain soft shadows, global illumination, spectral dispersion,<br>"
+            "and physically-based volume rendering \xe2\x80\x94 without re-shading any geometry.<br>"
+            "<br>"
+
+            "<b>For Artists</b><br>"
+            "SpectralRenderer is designed to produce results that are both physically<br>"
+            "correct and artistically controllable. Key strengths:<br>"
+            "<br>"
+            "\xe2\x80\xa2 <b>True glass and diamonds</b> \xe2\x80\x94 rainbow dispersion happens naturally,<br>"
+            "&nbsp;&nbsp;controlled by a single Abbe number on the material.<br>"
+            "<br>"
+            "\xe2\x80\xa2 <b>Iridescence without maps</b> \xe2\x80\x94 thin-film interference creates oil-slick<br>"
+            "&nbsp;&nbsp;and soap-bubble colours from a single thickness value.<br>"
+            "<br>"
+            "\xe2\x80\xa2 <b>Accurate fire and explosions</b> \xe2\x80\x94 VDB temperature grids emit blackbody<br>"
+            "&nbsp;&nbsp;colour automatically. No hand-painted colour ramps needed.<br>"
+            "<br>"
+            "\xe2\x80\xa2 <b>GPU speed</b> \xe2\x80\x94 RTX hardware acceleration renders complex scenes<br>"
+            "&nbsp;&nbsp;in milliseconds. Interactive preview in the 3D viewport.<br>"
+            "<br>"
+            "\xe2\x80\xa2 <b>Production AOVs</b> \xe2\x80\x94 diffuse/specular direct+indirect, emission,<br>"
+            "&nbsp;&nbsp;transmission, normals, position, UV, depth, object/material ID,<br>"
+            "&nbsp;&nbsp;and Cryptomatte for compositing flexibility.<br>"
+            "<br>"
+            "\xe2\x80\xa2 <b>Drop-in replacement</b> \xe2\x80\x94 ScanlineRender compatible mode means you<br>"
+            "&nbsp;&nbsp;can swap renderers without changing your comp tree."
+        );
+    }
+    EndGroup(f);
+
+    // ─── Credit ─────────────────────────────────────────────────────
+    Divider(f, "");
+    Text_knob(f,
+        "<font color='#555' size='-1'>"
+        "Created by Marten Blumen"
+        "</font>"
+    );
+
     BeginGroup(f, "render_grp", "Render");
     {
         static const char* const deviceNames[] = { "cpu", "gpu", "auto", nullptr };
@@ -212,6 +390,17 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                    "cpu = Embree 4 CPU ray tracing<br>"
                    "gpu = OptiX 8.1 RTX GPU ray tracing<br>"
                    "auto = GPU if available, otherwise CPU");
+        static const char* const projNames[] = { "perspective", "UV", "spherical", nullptr };
+        Enumeration_knob(f, &_projectionMode, projNames, "projection", "projection");
+        Tooltip(f, "Camera projection mode.\n\n"
+                   "perspective = standard camera (default)\n"
+                   "UV = renders geometry flat-unwrapped in UV space.\n"
+                   "    Output pixels map directly to texture coordinates.\n"
+                   "    Used for baking textures, painting patches,\n"
+                   "    and creating UV-space AOVs for compositing.\n\n"
+                   "spherical = latitude/longitude equirectangular projection.\n"
+                   "    Each pixel maps to a direction on the sphere.\n"
+                   "    Used for environment map rendering and 360 output.");
         static const char* const csNames[] = { "sRGB", "ACEScg", "ACES 2065-1", nullptr };
         Enumeration_knob(f, &_colorSpace, csNames, "color_space", "color space");
         Tooltip(f, "Output color space for spectral-to-RGB conversion.<br>"
@@ -787,80 +976,82 @@ void SpectralRenderIop::knobs(Knob_Callback f)
 
     Text_knob(f,
         "<font color='#777' size='-1'>"
-        "Real-time preview of volumes and geometry in Nuke's 3D viewer.<br>"
-        "Shaded mode ray-marches volumes with scene lighting, shadows, and fire emission.<br>"
-        "All preview settings are viewport-only \xe2\x80\x94 they do not affect the final render."
+        "Real-time preview of volumes and geometry in Nuke\xe2\x80\x99s 3D viewer.<br>"
+        "All settings here are viewport-only \xe2\x80\x94 they do not affect the final render."
         "</font>"
     );
 
-    // ─── Display ─────────────────────────────────────────────────────
+    // ─── Master Switch ──────────────────────────────────────────────
     Divider(f, "Display");
     Bool_knob(f, &_vdb3dPreview, "vdb_3d_preview", "enable 3D preview");
-    Tooltip(f, "Master switch for all 3D viewport drawing.\n"
-               "When OFF, no volume or geometry preview appears in the viewer.");
-    Bool_knob(f, &_vdbShowBbox, "vdb_show_bbox", "bbox");
-    ClearFlags(f, Knob::STARTLINE);
-    Tooltip(f, "Green wireframe bounding box.\n"
-               "Useful for camera framing before rendering.");
-    Bool_knob(f, &_vdbShowPoints, "vdb_show_points", "points");
-    ClearFlags(f, Knob::STARTLINE);
-    Tooltip(f, "Coloured point cloud preview.\n"
-               "Colour follows the current Volume Render Mode.\n"
-               "Fast and lightweight \xe2\x80\x94 good for scrubbing.");
+    Tooltip(f, "Master switch for all 3D viewport drawing.\n\n"
+               "When OFF, no volume or geometry preview appears in the viewer.\n"
+               "Turn off to speed up the viewport when not needed.");
 
-    // ─── Shaded Preview ──────────────────────────────────────────────
-    Divider(f, "Shaded Volume");
-    Bool_knob(f, &_vdbShadedPreview, "vdb_shaded", "shaded preview");
-    Tooltip(f, "GPU ray-marched volume in the 3D viewport.\n"
+    // ─── Volume Preview ─────────────────────────────────────────────
+    Divider(f, "Volume Preview");
+    Bool_knob(f, &_vdbShowBbox, "vdb_show_bbox", "bounding box");
+    Tooltip(f, "Green wireframe bounding box around the volume.\n\n"
+               "Useful for camera framing and positioning\n"
+               "before enabling the full volume preview.");
+    Bool_knob(f, &_vdbShowPoints, "vdb_show_points", "point cloud");
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "Coloured point cloud sampled from the volume density grid.\n\n"
+               "Colour follows the current Volume Render Mode.\n"
+               "Fast and lightweight \xe2\x80\x94 good for scrubbing timelines.");
+    Bool_knob(f, &_vdbShadedPreview, "vdb_shaded", "shaded volume");
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "GPU ray-marched volume in the 3D viewport.\n\n"
                "Renders absorption, self-shadowing, and fire emission\n"
                "using the connected SpectralEnvLight or built-in sun.\n\n"
-               "TIP: Disable 'points' when using shaded for a cleaner look.");
+               "Tip: Disable \xe2\x80\x98point cloud\xe2\x80\x99 when using shaded for a cleaner look.");
+    Newline(f);
     {
         static const char* const vpResOpts[] = {
             "32", "64", "128", "256", nullptr
         };
         Enumeration_knob(f, &_vdbViewportRes, vpResOpts, "vdb_viewport_res", "volume res");
-        ClearFlags(f, Knob::STARTLINE);
-        Tooltip(f, "Resolution of the 3D volume texture.\n"
-                   "32 = fastest scrubbing, blocky look\n"
+        Tooltip(f, "Resolution of the 3D volume texture used for viewport preview.\n\n"
+                   "32 = fastest scrubbing, blocky appearance\n"
                    "64 = good balance for animation work\n"
                    "128 = detailed preview (default)\n"
                    "256 = near-render quality, slower to load\n\n"
-                   "Higher values load temp/flame grids for fire colours.");
+                   "Higher values also load temperature and flame grids\n"
+                   "for fire and explosion colour previews.");
     }
-    Newline(f);
     Double_knob(f, &_vdbPointDensity, "vdb_point_density", "point density");
     SetRange(f, 0.1, 1.0);
-    Tooltip(f, "Density of the point cloud sampling.\n"
-               "0.1 = very sparse (fast), 1.0 = all voxels (slow).\n"
+    Tooltip(f, "Density of the point cloud sampling.\n\n"
+               "0.1 = very sparse (fast)\n"
+               "1.0 = all voxels (slow)\n\n"
                "Only affects point cloud mode, not shaded preview.");
     Double_knob(f, &_vdbPointSize, "vdb_point_size", "point size");
     ClearFlags(f, Knob::STARTLINE);
     SetRange(f, 1, 8);
-    Tooltip(f, "GL point size in pixels for the point cloud.");
+    Tooltip(f, "GL point size in pixels for the point cloud display.");
 
-    // ─── Shadows ─────────────────────────────────────────────────────
-    Divider(f, "Viewport Shadows");
+    // ─── Viewport Lighting ──────────────────────────────────────────
+    Divider(f, "Viewport Lighting");
     {
         static const char* const pcfOpts[] = {
             "sharp", "3x3", "5x5", "7x7", nullptr
         };
         Enumeration_knob(f, &_vpShadowPCF, pcfOpts, "vp_shadow_pcf", "shadow quality");
-        Tooltip(f, "Viewport shadow softness.\n"
+        Tooltip(f, "Viewport shadow map filtering.\n\n"
                    "sharp = hard single-sample shadow\n"
-                   "3x3 = 9 samples, light penumbra\n"
-                   "5x5 = 25 samples, soft (default)\n"
-                   "7x7 = 49 samples, very soft\n\n"
-                   "Combine with the env light's shadow softness\n"
-                   "to control penumbra width.");
+                   "3x3 = light penumbra (9 samples)\n"
+                   "5x5 = soft shadow (25 samples, default)\n"
+                   "7x7 = very soft (49 samples)\n\n"
+                   "Combine with the SpectralEnvLight shadow softness knob\n"
+                   "to control penumbra width in the viewport.");
     }
     {
         static const char* const volShadOpts[] = {
             "off", "4", "8", "16", nullptr
         };
-        Enumeration_knob(f, &_vpVolShadowSamples, volShadOpts, "vp_vol_shadow", "vol shadow");
+        Enumeration_knob(f, &_vpVolShadowSamples, volShadOpts, "vp_vol_shadow", "volume shadow");
         ClearFlags(f, Knob::STARTLINE);
-        Tooltip(f, "Volume shadow samples on geometry.\n"
+        Tooltip(f, "Volume shadow samples cast onto geometry surfaces.\n\n"
                    "Marches through the volume toward the light to\n"
                    "determine how much light is blocked by the cloud.\n\n"
                    "off = no volume shadows on geometry\n"
@@ -869,42 +1060,44 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                    "16 = best quality");
     }
 
-    // ─── Reflections ─────────────────────────────────────────────────
-    Divider(f, "Reflections");
-    Bool_knob(f, &_vpEnvReflections, "vp_env_reflections", "environment reflections");
-    Tooltip(f, "Sky environment reflections on metallic/specular surfaces.\n"
-               "Includes procedural sky dome, sun corona, Fresnel,\n"
-               "and GGX specular highlights.");
-    Bool_knob(f, &_vpGeoReflections, "vp_geo_reflections", "geometry reflections");
+    // ─── Viewport Reflections ───────────────────────────────────────
+    Divider(f, "Viewport Reflections");
+    Bool_knob(f, &_vpEnvReflections, "vp_env_reflections", "environment");
+    Tooltip(f, "Sky environment reflections on metallic and specular surfaces.\n\n"
+               "Includes procedural sky dome gradient, sun corona,\n"
+               "Fresnel falloff, and GGX specular highlights.");
+    Bool_knob(f, &_vpGeoReflections, "vp_geo_reflections", "geometry");
     ClearFlags(f, Knob::STARTLINE);
-    Tooltip(f, "One-bounce screen-space reflections of other geometry.\n"
-               "Renders a pre-pass then traces in screen space.\n"
+    Tooltip(f, "One-bounce screen-space reflections of other geometry.\n\n"
+               "Renders a reflected-camera pre-pass then samples it.\n"
                "Best on smooth metallic surfaces facing other objects.");
-    Bool_knob(f, &_vpVolReflections, "vp_vol_reflections", "volume reflections");
+    Bool_knob(f, &_vpVolReflections, "vp_vol_reflections", "volumes");
     ClearFlags(f, Knob::STARTLINE);
-    Tooltip(f, "Include volumes in viewport reflections.\n"
-               "Volumes are rendered to the reflection pre-pass FBO\n"
-               "so they appear in reflective surfaces.");
+    Tooltip(f, "Include volumes in viewport geometry reflections.\n\n"
+               "Volumes are drawn into the reflection pre-pass FBO\n"
+               "so they appear in nearby reflective surfaces.");
     {
         static const char* const reflOpts[] = {
             "8 steps", "16 steps", "32 steps", "64 steps", nullptr
         };
         Enumeration_knob(f, &_vpReflSteps, reflOpts, "vp_refl_steps", "quality");
         ClearFlags(f, Knob::STARTLINE);
-        Tooltip(f, "Screen-space ray march steps for geometry reflections.\n"
-                   "More steps = longer reflections but slower.");
+        Tooltip(f, "Screen-space ray march steps for geometry reflections.\n\n"
+                   "More steps = longer reflection reach but slower.\n"
+                   "8 is fast, 32 is a good balance, 64 for hero shots.");
     }
 
-    // ─── Performance ─────────────────────────────────────────────────
+    // ─── Performance ────────────────────────────────────────────────
     Divider(f, "Performance");
     Bool_knob(f, &_vdbFastScrub, "vdb_fast_scrub", "fast scrub");
-    Tooltip(f, "Show bbox-only during timeline scrub.\n"
-               "Full preview loads when playback stops.\n"
+    Tooltip(f, "Show bounding box only during timeline scrub.\n\n"
+               "Full preview loads automatically when playback stops.\n"
                "Keeps the timeline responsive with heavy VDB sequences.");
     Bool_knob(f, &_vdbCacheEnabled, "vdb_cache_enabled", "frame cache");
     ClearFlags(f, Knob::STARTLINE);
-    Tooltip(f, "Cache loaded VDB frames for instant scrub-back.\n"
-               "Each cached frame stores the resampled density grid.");
+    Tooltip(f, "Cache loaded VDB frames in memory for instant scrub-back.\n\n"
+               "Each cached frame stores the resampled density grid.\n"
+               "Useful for reviewing animation without re-loading from disk.");
     Int_knob(f, &_vdbCacheMax, "vdb_cache_max", "");
     ClearFlags(f, Knob::STARTLINE);
     SetRange(f, 1, 32);
@@ -914,14 +1107,23 @@ void SpectralRenderIop::knobs(Knob_Callback f)
     ClearFlags(f, Knob::STARTLINE);
     Tooltip(f, "Flush all cached VDB frames from memory.");
 
+    // ─── Artist Notes ───────────────────────────────────────────────
+    Divider(f, "");
     Text_knob(f,
-        "<font color='#556' size='-1'><br>"
+        "<font color='#556' size='-1'>"
+        "Viewport tips:<br>"
+        "<br>"
         "\xe2\x80\xa2 Shaded preview uses the SpectralEnvLight sun direction and colour.<br>"
-        "\xe2\x80\xa2 Without an EnvLight, the built-in light checkbox on the Lighting tab controls the sun.<br>"
-        "\xe2\x80\xa2 Reflections show one bounce of geometry in screen space \xe2\x80\x94 only visible surfaces reflect.<br>"
-        "\xe2\x80\xa2 Viewport shadows and reflections are approximate \xe2\x80\x94 the final render uses full path tracing.<br>"
-        "\xe2\x80\xa2 Guide colours, line width, and icon scale affect dome, sun arc, and compass overlays.<br>"
-        "\xe2\x80\xa2 High volume res (256) with shaded preview can be slow \xe2\x80\x94 use 64 for animation work."
+        "\xe2\x80\xa2 Without an EnvLight, the built-in light on the Lighting tab controls the sun.<br>"
+        "<br>"
+        "\xe2\x80\xa2 Reflections show one bounce of geometry in screen space.<br>"
+        "\xe2\x80\xa2 Only surfaces visible in the viewport can reflect \xe2\x80\x94 off-screen objects won\xe2\x80\x99t appear.<br>"
+        "<br>"
+        "\xe2\x80\xa2 Viewport shadows and reflections are approximate previews.<br>"
+        "\xe2\x80\xa2 The final render uses full spectral path tracing with unlimited bounces.<br>"
+        "<br>"
+        "\xe2\x80\xa2 High volume res (256) with shaded preview can be slow \xe2\x80\x94 use 64 for animation work.<br>"
+        "\xe2\x80\xa2 Guide overlays (dome arc, sun path, compass) are controlled on the SpectralEnvLight node."
         "</font>"
     );
 
@@ -1157,7 +1359,7 @@ int SpectralRenderIop::knob_changed(Knob* k)
     if (!isUIOnly) {
         _asyncCancel.store(true);
         if (_asyncQualityThread.joinable()) _asyncQualityThread.join();
-        _frameReady.store(false);
+        _frameReady.store(false); _sceneReady.store(false);
         _progressiveSppDone = 0;
     }
 
@@ -1211,7 +1413,7 @@ int SpectralRenderIop::knob_changed(Knob* k)
         return 1;
     }
     if (k->is("vdb_frame_offset") || k->is("vdb_file")) {
-        _frameReady.store(false);
+        _frameReady.store(false); _sceneReady.store(false);
         _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
         _vdbLoadedPath.clear();
         _volume.reset();  // force reload
@@ -1221,7 +1423,7 @@ int SpectralRenderIop::knob_changed(Knob* k)
         }
         return 1;
     }
-    if (k->is("vdb_3d_preview") || k->is("vdb_show_points") || k->is("vdb_shaded") || k->is("vdb_viewport_res") || k->is("vdb_point_density") || k->is("vdb_point_size") || k->is("vdb_show_bbox") || k->is("vdb_fast_scrub") || k->is("vp_shadow_pcf") || k->is("vp_vol_shadow") || k->is("vp_env_reflections") || k->is("vp_geo_reflections") || k->is("vp_vol_reflections") || k->is("vp_refl_steps")) {
+    if (k->is("scanline_compat") || k->is("vdb_3d_preview") || k->is("vdb_show_points") || k->is("vdb_shaded") || k->is("vdb_viewport_res") || k->is("vdb_point_density") || k->is("vdb_point_size") || k->is("vdb_show_bbox") || k->is("vdb_fast_scrub") || k->is("vp_shadow_pcf") || k->is("vp_vol_shadow") || k->is("vp_env_reflections") || k->is("vp_geo_reflections") || k->is("vp_vol_reflections") || k->is("vp_refl_steps")) {
         _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
         if (k->is("vdb_fast_scrub") || k->is("vdb_viewport_res")) _vdbLoadedPath.clear();
         return 1;
@@ -1260,7 +1462,7 @@ int SpectralRenderIop::knob_changed(Knob* k)
         if (!bestT.empty()) msg += "\\nTemperature: " + bestT;
         script_command(("python {nuke.message('" + msg + "')}").c_str());
         _vdbLoadedPath.clear(); _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
-        _frameReady.store(false);
+        _frameReady.store(false); _sceneReady.store(false);
 #else
         error("OpenVDB not compiled.");
 #endif
@@ -1444,7 +1646,7 @@ int SpectralRenderIop::knob_changed(Knob* k)
     if (k->is("vdb_render_mode") || k->is("vdb_intensity") || k->is("vdb_spectral_volumes")) return 1;
     if (k->is("vdb_vol_res")) {
         _vdbLoadedPath.clear(); _volume.reset(); _vdbIsPreviewRes = true;
-        _frameReady.store(false);
+        _frameReady.store(false); _sceneReady.store(false);
         return 1;
     }
     if (k->is("vdb_shadow_cache") || k->is("vdb_shadow_cache_res")) return 1;
@@ -1527,6 +1729,30 @@ int SpectralRenderIop::knob_changed(Knob* k)
         return 1;
     }
 
+    if (k->is("rerender")) {
+        // Cancel async render
+        _asyncCancel.store(true);
+        if (_asyncQualityThread.joinable()) _asyncQualityThread.join();
+
+        // Flush all caches
+        _frameReady.store(false);
+        _sceneReady.store(false);
+        _progressiveSppDone = 0;
+        _scene.reset();
+        _volume.reset();
+        _volumes.clear();
+        _vdbLastLoadedFrame = -999;
+
+        // Force GPU to rebuild everything
+#ifdef SPECTRAL_HAS_OPTIX
+        SpectralIntegrator::InvalidateGPUAccel();
+#endif
+
+        SLOG("SpectralRender: re-render — all caches flushed\n");
+        invalidate();
+        return 1;
+    }
+
     return Iop::knob_changed(k);
 }
 
@@ -1541,11 +1767,17 @@ void SpectralRenderIop::_validate(bool forReal)
         _asyncCancel.store(true);
         if (_asyncQualityThread.joinable()) _asyncQualityThread.join();
         _frame = currentFrame;
-        _frameReady.store(false);
+        _frameReady.store(false); _sceneReady.store(false);
         _progressiveSppDone = 0;
         _vdbLastLoadedFrame = -999;
         _volume.reset();
         _volumes.clear();
+    }
+
+    // Always invalidate render when Nuke re-validates (upstream input may have changed)
+    if (forReal) {
+        _frameReady.store(false);
+        _sceneReady.store(false);
     }
     // If we were scrubbing and have now stopped, force re-render
     // (scrub detection removed — preview-res loading handles performance)
@@ -1693,7 +1925,7 @@ void SpectralRenderIop::_validate(bool forReal)
         if (newHash != _scnInputHash) {
             _scnInputHash = newHash;
             _vdbLastLoadedFrame = -999;  // force VDB reload
-            _frameReady.store(false);    // force re-render
+            _frameReady.store(false); _sceneReady.store(false);    // force re-render
             _vdbPreviewDirty = true;
             _vdbPreviewPoints.clear();
             scnChanged = true;
@@ -1706,7 +1938,7 @@ void SpectralRenderIop::_validate(bool forReal)
         _cachedVolMerge = nullptr;
         _hasRefVolCenter = false;
         _vdbLastLoadedFrame = -999;
-        _frameReady.store(false);
+        _frameReady.store(false); _sceneReady.store(false);
         _vdbPreviewDirty = true;
         _vdbPreviewPoints.clear();
         scnChanged = true;
@@ -1717,7 +1949,7 @@ void SpectralRenderIop::_validate(bool forReal)
         if (_asyncQualityThread.joinable()) _asyncQualityThread.join();
         _LoadStage();
         _BuildCameraFromInput();
-        _frameReady.store(false);
+        _frameReady.store(false); _sceneReady.store(false);
         _progressiveSppDone = 0;
     }
 
@@ -1746,7 +1978,7 @@ void SpectralRenderIop::_request(int x, int y, int r, int t,
 void SpectralRenderIop::engine(
     int y, int x, int r, ChannelMask channels, Row& row)
 {
-    _EnsureFrameRendered();
+    _EnsureSceneReady();
 
     const int W = static_cast<int>(_fbWidth);       // proxy render resolution
     const int H = static_cast<int>(_fbHeight);
@@ -1756,6 +1988,15 @@ void SpectralRenderIop::engine(
     int fullBufY = fullH - 1 - y;
     // Map output Y to proxy buffer Y
     int bufY = (H == fullH) ? fullBufY : (fullBufY * H / fullH);
+
+    // Progressive strip rendering: render this strip on demand
+    if (bufY >= 0 && bufY < H && !_stripRendered.empty()) {
+        int stripIdx = bufY / kStripHeight;
+        int numStrips = static_cast<int>(_stripRendered.size());
+        if (stripIdx < numStrips && !_stripRendered[stripIdx]) {
+            _RenderStrip(stripIdx);
+        }
+    }
 
     // Get BG pixels if available
     Row bgRow(x, r);
@@ -2397,6 +2638,36 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                     }
                     idx += fc;
                 }
+                // Auto-smooth normals when scanlineCompat
+                if (_scanlineCompat && !meshData.triangles.empty()) {
+                    struct Vec3Hash {
+                        size_t operator()(const pxr::GfVec3f& v) const {
+                            size_t h = 0;
+                            h ^= std::hash<float>{}(v[0]) + 0x9e3779b9 + (h<<6) + (h>>2);
+                            h ^= std::hash<float>{}(v[1]) + 0x9e3779b9 + (h<<6) + (h>>2);
+                            h ^= std::hash<float>{}(v[2]) + 0x9e3779b9 + (h<<6) + (h>>2);
+                            return h;
+                        }
+                    };
+                    struct Vec3Eq {
+                        bool operator()(const pxr::GfVec3f& a, const pxr::GfVec3f& b) const {
+                            return a[0]==b[0] && a[1]==b[1] && a[2]==b[2];
+                        }
+                    };
+                    std::unordered_map<pxr::GfVec3f, pxr::GfVec3f, Vec3Hash, Vec3Eq> vn;
+                    for (const auto& tri : meshData.triangles) {
+                        vn[tri.v0] += tri.faceNormal; vn[tri.v1] += tri.faceNormal; vn[tri.v2] += tri.faceNormal;
+                    }
+                    for (auto& kv : vn) { float l = kv.second.GetLength(); if (l>1e-8f) kv.second /= l; }
+                    for (auto& tri : meshData.triangles) {
+                        if (tri.n0 == tri.n1 && tri.n1 == tri.n2) {
+                            auto i0=vn.find(tri.v0), i1=vn.find(tri.v1), i2=vn.find(tri.v2);
+                            if (i0!=vn.end()) tri.n0=i0->second;
+                            if (i1!=vn.end()) tri.n1=i1->second;
+                            if (i2!=vn.end()) tri.n2=i2->second;
+                        }
+                    }
+                }
                 _scene->SetMeshData(meshData.id, std::move(meshData));
             }
             continue;
@@ -2596,16 +2867,48 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                     readFloat("clearcoat", mat.clearcoat);
                     readFloat("clearcoatRoughness", mat.clearcoatRoughness);
 
+                    // Fallback property names (BasicMaterial, Phong, generic)
+                    if (mat.baseColor == GfVec3f(0.18f, 0.18f, 0.18f)) {
+                        // Still at default — try alternative names
+                        readColor("diffuse_color", mat.baseColor);
+                        readColor("color", mat.baseColor);
+                        readColor("baseColor", mat.baseColor);
+                    }
+                    // Shininess → roughness conversion
+                    {
+                        float shininess = -1.f;
+                        readFloat("shininess", shininess);
+                        if (shininess >= 0.f && mat.roughness >= 0.49f) {
+                            mat.roughness = std::max(0.05f, 1.f - std::sqrt(std::min(shininess / 100.f, 1.f)));
+                        }
+                    }
+                    // Specular → metallic estimate
+                    {
+                        GfVec3f specCol(0.f);
+                        readColor("specularColor", specCol);
+                        if (specCol == GfVec3f(0.f)) readColor("specular_color", specCol);
+                        float specLum = (specCol[0] + specCol[1] + specCol[2]) / 3.f;
+                        if (specLum > 0.01f && mat.metallic < 0.01f) {
+                            mat.metallic = std::min(specLum * 2.f, 1.f);
+                        }
+                    }
+                    // Transparency → opacity
+                    {
+                        float transp = -1.f;
+                        readFloat("transparency", transp);
+                        if (transp >= 0.f) mat.opacity = 1.f - transp;
+                    }
+
                     // Determine texture input names based on shader type
                     const char* diffuseTexInput = "diffuseColor";
                     const char* roughTexInput   = "roughness";
                     const char* metalTexInput   = "metallic";
 
-                    if (surfShaderId == TfToken("NukeDefaultSurface")) {
-                        // Nuke's default surface uses different input names
+                    if (surfShaderId == TfToken("NukeDefaultSurface") ||
+                        surfShaderId == TfToken("NukeBasicMaterial") ||
+                        surfShaderId == TfToken("NukePhong")) {
+                        // Nuke's shaders use different input names
                         diffuseTexInput = "tex_color";
-                        // NukeDefaultSurface has tex_color/tex_opacity but
-                        // no separate roughness/metallic texture inputs
                         roughTexInput = nullptr;
                         metalTexInput = nullptr;
                     }
@@ -2663,23 +2966,25 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                                             pxr::SpectralTexture tex;
                                             tex._width = texW;
                                             tex._height = texH;
-                                            tex._channels = 3;
-                                            tex._pixels.resize(size_t(texW) * texH * 3);
+                                            tex._channels = 4;
+                                            tex._pixels.resize(size_t(texW) * texH * 4);
                                             tex._path = assetPath;
 
-                                            texIop->request(0, 0, texW, texH, Mask_RGB, 1);
+                                            texIop->request(0, 0, texW, texH, Mask_RGBA, 1);
                                             for (int y = 0; y < texH; ++y) {
                                                 Row row(0, texW);
-                                                texIop->get(y, 0, texW, Mask_RGB, row);
+                                                texIop->get(y, 0, texW, Mask_RGBA, row);
                                                 const float* rp = row[Chan_Red];
                                                 const float* gp = row[Chan_Green];
                                                 const float* bp = row[Chan_Blue];
+                                                const float* ap = row[Chan_Alpha];
                                                 int storeY = texH - 1 - y;
                                                 for (int x = 0; x < texW; ++x) {
-                                                    size_t idx = (size_t(storeY) * texW + x) * 3;
+                                                    size_t idx = (size_t(storeY) * texW + x) * 4;
                                                     tex._pixels[idx + 0] = rp ? rp[x] : 0.f;
                                                     tex._pixels[idx + 1] = gp ? gp[x] : 0.f;
                                                     tex._pixels[idx + 2] = bp ? bp[x] : 0.f;
+                                                    tex._pixels[idx + 3] = ap ? ap[x] : 1.f;
                                                 }
                                             }
 
@@ -2869,22 +3174,24 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                                                 pxr::SpectralTexture tex;
                                                 tex._width = texW;
                                                 tex._height = texH;
-                                                tex._channels = 3;
-                                                tex._pixels.resize(size_t(texW) * texH * 3);
+                                                tex._channels = 4;
+                                                tex._pixels.resize(size_t(texW) * texH * 4);
                                                 tex._path = "tex_iop";
-                                                texIop->request(0, 0, texW, texH, Mask_RGB, 1);
+                                                texIop->request(0, 0, texW, texH, Mask_RGBA, 1);
                                                 for (int y = 0; y < texH; ++y) {
                                                     Row row(0, texW);
-                                                    texIop->get(y, 0, texW, Mask_RGB, row);
+                                                    texIop->get(y, 0, texW, Mask_RGBA, row);
                                                     const float* rp = row[Chan_Red];
                                                     const float* gp = row[Chan_Green];
                                                     const float* bp = row[Chan_Blue];
+                                                    const float* ap = row[Chan_Alpha];
                                                     int storeY = texH - 1 - y;
                                                     for (int x = 0; x < texW; ++x) {
-                                                        size_t idx = (size_t(storeY) * texW + x) * 3;
+                                                        size_t idx = (size_t(storeY) * texW + x) * 4;
                                                         tex._pixels[idx+0] = rp ? rp[x] : 0.f;
                                                         tex._pixels[idx+1] = gp ? gp[x] : 0.f;
                                                         tex._pixels[idx+2] = bp ? bp[x] : 0.f;
+                                                        tex._pixels[idx+3] = ap ? ap[x] : 1.f;
                                                     }
                                                 }
                                                 mat.baseColorTexId = _scene->AddTexture(std::move(tex));
@@ -2957,6 +3264,134 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                             mat.name.c_str(),
                             mat.baseColor[0], mat.baseColor[1], mat.baseColor[2],
                             mat.metallic, mat.roughness, mat.opacity);
+                }
+            }
+        }
+
+        // ----------------------------------------------------------
+        //   Fallback: read Nuke native material from Op chain
+        //   Handles BasicMaterial, Phong, FlatShading connected
+        //   to the scene input when USD material binding fails.
+        // ----------------------------------------------------------
+        if (matId == kDefaultMaterialId) {
+            // Walk the scene input chain to find material Ops
+            Op* scnIn = (inputs() > 1) ? input(1) : nullptr;
+            if (scnIn) {
+                // Walk up to 8 levels of input chain looking for material knobs
+                Op* cur = scnIn;
+                for (int depth = 0; depth < 8 && cur; ++depth) {
+                    // Check if this Op has material-like knobs
+                    Knob* kDiffColor = cur->knob("diffuse_color");
+                    Knob* kColor     = cur->knob("color");
+                    Knob* kShininess = cur->knob("shininess");
+                    Knob* kSpecColor = cur->knob("specular_color");
+                    Knob* kOpacity   = cur->knob("opacity");
+                    Knob* kEmission  = cur->knob("emission");
+                    Knob* kTransparency = cur->knob("transparency");
+
+                    if (kDiffColor || kColor) {
+                        SpectralMaterial mat;
+                        mat.name = std::string("nuke_native_") + cur->node_name();
+
+                        // Diffuse color
+                        if (kDiffColor) {
+                            mat.baseColor = pxr::GfVec3f(
+                                float(kDiffColor->get_value(0)),
+                                float(kDiffColor->get_value(1)),
+                                float(kDiffColor->get_value(2)));
+                        } else if (kColor) {
+                            mat.baseColor = pxr::GfVec3f(
+                                float(kColor->get_value(0)),
+                                float(kColor->get_value(1)),
+                                float(kColor->get_value(2)));
+                        }
+
+                        // Shininess → roughness (inverse mapping)
+                        if (kShininess) {
+                            float shininess = float(kShininess->get_value());
+                            // Map shininess 0-100 → roughness 1.0-0.05
+                            mat.roughness = std::max(0.05f, 1.f - std::sqrt(std::min(shininess / 100.f, 1.f)));
+                        }
+
+                        // Specular color → derive metallic
+                        if (kSpecColor) {
+                            float sr = float(kSpecColor->get_value(0));
+                            float sg = float(kSpecColor->get_value(1));
+                            float sb = float(kSpecColor->get_value(2));
+                            float specLum = (sr + sg + sb) / 3.f;
+                            // High specular luminance = more metallic
+                            mat.metallic = std::min(specLum * 2.f, 1.f);
+                        }
+
+                        // Opacity / transparency
+                        if (kOpacity) {
+                            mat.opacity = float(kOpacity->get_value());
+                        } else if (kTransparency) {
+                            mat.opacity = 1.f - float(kTransparency->get_value());
+                        }
+
+                        // Emission
+                        if (kEmission) {
+                            float em = float(kEmission->get_value());
+                            if (em > 0.01f) {
+                                mat.emissiveColor = mat.baseColor * em;
+                            }
+                        }
+
+                        // Check for texture input (input 0 on material nodes is usually the texture)
+                        if (cur->inputs() > 0 && cur->input(0)) {
+                            Iop* texIop = dynamic_cast<Iop*>(cur->input(0));
+                            if (texIop) {
+                                try {
+                                    texIop->validate(true);
+                                    const int texW = texIop->info().format().width();
+                                    const int texH = texIop->info().format().height();
+                                    if (texW > 0 && texH > 0 && texW <= 8192 && texH <= 8192) {
+                                        pxr::SpectralTexture tex;
+                                        tex._width = texW;
+                                        tex._height = texH;
+                                        tex._channels = 4;
+                                        tex._pixels.resize(size_t(texW) * texH * 4);
+                                        tex._path = std::string("nuke_tex_") + texIop->node_name();
+                                        texIop->request(0, 0, texW, texH, Mask_RGBA, 1);
+                                        for (int y = 0; y < texH; ++y) {
+                                            Row row(0, texW);
+                                            texIop->get(y, 0, texW, Mask_RGBA, row);
+                                            const float* rp = row[Chan_Red];
+                                            const float* gp = row[Chan_Green];
+                                            const float* bp = row[Chan_Blue];
+                                            const float* ap = row[Chan_Alpha];
+                                            int storeY = texH - 1 - y;
+                                            for (int x = 0; x < texW; ++x) {
+                                                size_t idx = (size_t(storeY) * texW + x) * 4;
+                                                tex._pixels[idx+0] = rp ? rp[x] : 0.f;
+                                                tex._pixels[idx+1] = gp ? gp[x] : 0.f;
+                                                tex._pixels[idx+2] = bp ? bp[x] : 0.f;
+                                                tex._pixels[idx+3] = ap ? ap[x] : 1.f;
+                                            }
+                                        }
+                                        mat.baseColorTexId = _scene->AddTexture(std::move(tex));
+                                        mat.textureBlend = 1.f;
+                                        SLOG("SpectralRender: native texture '%s' (%dx%d, id=%d)\n",
+                                                texIop->node_name(), texW, texH, mat.baseColorTexId);
+                                    }
+                                } catch (...) {
+                                    SLOG("SpectralRender: failed to read native material texture\n");
+                                }
+                            }
+                        }
+
+                        matId = _scene->AddMaterial(mat);
+                        SLOG("SpectralRender: native material '%s' from '%s' — "
+                             "color=(%.2f,%.2f,%.2f) metal=%.2f rough=%.2f opacity=%.2f\n",
+                             mat.name.c_str(), cur->node_name(),
+                             mat.baseColor[0], mat.baseColor[1], mat.baseColor[2],
+                             mat.metallic, mat.roughness, mat.opacity);
+                        break;  // found material, stop walking
+                    }
+
+                    // Walk to first input that's not a camera
+                    cur = (cur->inputs() > 0) ? cur->input(0) : nullptr;
                 }
             }
         }
@@ -3417,6 +3852,52 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
         }
 
         if (!data.triangles.empty()) {
+            // Auto-smooth normals: average face normals per shared vertex
+            if (_scanlineCompat) {
+                // Build vertex → face normal accumulator using position hash
+                struct Vec3Hash {
+                    size_t operator()(const pxr::GfVec3f& v) const {
+                        size_t h = 0;
+                        h ^= std::hash<float>{}(v[0]) + 0x9e3779b9 + (h<<6) + (h>>2);
+                        h ^= std::hash<float>{}(v[1]) + 0x9e3779b9 + (h<<6) + (h>>2);
+                        h ^= std::hash<float>{}(v[2]) + 0x9e3779b9 + (h<<6) + (h>>2);
+                        return h;
+                    }
+                };
+                struct Vec3Eq {
+                    bool operator()(const pxr::GfVec3f& a, const pxr::GfVec3f& b) const {
+                        return a[0]==b[0] && a[1]==b[1] && a[2]==b[2];
+                    }
+                };
+                std::unordered_map<pxr::GfVec3f, pxr::GfVec3f, Vec3Hash, Vec3Eq> vertNormals;
+
+                // Accumulate face normals
+                for (const auto& tri : data.triangles) {
+                    vertNormals[tri.v0] += tri.faceNormal;
+                    vertNormals[tri.v1] += tri.faceNormal;
+                    vertNormals[tri.v2] += tri.faceNormal;
+                }
+
+                // Normalize accumulated normals
+                for (auto& kv : vertNormals) {
+                    float len = kv.second.GetLength();
+                    if (len > 1e-8f) kv.second /= len;
+                }
+
+                // Assign smooth normals (only where normals were face normals)
+                for (auto& tri : data.triangles) {
+                    // Check if all 3 normals are identical (face normal fallback)
+                    if (tri.n0 == tri.n1 && tri.n1 == tri.n2) {
+                        auto it0 = vertNormals.find(tri.v0);
+                        auto it1 = vertNormals.find(tri.v1);
+                        auto it2 = vertNormals.find(tri.v2);
+                        if (it0 != vertNormals.end()) tri.n0 = it0->second;
+                        if (it1 != vertNormals.end()) tri.n1 = it1->second;
+                        if (it2 != vertNormals.end()) tri.n2 = it2->second;
+                    }
+                }
+            }
+
             _scene->SetMeshData(data.id, std::move(data));
             meshCount++;
         }
@@ -5222,12 +5703,21 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
                         glUniform1f(glGetUniformLocation(_glGeoProg,"uRoughness"),prou);
                         glBegin(GL_TRIANGLES);
                         for (const auto& tri : kv2.second.triangles) {
-                            pxr::GfVec3f e1=tri.v1-tri.v0,e2=tri.v2-tri.v0;
-                            pxr::GfVec3f fn(e1[1]*e2[2]-e1[2]*e2[1],e1[2]*e2[0]-e1[0]*e2[2],e1[0]*e2[1]-e1[1]*e2[0]);
-                            glNormal3f(fn[0],fn[1],fn[2]);
-                            glVertex3f(tri.v0[0],tri.v0[1],tri.v0[2]);
-                            glVertex3f(tri.v1[0],tri.v1[1],tri.v1[2]);
-                            glVertex3f(tri.v2[0],tri.v2[1],tri.v2[2]);
+                            if (_scanlineCompat) {
+                                glNormal3f(tri.n0[0],tri.n0[1],tri.n0[2]);
+                                glVertex3f(tri.v0[0],tri.v0[1],tri.v0[2]);
+                                glNormal3f(tri.n1[0],tri.n1[1],tri.n1[2]);
+                                glVertex3f(tri.v1[0],tri.v1[1],tri.v1[2]);
+                                glNormal3f(tri.n2[0],tri.n2[1],tri.n2[2]);
+                                glVertex3f(tri.v2[0],tri.v2[1],tri.v2[2]);
+                            } else {
+                                pxr::GfVec3f e1=tri.v1-tri.v0,e2=tri.v2-tri.v0;
+                                pxr::GfVec3f fn(e1[1]*e2[2]-e1[2]*e2[1],e1[2]*e2[0]-e1[0]*e2[2],e1[0]*e2[1]-e1[1]*e2[0]);
+                                glNormal3f(fn[0],fn[1],fn[2]);
+                                glVertex3f(tri.v0[0],tri.v0[1],tri.v0[2]);
+                                glVertex3f(tri.v1[0],tri.v1[1],tri.v1[2]);
+                                glVertex3f(tri.v2[0],tri.v2[1],tri.v2[2]);
+                            }
                         }
                         glEnd();
                     }
@@ -5305,13 +5795,23 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
 
                 glBegin(GL_TRIANGLES);
                 for (const auto& tri : kv.second.triangles) {
-                    // Face normal for flat shading
-                    pxr::GfVec3f e1 = tri.v1 - tri.v0, e2 = tri.v2 - tri.v0;
-                    pxr::GfVec3f fn(e1[1]*e2[2]-e1[2]*e2[1], e1[2]*e2[0]-e1[0]*e2[2], e1[0]*e2[1]-e1[1]*e2[0]);
-                    glNormal3f(fn[0], fn[1], fn[2]);
-                    glVertex3f(tri.v0[0], tri.v0[1], tri.v0[2]);
-                    glVertex3f(tri.v1[0], tri.v1[1], tri.v1[2]);
-                    glVertex3f(tri.v2[0], tri.v2[1], tri.v2[2]);
+                    if (_scanlineCompat) {
+                        // Smooth vertex normals
+                        glNormal3f(tri.n0[0], tri.n0[1], tri.n0[2]);
+                        glVertex3f(tri.v0[0], tri.v0[1], tri.v0[2]);
+                        glNormal3f(tri.n1[0], tri.n1[1], tri.n1[2]);
+                        glVertex3f(tri.v1[0], tri.v1[1], tri.v1[2]);
+                        glNormal3f(tri.n2[0], tri.n2[1], tri.n2[2]);
+                        glVertex3f(tri.v2[0], tri.v2[1], tri.v2[2]);
+                    } else {
+                        // Face normal for flat shading
+                        pxr::GfVec3f e1 = tri.v1 - tri.v0, e2 = tri.v2 - tri.v0;
+                        pxr::GfVec3f fn(e1[1]*e2[2]-e1[2]*e2[1], e1[2]*e2[0]-e1[0]*e2[2], e1[0]*e2[1]-e1[1]*e2[0]);
+                        glNormal3f(fn[0], fn[1], fn[2]);
+                        glVertex3f(tri.v0[0], tri.v0[1], tri.v0[2]);
+                        glVertex3f(tri.v1[0], tri.v1[1], tri.v1[2]);
+                        glVertex3f(tri.v2[0], tri.v2[1], tri.v2[2]);
+                    }
                 }
                 glEnd();
             }
@@ -6412,7 +6912,7 @@ void SpectralRenderIop::_EnsureFrameRendered()
     // Frame already rendered — async quality thread handles refinement
     if (_frameReady.load()) return;
 
-    std::lock_guard<std::mutex> lock(_renderMutex);
+    std::lock_guard<std::recursive_mutex> lock(_renderMutex);
     if (_frameReady.load()) return;
 
     auto tEnsureStart = std::chrono::high_resolution_clock::now();
@@ -6494,6 +6994,14 @@ void SpectralRenderIop::_EnsureFrameRendered()
     cam.adaptiveThreshold = _adaptiveThreshold;
     cam.refractionBounces = _refractionBounces;
     cam.blueNoise = _blueNoise;
+    cam.scanlineCompat = _scanlineCompat;
+    cam.projectionMode = _projectionMode;
+    if (_projectionMode == 1 && !_uvTriIndexBuf.empty()) {
+        cam.uvTriIndex = _uvTriIndexBuf.data();
+        cam.uvBaryU    = _uvBaryUBuf.data();
+        cam.uvBaryV    = _uvBaryVBuf.data();
+        cam.uvBufSize  = _uvTriIndexBuf.size();
+    }
     cam.fStop = _fStop;
     cam.focusDistance = _focusDistance;
     cam.volumeSpp = _volumeSpp;
@@ -6653,80 +7161,119 @@ void SpectralRenderIop::_EnsureFrameRendered()
     for (auto& v : _volumes) if (v) volPtrs.push_back(v.get());
     if (volPtrs.empty() && _volume) volPtrs.push_back(_volume.get());
 
-    auto tGpuStart = std::chrono::high_resolution_clock::now();
+    // UV projection: rasterize triangles in UV space for UV render mode
+    if (_projectionMode == 1 && _scene) {
+        _uvTriIndexBuf.assign(size_t(W) * H, -1);
+        _uvBaryUBuf.assign(size_t(W) * H, 0.f);
+        _uvBaryVBuf.assign(size_t(W) * H, 0.f);
 
-#ifdef SPECTRAL_HAS_OPTIX
-    if (useGPU) {
-        // Strip rendering: multiple smaller launches for better GPU occupancy
-        int strips = isPreviewPass ? 8 : 4;
+        const auto& meshes = _scene->GetMeshes();
+        int globalTriIdx = 0;
+        for (const auto& mesh : meshes) {
+            for (const auto& tri : mesh.second.triangles) {
+                // Triangle UV coordinates in pixel space
+                float u0 = tri.uv0[0] * W, v0 = (1.f - tri.uv0[1]) * H;
+                float u1 = tri.uv1[0] * W, v1 = (1.f - tri.uv1[1]) * H;
+                float u2 = tri.uv2[0] * W, v2 = (1.f - tri.uv2[1]) * H;
 
-        SpectralIntegrator::RenderFrameGPU(*_scene, cam, _frameBuffer.data(),
-                                            renderSpp, _depthBuffer.data(), _maxBounces,
-                                            _colorSpace,
-                                            volPtrs.empty() ? nullptr : volPtrs.data(),
-                                            (int)volPtrs.size(),
-                                            nullptr, strips);
-        // Note: GPU caustics use CPU gathering pass below
-    } else
-#endif
-    {
-        SpectralIntegrator::AOVBuffers aovBufs;
-        aovBufs.normal   = _aovNormals  ? _normalBuffer.data()   : nullptr;
-        aovBufs.position = _aovPosition ? _posBuffer.data()      : nullptr;
-        aovBufs.pRef     = _aovPRef     ? _pRefBuffer.data()     : nullptr;
-        aovBufs.uv       = _aovUV       ? _uvBuffer.data()       : nullptr;
-        aovBufs.albedo   = _aovAlbedo   ? _albedoBuffer.data()   : nullptr;
-        aovBufs.direct   = _aovDirect   ? _directBuffer.data()   : nullptr;
-        aovBufs.indirect = _aovIndirect ? _indirectBuffer.data() : nullptr;
-        aovBufs.emission = _aovEmission ? _emissionBuffer.data() : nullptr;
-        aovBufs.diffuseDirect   = _aovDiffuseDirect   ? _diffuseDirectBuffer.data()   : nullptr;
-        aovBufs.specularDirect  = _aovSpecularDirect  ? _specularDirectBuffer.data()  : nullptr;
-        aovBufs.diffuseIndirect = _aovDiffuseIndirect ? _diffuseIndirectBuffer.data() : nullptr;
-        aovBufs.specularIndirect = _aovSpecularIndirect ? _specularIndirectBuffer.data() : nullptr;
-        aovBufs.transmission    = _aovTransmission    ? _transmissionBuffer.data()    : nullptr;
+                // Bounding box in pixel space
+                int minX = std::max(0, (int)std::floor(std::min({u0, u1, u2})));
+                int maxX = std::min((int)W - 1, (int)std::ceil(std::max({u0, u1, u2})));
+                int minY = std::max(0, (int)std::floor(std::min({v0, v1, v2})));
+                int maxY = std::min((int)H - 1, (int)std::ceil(std::max({v0, v1, v2})));
 
-        SpectralIntegrator::RenderFrame(*_scene, cam, _frameBuffer.data(),
-                                         renderSpp, _depthBuffer.data(), _maxBounces,
-                                         _objectIdBuffer.data(), _materialIdBuffer.data(),
-                                         &aovBufs, nullptr, pmap, _causticRadius,
-                                         _colorSpace,
-                                         volPtrs.empty() ? nullptr : volPtrs.data(),
-                                         (int)volPtrs.size());
-    }
+                // Edge function rasterization
+                float denom = (u1 - u0) * (v2 - v0) - (u2 - u0) * (v1 - v0);
+                if (std::abs(denom) < 1e-8f) { globalTriIdx++; continue; }
+                float invDenom = 1.f / denom;
 
-    // Denoise — works for both GPU and CPU renders
-#ifdef SPECTRAL_HAS_OPTIX
-    if (_denoise) {
-        SpectralIntegrator::DenoiseGPU(W, H, _frameBuffer.data());
-    }
-#endif
-
-    // Geometry AOV pass for GPU (CPU fills them during RenderFrame)
-#ifdef SPECTRAL_HAS_OPTIX
-    if (useGPU) {
-        bool needGeomPass = _aovNormals || _aovPosition || _aovPRef || _aovUV || _aovAlbedo;
-        if (needGeomPass) {
-            SpectralIntegrator::ComputeGeometryAOVs(
-                *_scene, cam,
-                _aovNormals  ? _normalBuffer.data() : nullptr,
-                _aovPosition ? _posBuffer.data()    : nullptr,
-                _aovPRef     ? _pRefBuffer.data()   : nullptr,
-                _aovUV       ? _uvBuffer.data()     : nullptr,
-                _aovAlbedo   ? _albedoBuffer.data() : nullptr,
-                _objectIdBuffer.data(), _materialIdBuffer.data(),
-                nullptr);
+                for (int py2 = minY; py2 <= maxY; ++py2) {
+                    for (int px2 = minX; px2 <= maxX; ++px2) {
+                        float cx = px2 + 0.5f, cy = py2 + 0.5f;
+                        float bU = ((cx - u0) * (v2 - v0) - (u2 - u0) * (cy - v0)) * invDenom;
+                        float bV = ((u1 - u0) * (cy - v0) - (cx - u0) * (v1 - v0)) * invDenom;
+                        float bW = 1.f - bU - bV;
+                        if (bU >= 0.f && bV >= 0.f && bW >= 0.f) {
+                            size_t idx = size_t(py2) * W + px2;
+                            _uvTriIndexBuf[idx] = globalTriIdx;
+                            _uvBaryUBuf[idx] = bU;
+                            _uvBaryVBuf[idx] = bV;
+                        }
+                    }
+                }
+                globalTriIdx++;
+            }
         }
+        SLOG("SpectralRender: UV rasterization complete (%dx%d, %d triangles)\n", W, H, globalTriIdx);
+    }
 
-        // Shading AOV pass: quick CPU render for direct/indirect/emission/LPE
-        bool needShadingPass = _aovDirect || _aovIndirect || _aovEmission ||
-                               _aovDiffuseDirect || _aovSpecularDirect ||
-                               _aovDiffuseIndirect || _aovSpecularIndirect ||
-                               _aovTransmission;
-        if (needShadingPass) {
-            const int aovSpp = std::min(8, renderSpp);
-            std::vector<float> dummyPixels(size_t(W) * H * 4, 0.f);
+    // Cache render params for strip rendering
+    _renderCam = cam;
+    _renderSpp = renderSpp;
+    _renderUseGPU = useGPU;
+    _renderVolPtrs = volPtrs;
 
+    // Init strip state
+    int numStrips = (H + kStripHeight - 1) / kStripHeight;
+    _stripRendered.assign(numStrips, false);
+    _postProcessDone = false;
+
+    _sceneReady.store(true);
+
+    auto tSceneEnd = std::chrono::high_resolution_clock::now();
+    double sceneMs = std::chrono::duration<double, std::milli>(tSceneEnd - tEnsureStart).count();
+    SLOG("SpectralRender: scene ready in %.1f ms — %d strips of %d rows\n",
+            sceneMs, numStrips, kStripHeight);
+}
+
+// ---------------------------------------------------------------------------
+// _EnsureSceneReady — alias for backward compatibility
+// ---------------------------------------------------------------------------
+void SpectralRenderIop::_EnsureSceneReady()
+{
+    if (_sceneReady.load()) return;
+
+    std::lock_guard<std::recursive_mutex> lock(_renderMutex);
+    if (_sceneReady.load()) return;
+
+    _EnsureFrameRendered();
+}
+
+// ---------------------------------------------------------------------------
+// _RenderStrip — render on demand (full frame on first strip request)
+// ---------------------------------------------------------------------------
+void SpectralRenderIop::_RenderStrip(int stripIdx)
+{
+    std::lock_guard<std::mutex> lock(_stripMutex);
+    if (_stripRendered[stripIdx]) return;
+
+    // Render entire frame on first strip request
+    // (GPU is fast enough; CPU uses parallel execution internally)
+    if (!_frameReady.load()) {
+        _frameReady.store(true);
+
+        const int W = static_cast<int>(_fbWidth);
+        const int H = static_cast<int>(_fbHeight);
+
+        auto tStart = std::chrono::high_resolution_clock::now();
+
+#ifdef SPECTRAL_HAS_OPTIX
+        if (_renderUseGPU) {
+            SpectralIntegrator::RenderFrameGPU(*_scene, _renderCam, _frameBuffer.data(),
+                                                _renderSpp, _depthBuffer.data(), _maxBounces,
+                                                _colorSpace,
+                                                _renderVolPtrs.empty() ? nullptr : _renderVolPtrs.data(),
+                                                (int)_renderVolPtrs.size(),
+                                                nullptr, 4);
+        } else
+#endif
+        {
             SpectralIntegrator::AOVBuffers aovBufs;
+            aovBufs.normal   = _aovNormals  ? _normalBuffer.data()   : nullptr;
+            aovBufs.position = _aovPosition ? _posBuffer.data()      : nullptr;
+            aovBufs.pRef     = _aovPRef     ? _pRefBuffer.data()     : nullptr;
+            aovBufs.uv       = _aovUV       ? _uvBuffer.data()       : nullptr;
+            aovBufs.albedo   = _aovAlbedo   ? _albedoBuffer.data()   : nullptr;
             aovBufs.direct   = _aovDirect   ? _directBuffer.data()   : nullptr;
             aovBufs.indirect = _aovIndirect ? _indirectBuffer.data() : nullptr;
             aovBufs.emission = _aovEmission ? _emissionBuffer.data() : nullptr;
@@ -6736,95 +7283,76 @@ void SpectralRenderIop::_EnsureFrameRendered()
             aovBufs.specularIndirect = _aovSpecularIndirect ? _specularIndirectBuffer.data() : nullptr;
             aovBufs.transmission    = _aovTransmission    ? _transmissionBuffer.data()    : nullptr;
 
-            SpectralIntegrator::RenderFrame(*_scene, cam, dummyPixels.data(),
-                                             aovSpp, nullptr, _maxBounces,
-                                             nullptr, nullptr, &aovBufs, nullptr,
-                                             pmap, _causticRadius, _colorSpace,
-                                             volPtrs.empty() ? nullptr : volPtrs.data(),
-                                             (int)volPtrs.size());
-
-            SLOG("SpectralRender: shading AOVs computed (%d spp CPU pass)\n", aovSpp);
+            SpectralIntegrator::RenderFrame(*_scene, _renderCam, _frameBuffer.data(),
+                                             _renderSpp, _depthBuffer.data(), _maxBounces,
+                                             _objectIdBuffer.data(), _materialIdBuffer.data(),
+                                             &aovBufs, nullptr, nullptr, _causticRadius,
+                                             _colorSpace,
+                                             _renderVolPtrs.empty() ? nullptr : _renderVolPtrs.data(),
+                                             (int)_renderVolPtrs.size());
         }
-    }
-#endif
 
-    // AO pass
-    if (_aoSamples > 0) {
-        SpectralIntegrator::ComputeAO(*_scene, cam, _aoBuffer.data(),
-                                       _aoSamples, _aoRadius);
-    }
-
-    _progressiveSppDone = renderSpp;
-
-    // Generate Cryptomatte from objectId buffer
-    // Nuke Cryptomatte spec: crypto_object00 RGBA = (id0_hash, coverage0, id1_hash, coverage1)
-    if (!_cryptoObjectBuffer.empty() && !_objectIdBuffer.empty()) {
-        for (size_t i = 0; i < size_t(W) * H; ++i) {
-            float objId = _objectIdBuffer[i];
-            // MurmurHash3-style bit mixing for stable float ID
-            uint32_t h = static_cast<uint32_t>(objId);
-            h ^= h >> 16; h *= 0x85ebca6b;
-            h ^= h >> 13; h *= 0xc2b2ae35;
-            h ^= h >> 16;
-            // Ensure non-NaN/Inf by clearing exponent overflow
-            h &= 0x7fffffff; if ((h & 0x7f800000) == 0x7f800000) h = 0;
-            float hashF;
-            memcpy(&hashF, &h, sizeof(float));
-            _cryptoObjectBuffer[i * 4 + 0] = hashF;           // R: id hash
-            _cryptoObjectBuffer[i * 4 + 1] = (objId > 0.f) ? 1.f : 0.f;  // G: coverage
-            _cryptoObjectBuffer[i * 4 + 2] = 0.f;             // B: second id (none)
-            _cryptoObjectBuffer[i * 4 + 3] = 0.f;             // A: second coverage
-        }
-    }
-
-    // If this was a preview pass, launch async quality render
-    if (isPreviewPass && _progressiveSppDone < _samples) {
-        SLOG("SpectralRender: preview complete (%d spp) — launching async quality (%d spp)\n",
-                _progressiveSppDone, _samples);
-
-        // Cancel any previous async render
-        _asyncCancel.store(true);
-        if (_asyncQualityThread.joinable()) _asyncQualityThread.join();
-
-        // Capture render state for async thread
-        pxr::SpectralCamera asyncCam = cam;
-        int asyncSpp = _samples;
-        auto asyncVolPtrs = volPtrs;
-
-        _asyncCancel.store(false);
-        _asyncQualityThread = std::thread([this, asyncCam, asyncSpp, asyncVolPtrs]() {
-            std::lock_guard<std::mutex> lock(_renderMutex);
-            if (_asyncCancel.load()) return;
-
-            SLOG("SpectralRender: async quality render %d spp\n", asyncSpp);
-            auto tStart = std::chrono::high_resolution_clock::now();
-
+        // Denoise
 #ifdef SPECTRAL_HAS_OPTIX
-            SpectralIntegrator::RenderFrameGPU(*_scene, asyncCam, _frameBuffer.data(),
-                                                asyncSpp, _depthBuffer.data(), _maxBounces,
-                                                _colorSpace,
-                                                asyncVolPtrs.empty() ? nullptr : asyncVolPtrs.data(),
-                                                (int)asyncVolPtrs.size(),
-                                                nullptr, 4);
+        if (_denoise) {
+            SpectralIntegrator::DenoiseGPU(W, H, _frameBuffer.data());
+        }
 #endif
 
-            if (_asyncCancel.load()) return;
-            _progressiveSppDone = asyncSpp;
+        // Geometry AOV pass for GPU
+#ifdef SPECTRAL_HAS_OPTIX
+        if (_renderUseGPU) {
+            bool needGeomPass = _aovNormals || _aovPosition || _aovPRef || _aovUV || _aovAlbedo;
+            if (needGeomPass) {
+                SpectralIntegrator::ComputeGeometryAOVs(
+                    *_scene, _renderCam,
+                    _aovNormals  ? _normalBuffer.data() : nullptr,
+                    _aovPosition ? _posBuffer.data()    : nullptr,
+                    _aovPRef     ? _pRefBuffer.data()   : nullptr,
+                    _aovUV       ? _uvBuffer.data()     : nullptr,
+                    _aovAlbedo   ? _albedoBuffer.data() : nullptr,
+                    _objectIdBuffer.data(), _materialIdBuffer.data(),
+                    nullptr);
+            }
+        }
+#endif
 
-            auto tEnd = std::chrono::high_resolution_clock::now();
-            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(tEnd - tStart).count();
-            SLOG("SpectralRender: async quality complete (%lldms)\n", ms);
-        });
-    }
+        // AO pass
+        if (_aoSamples > 0) {
+            SpectralIntegrator::ComputeAO(*_scene, _renderCam, _aoBuffer.data(),
+                                           _aoSamples, _aoRadius);
+        }
 
-    _frameReady.store(true);
+        // Cryptomatte
+        if (!_cryptoObjectBuffer.empty() && !_objectIdBuffer.empty()) {
+            for (size_t i = 0; i < size_t(W) * H; ++i) {
+                float objId = _objectIdBuffer[i];
+                uint32_t h = static_cast<uint32_t>(objId);
+                h ^= h >> 16; h *= 0x85ebca6b;
+                h ^= h >> 13; h *= 0xc2b2ae35;
+                h ^= h >> 16;
+                h &= 0x7fffffff; if ((h & 0x7f800000) == 0x7f800000) h = 0;
+                float hashF;
+                memcpy(&hashF, &h, sizeof(float));
+                _cryptoObjectBuffer[i * 4 + 0] = hashF;
+                _cryptoObjectBuffer[i * 4 + 1] = (objId > 0.f) ? 1.f : 0.f;
+                _cryptoObjectBuffer[i * 4 + 2] = 0.f;
+                _cryptoObjectBuffer[i * 4 + 3] = 0.f;
+            }
+        }
 
-    {
+        _progressiveSppDone = _renderSpp;
+
+        // Mark all strips rendered
+        for (size_t i = 0; i < _stripRendered.size(); ++i)
+            _stripRendered[i] = true;
+
         auto tEnd = std::chrono::high_resolution_clock::now();
-        auto msGpu = std::chrono::duration_cast<std::chrono::milliseconds>(tEnd - tGpuStart).count();
-        auto msTotal = std::chrono::duration_cast<std::chrono::milliseconds>(tEnd - tEnsureStart).count();
-        SLOG("SpectralRender: render complete (render=%lldms total=%lldms)\n", msGpu, msTotal);
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(tEnd - tStart).count();
+        SLOG("SpectralRender: render complete (%lldms)\n", ms);
     }
+
+    _stripRendered[stripIdx] = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -6842,7 +7370,9 @@ bool SpectralRenderIop::doDeepEngine(DD::Image::Box box,
                                       const DD::Image::ChannelSet& channels,
                                       DeepOutputPlane& plane)
 {
-    _EnsureFrameRendered();
+    _EnsureSceneReady();
+    if (!_stripRendered.empty() && !_stripRendered[0])
+        _RenderStrip(0);
 
     const int W = static_cast<int>(_fbWidth);
     const int H = static_cast<int>(_fbHeight);

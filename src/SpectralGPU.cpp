@@ -397,6 +397,55 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
         bool lightsChanged = (lightCheck != _cachedLightChecksum);
         bool matsChanged = (matCheck != _cachedMatChecksum);
 
+        // Checksum texture content (sample pixels to detect upstream changes)
+        unsigned int texCheck = static_cast<unsigned int>(scene.TextureCount()) * 1610612741u;
+        for (size_t i = 0; i < scene.TextureCount(); ++i) {
+            const auto* tex = scene.GetTexture(static_cast<int>(i));
+            if (!tex || !tex->IsValid() || tex->_pixels.empty()) continue;
+            // Sample 16 evenly-spaced pixels for fast content hash
+            size_t step = std::max(size_t(1), tex->_pixels.size() / 16);
+            for (size_t j = 0; j < tex->_pixels.size(); j += step) {
+                union { float f; unsigned int u; } p;
+                p.f = tex->_pixels[j];
+                texCheck ^= p.u * static_cast<unsigned int>(j + i * 65537u);
+            }
+        }
+        bool texturesChanged = (texCheck != _cachedTexChecksum);
+
+        if (texturesChanged) {
+            // Re-upload all textures
+            for (auto& dp : _d_texPixels) { if (dp) cudaFree(reinterpret_cast<void*>(dp)); }
+            _d_texPixels.clear();
+            if (_d_textures) { cudaFree(reinterpret_cast<void*>(_d_textures)); _d_textures = 0; }
+            _textureCount = 0;
+            size_t numTex = scene.TextureCount();
+            if (numTex > 0) {
+                std::vector<spectral_gpu::GPUTexture> gpuTextures(numTex);
+                _d_texPixels.resize(numTex, 0);
+                for (size_t i = 0; i < numTex; ++i) {
+                    const auto* tex = scene.GetTexture(static_cast<int>(i));
+                    if (!tex || !tex->IsValid()) {
+                        gpuTextures[i] = {}; continue;
+                    }
+                    size_t pixelBytes = tex->_pixels.size() * sizeof(float);
+                    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_texPixels[i]), pixelBytes));
+                    CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_texPixels[i]),
+                                          tex->_pixels.data(), pixelBytes, cudaMemcpyHostToDevice));
+                    gpuTextures[i].pixels = reinterpret_cast<float*>(_d_texPixels[i]);
+                    gpuTextures[i].width = tex->GetWidth();
+                    gpuTextures[i].height = tex->GetHeight();
+                    gpuTextures[i].channels = tex->_channels;
+                }
+                size_t texHdrBytes = gpuTextures.size() * sizeof(spectral_gpu::GPUTexture);
+                CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_textures), texHdrBytes));
+                CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_textures),
+                                      gpuTextures.data(), texHdrBytes, cudaMemcpyHostToDevice));
+                _textureCount = static_cast<unsigned int>(numTex);
+            }
+            _cachedTexChecksum = texCheck;
+            fprintf(stderr, "SpectralGPU: re-uploaded %zu textures (content changed)\n", scene.TextureCount());
+        }
+
         if (matsChanged) {
             // Re-upload materials
             if (_d_materials) { cudaFree(reinterpret_cast<void*>(_d_materials)); _d_materials = 0; }
@@ -487,14 +536,15 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
             }
             _cachedLightChecksum = lightCheck;
             fprintf(stderr, "SpectralGPU: GAS cached, uploaded %u lights\n", _lightCount);
-        } else if (!matsChanged) {
-            fprintf(stderr, "SpectralGPU: GAS + lights + materials cached\n");
+        } else if (!matsChanged && !texturesChanged) {
+            fprintf(stderr, "SpectralGPU: GAS + lights + materials + textures cached\n");
         }
         return true;
     }
     _cachedSceneTriCount = newTriCount;
     _cachedLightChecksum = 0;
     _cachedMatChecksum = 0;
+    _cachedTexChecksum = 0;
 
     _FreeAccel();
     if (_d_normals)     { cudaFree(reinterpret_cast<void*>(_d_normals));     _d_normals = 0; }
@@ -851,6 +901,28 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     launchParams.textures     = reinterpret_cast<spectral_gpu::GPUTexture*>(_d_textures);
     launchParams.textureCount = _textureCount;
     launchParams.blueNoise    = camera.blueNoise ? 1 : 0;
+    launchParams.scanlineCompat = camera.scanlineCompat ? 1 : 0;
+    launchParams.projectionMode = camera.projectionMode;
+
+    // UV projection lookup buffers
+    if (_d_uvTriIndex) { cudaFree(reinterpret_cast<void*>(_d_uvTriIndex)); _d_uvTriIndex = 0; }
+    if (_d_uvBaryU)    { cudaFree(reinterpret_cast<void*>(_d_uvBaryU));    _d_uvBaryU = 0; }
+    if (_d_uvBaryV)    { cudaFree(reinterpret_cast<void*>(_d_uvBaryV));    _d_uvBaryV = 0; }
+    launchParams.uvTriIndex = nullptr;
+    launchParams.uvBaryU = nullptr;
+    launchParams.uvBaryV = nullptr;
+    if (camera.projectionMode == 1 && camera.uvTriIndex && camera.uvBufSize > 0) {
+        size_t n = camera.uvBufSize;
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_uvTriIndex), n * sizeof(int)));
+        CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_uvTriIndex), camera.uvTriIndex, n * sizeof(int), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_uvBaryU), n * sizeof(float)));
+        CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_uvBaryU), camera.uvBaryU, n * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_uvBaryV), n * sizeof(float)));
+        CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_uvBaryV), camera.uvBaryV, n * sizeof(float), cudaMemcpyHostToDevice));
+        launchParams.uvTriIndex = reinterpret_cast<int*>(_d_uvTriIndex);
+        launchParams.uvBaryU = reinterpret_cast<float*>(_d_uvBaryU);
+        launchParams.uvBaryV = reinterpret_cast<float*>(_d_uvBaryV);
+    }
 
     // Multi-volume upload (Phase 13)
     auto tVolUploadStart = std::chrono::high_resolution_clock::now();

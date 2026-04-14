@@ -249,6 +249,7 @@ private:
     double _vdbUniformScale = 1.0;
 
     // VDB viewport preview
+    bool   _scanlineCompat = true;  // ScanlineRender compatible mode
     bool   _vdb3dPreview = true;   // true = SpectralRender draws its own GL preview
     bool   _vdbShowBbox = true;
     bool   _vdbShowPoints = true;
@@ -325,6 +326,7 @@ private:
 
     int   _tileSize   = 64;
     int   _deviceMode = 2;         // 0=cpu, 1=gpu, 2=auto
+    int   _projectionMode = 0;     // 0=perspective, 1=UV, 2=spherical
     int _GetMasterMaxRes() const;
     int   _colorSpace = 0;         // 0=sRGB, 1=ACEScg, 2=ACES 2065-1
 
@@ -416,6 +418,9 @@ private:
     // Frame buffer (RGBA) + depth buffer + ID buffers
     std::vector<float>  _frameBuffer;
     std::vector<float>  _depthBuffer;   // per-pixel depth (camera-space Z)
+    std::vector<int>    _uvTriIndexBuf;  // UV projection: triangle index per pixel
+    std::vector<float>  _uvBaryUBuf;     // UV projection: barycentric U per pixel
+    std::vector<float>  _uvBaryVBuf;     // UV projection: barycentric V per pixel
     std::vector<float>  _objectIdBuffer; // per-pixel object ID
     std::vector<float>  _materialIdBuffer; // per-pixel material ID
     std::vector<float>  _accBuffer;      // progressive XYZ accumulation (3 per pixel)
@@ -471,7 +476,22 @@ private:
     unsigned int        _fbFullWidth  = 0;
     unsigned int        _fbFullHeight = 0;
     std::atomic<bool>   _frameReady { false };
-    std::mutex          _renderMutex;
+    std::recursive_mutex _renderMutex;
+
+    // Progressive strip rendering
+    static constexpr int kStripHeight = 32;  // rows per strip
+    std::atomic<bool>   _sceneReady { false };
+    std::vector<bool>   _stripRendered;
+    std::mutex          _stripMutex;
+    bool                _postProcessDone = false;
+    void _EnsureSceneReady();
+    void _RenderStrip(int stripIdx);
+
+    // Cached render params (set by _EnsureSceneReady, used by _RenderStrip)
+    SpectralCamera      _renderCam;
+    int                 _renderSpp = 1;
+    bool                _renderUseGPU = false;
+    std::vector<const pxr::SpectralVolume*> _renderVolPtrs;
     std::thread         _asyncQualityThread;
     std::atomic<bool>   _asyncCancel { false };
 };

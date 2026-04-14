@@ -59,10 +59,31 @@ static __forceinline__ __device__ float3 transformPoint(const float* m, float3 p
     return make_float3(ox, oy, oz);
 }
 
+static __forceinline__ __device__ float3 transformDir(const float* m, float3 d)
+{
+    float ox, oy, oz, ow;
+    mat4mulv4(m, d.x, d.y, d.z, 0.f, ox, oy, oz, ow);
+    return make_float3(ox, oy, oz);
+}
+
 static __forceinline__ __device__ void makeRay(
     float px, float py, float W, float H, float3& origin, float3& dir,
     unsigned int seed = 0)
 {
+    // Spherical (equirectangular) projection
+    if (params.projectionMode == 2) {
+        float u = px / W;  // 0..1 → longitude
+        float v = py / H;  // 0..1 → latitude
+        float theta = u * 6.28318f;        // 0..2π
+        float phi   = v * 3.14159f;         // 0..π
+        float3 localDir = make_float3(sinf(phi)*sinf(theta), cosf(phi), sinf(phi)*cosf(theta));
+        // Camera position from viewToWorld matrix (column 3 = translation)
+        origin = make_float3(params.camera.viewToWorld[3], params.camera.viewToWorld[7], params.camera.viewToWorld[11]);
+        dir = transformDir(params.camera.viewToWorld, localDir);
+        return;
+    }
+
+    // Perspective projection (default)
     float ndcX = 2.f * px / W - 1.f;
     float ndcY = -2.f * py / H + 1.f;
     float nx0,ny0,nz0,nw0; mat4mulv4(params.camera.projInverse, ndcX,ndcY,-1.f,1.f, nx0,ny0,nz0,nw0);
@@ -519,6 +540,33 @@ static __forceinline__ __device__ float3 sampleTextureGPU(int texId, float2 uv)
     return make_float3(top.x*(1-dy)+bot.x*dy, top.y*(1-dy)+bot.y*dy, top.z*(1-dy)+bot.z*dy);
 }
 
+// Sample alpha channel from texture (returns 1.0 if no alpha)
+static __forceinline__ __device__ float sampleTextureAlphaGPU(int texId, float2 uv)
+{
+    if (texId < 0 || texId >= (int)params.textureCount) return 1.f;
+    const GPUTexture& tex = params.textures[texId];
+    if (!tex.pixels || tex.width <= 0 || tex.height <= 0 || tex.channels < 4) return 1.f;
+
+    float su = uv.x - floorf(uv.x);
+    float sv = 1.f - (uv.y - floorf(uv.y));
+    float fx = su * (tex.width - 1);
+    float fy = sv * (tex.height - 1);
+    int x0 = max(0, min(int(fx), tex.width-1));
+    int y0 = max(0, min(int(fy), tex.height-1));
+    int x1 = min(x0+1, tex.width-1);
+    int y1 = min(y0+1, tex.height-1);
+    float dx = fx - x0, dy = fy - y0;
+
+    int ch = tex.channels;
+    float a00 = tex.pixels[(y0*tex.width+x0)*ch+3];
+    float a10 = tex.pixels[(y0*tex.width+x1)*ch+3];
+    float a01 = tex.pixels[(y1*tex.width+x0)*ch+3];
+    float a11 = tex.pixels[(y1*tex.width+x1)*ch+3];
+    float top = a00*(1-dx)+a10*dx;
+    float bot = a01*(1-dx)+a11*dx;
+    return top*(1-dy)+bot*dy;
+}
+
 // ---------------------------------------------------------------------------
 // Sample a random point on a light surface for soft shadows
 // ---------------------------------------------------------------------------
@@ -568,6 +616,11 @@ static __forceinline__ __device__ float shadeHit(
     unsigned int& rngSeed)
 {
     float radiance = 0.f;
+
+    // ScanlineRender compat: no lights = constant shader (unlit, full colour)
+    if (params.scanlineCompat && params.lightCount == 0) {
+        return spectralReflectance(mat, lambda);
+    }
 
     if (params.lightCount > 0) {
         for (unsigned int li = 0; li < params.lightCount; ++li) {
@@ -1388,6 +1441,57 @@ extern "C" __global__ void __raygen__spectral()
     const float W=float(params.width), H=float(params.height);
 
     if (spp <= 1) {
+        // ── UV projection mode (spp=1) ──
+        if (params.projectionMode == 1 && params.uvTriIndex) {
+            int triIdx = params.uvTriIndex[pixIdx];
+            if (triIdx < 0) {
+                params.framebuffer[pixIdx] = make_float4(0,0,0,0);
+                if (params.depthbuffer) params.depthbuffer[pixIdx] = 1e30f;
+                return;
+            }
+            float bU = params.uvBaryU[pixIdx];
+            float bV = params.uvBaryV[pixIdx];
+            int matId = (params.materialIds && triIdx < (int)params.triCount) ? params.materialIds[triIdx] : 0;
+            if (matId < 0 || matId >= (int)params.materialCount) matId = 0;
+            GPUMaterial mat = params.materials[matId];
+
+            // Interpolate UV from triangle for texture sampling
+            float2 hitUV = make_float2(0,0);
+            if (params.uvs && triIdx < (int)params.triCount) {
+                float2 uv0 = params.uvs[triIdx*3+0];
+                float2 uv1 = params.uvs[triIdx*3+1];
+                float2 uv2 = params.uvs[triIdx*3+2];
+                float bW = 1.f - bU - bV;
+                hitUV = make_float2(uv0.x*bW + uv1.x*bU + uv2.x*bV,
+                                    uv0.y*bW + uv1.y*bU + uv2.y*bV);
+            }
+
+            // Apply texture
+            if (mat.baseColorTexId >= 0 && mat.textureBlend > 0.f) {
+                float3 texCol = sampleTextureGPU(mat.baseColorTexId, hitUV);
+                float bl = mat.textureBlend;
+                mat.baseColor = make_float3(
+                    mat.baseColor.x*(1.f-bl)+texCol.x*bl,
+                    mat.baseColor.y*(1.f-bl)+texCol.y*bl,
+                    mat.baseColor.z*(1.f-bl)+texCol.z*bl);
+                float texAlpha = sampleTextureAlphaGPU(mat.baseColorTexId, hitUV);
+                mat.opacity *= texAlpha;
+            }
+
+            if (mat.opacity < 0.01f) {
+                params.framebuffer[pixIdx] = make_float4(0,0,0,0);
+                if (params.depthbuffer) params.depthbuffer[pixIdx] = 1e30f;
+                return;
+            }
+
+            float r = mat.baseColor.x * mat.opacity;
+            float g = mat.baseColor.y * mat.opacity;
+            float b = mat.baseColor.z * mat.opacity;
+            params.framebuffer[pixIdx] = make_float4(r, g, b, mat.opacity);
+            if (params.depthbuffer) params.depthbuffer[pixIdx] = 0.f;
+            return;
+        }
+
         // Normal-as-colour (or volume density preview for spp=1)
         float3 origin, dir;
         unsigned int dofSeed = pixIdx * 7919u;
@@ -1405,23 +1509,51 @@ extern "C" __global__ void __raygen__spectral()
         float b = __uint_as_float(p2);
         bool spp1Hit = (p4 > 0u);
 
-        // Background: dome light color on miss (skip when volume for comp)
-        if (!spp1Hit) {
-            r = 0.f; g = 0.f; b = 0.f;
-            if (params.numGpuVolumes == 0) {
-                for (unsigned int li = 0; li < params.lightCount; ++li) {
-                    const GPULight& L = params.lights[li];
-                    if (L.type == 3) {
-                        r += L.color.x * L.intensity;
-                        g += L.color.y * L.intensity;
-                        b += L.color.z * L.intensity;
-                    }
+        // ScanlineRender compat: no lights = constant shader (flat colour)
+        if (spp1Hit && params.scanlineCompat && params.lightCount == 0) {
+            int cMatId = int(p4)-1;
+            if (cMatId>=0 && cMatId<int(params.materialCount)) {
+                GPUMaterial cMat = params.materials[cMatId];
+                // Apply texture
+                if (cMat.baseColorTexId >= 0 && cMat.textureBlend > 0.f) {
+                    float2 cUV = make_float2(__uint_as_float(p5), __uint_as_float(p6));
+                    float3 texCol = sampleTextureGPU(cMat.baseColorTexId, cUV);
+                    float bl = cMat.textureBlend;
+                    cMat.baseColor = make_float3(
+                        cMat.baseColor.x*(1.f-bl)+texCol.x*bl,
+                        cMat.baseColor.y*(1.f-bl)+texCol.y*bl,
+                        cMat.baseColor.z*(1.f-bl)+texCol.z*bl);
                 }
+                r = cMat.baseColor.x; g = cMat.baseColor.y; b = cMat.baseColor.z;
             }
         }
 
-        // Volume overlay for spp=1
-        float spp1Alpha = spp1Hit ? 1.f : 0.f;
+        // Background: black for compositing (dome comes through bounce paths)
+        if (!spp1Hit) {
+            r = 0.f; g = 0.f; b = 0.f;
+        }
+
+        // Alpha from material opacity (texture alpha)
+        float spp1Alpha = 0.f;
+        if (spp1Hit) {
+            spp1Alpha = 1.f;
+            int sMatId = int(p4)-1;
+            if (sMatId>=0 && sMatId<int(params.materialCount)) {
+                spp1Alpha = params.materials[sMatId].opacity;
+                if (params.materials[sMatId].baseColorTexId >= 0 && params.materials[sMatId].textureBlend > 0.f) {
+                    float2 sUV = make_float2(__uint_as_float(p5), __uint_as_float(p6));
+                    spp1Alpha *= sampleTextureAlphaGPU(params.materials[sMatId].baseColorTexId, sUV);
+                }
+            }
+            // Alpha cutout: transparent texture = no shading
+            if (spp1Alpha < 0.01f) {
+                r = 0.f; g = 0.f; b = 0.f;
+                spp1Hit = false;
+            } else if (spp1Alpha < 0.99f) {
+                // Premultiply color by alpha for compositing
+                r *= spp1Alpha; g *= spp1Alpha; b *= spp1Alpha;
+            }
+        }
         if (params.numGpuVolumes > 0) {
             float surfT = spp1Hit ? __uint_as_float(p3) : 1e30f;
             float3 volRGB = make_float3(0.f,0.f,0.f); float volTrans = 1.f;
@@ -1442,6 +1574,76 @@ extern "C" __global__ void __raygen__spectral()
             params.depthbuffer[pixIdx] = d;
         }
     } else {
+        // ── UV projection mode (multi-SPP) ──
+        if (params.projectionMode == 1 && params.uvTriIndex) {
+            int triIdx = params.uvTriIndex[pixIdx];
+            if (triIdx < 0) {
+                params.framebuffer[pixIdx] = make_float4(0,0,0,0);
+                if (params.depthbuffer) params.depthbuffer[pixIdx] = 1e30f;
+                return;
+            }
+            float bU = params.uvBaryU[pixIdx];
+            float bV = params.uvBaryV[pixIdx];
+            float bW = 1.f - bU - bV;
+            int matId = (params.materialIds && triIdx < (int)params.triCount) ? params.materialIds[triIdx] : 0;
+            if (matId < 0 || matId >= (int)params.materialCount) matId = 0;
+            GPUMaterial mat = params.materials[matId];
+
+            // Interpolate UV and normal from triangle
+            float2 hitUV = make_float2(0,0);
+            float3 N = make_float3(0,1,0);
+            float3 hitPos = make_float3(0,0,0);
+            if (params.uvs && params.normals && triIdx < (int)params.triCount) {
+                float2 uv0 = params.uvs[triIdx*3+0], uv1 = params.uvs[triIdx*3+1], uv2 = params.uvs[triIdx*3+2];
+                hitUV = make_float2(uv0.x*bW+uv1.x*bU+uv2.x*bV, uv0.y*bW+uv1.y*bU+uv2.y*bV);
+                float3 n0 = params.normals[triIdx*3+0], n1 = params.normals[triIdx*3+1], n2 = params.normals[triIdx*3+2];
+                N = normalize3(make_float3(n0.x*bW+n1.x*bU+n2.x*bV, n0.y*bW+n1.y*bU+n2.y*bV, n0.z*bW+n1.z*bU+n2.z*bV));
+            }
+
+            // Apply texture
+            if (mat.baseColorTexId >= 0 && mat.textureBlend > 0.f) {
+                float3 texCol = sampleTextureGPU(mat.baseColorTexId, hitUV);
+                float bl = mat.textureBlend;
+                mat.baseColor = make_float3(mat.baseColor.x*(1.f-bl)+texCol.x*bl,
+                                            mat.baseColor.y*(1.f-bl)+texCol.y*bl,
+                                            mat.baseColor.z*(1.f-bl)+texCol.z*bl);
+                mat.opacity *= sampleTextureAlphaGPU(mat.baseColorTexId, hitUV);
+            }
+            if (mat.opacity < 0.01f) {
+                params.framebuffer[pixIdx] = make_float4(0,0,0,0);
+                if (params.depthbuffer) params.depthbuffer[pixIdx] = 1e30f;
+                return;
+            }
+
+            // Spectral accumulation with shading
+            float3 V = make_float3(0,0,1);  // arbitrary view dir for UV mode
+            float X=0.f, Y=0.f, Z=0.f;
+            for (int s = 0; s < spp; ++s) {
+                unsigned int seed = pixIdx*1031u + s*6571u;
+                float wu = (float(s)+hashRNG(seed+2u))/float(spp);
+                float lambda = 380.f + wu*400.f;
+
+                float radiance;
+                if (params.scanlineCompat && params.lightCount == 0) {
+                    radiance = spectralReflectance(mat, lambda);
+                } else {
+                    radiance = shadeHit(mat, N, V, hitPos, lambda, seed);
+                }
+                radiance *= mat.opacity;
+
+                float cx,cy,cz; cieXYZ(lambda,cx,cy,cz);
+                float scale = 400.f/106.856895f;
+                X+=radiance*cx*scale; Y+=radiance*cy*scale; Z+=radiance*cz*scale;
+            }
+            float inv = 1.f/float(spp); X*=inv; Y*=inv; Z*=inv;
+            float r = 3.2406f*X-1.5372f*Y-0.4986f*Z;
+            float g = -0.9689f*X+1.8758f*Y+0.0415f*Z;
+            float b = 0.0557f*X-0.2040f*Y+1.0570f*Z;
+            params.framebuffer[pixIdx] = make_float4(fmaxf(0.f,r),fmaxf(0.f,g),fmaxf(0.f,b), mat.opacity);
+            if (params.depthbuffer) params.depthbuffer[pixIdx] = 0.f;
+            return;
+        }
+
         // Spectral with BSDF + lights + bounces
         float X=0.f, Y=0.f, Z=0.f;
         float alphaAccum = 0.f;
@@ -1493,6 +1695,15 @@ extern "C" __global__ void __raygen__spectral()
                         mat.baseColor.x*(1.f-b) + texCol.x*b,
                         mat.baseColor.y*(1.f-b) + texCol.y*b,
                         mat.baseColor.z*(1.f-b) + texCol.z*b);
+                    // Texture alpha → opacity (for images with transparency)
+                    float texAlpha = sampleTextureAlphaGPU(mat.baseColorTexId, hitUV);
+                    mat.opacity *= texAlpha;
+                }
+
+                // Alpha cutout: skip shading for fully transparent pixels
+                if (mat.opacity < 0.01f) {
+                    isHit = false;
+                    goto spectral_miss;
                 }
 
                 float3 N = normalize3(make_float3(
@@ -1523,9 +1734,9 @@ extern "C" __global__ void __raygen__spectral()
                 float3 hitPos = make_float3(origin.x+depth*dir.x, origin.y+depth*dir.y, origin.z+depth*dir.z);
                 if (depth < minDepth) minDepth = depth;
 
-                // Direct lighting at primary hit
+                // Direct lighting at primary hit (scaled by opacity for premultiplied alpha)
                 unsigned int shadowSeed = seed + 50u;
-                radiance = shadeHit(mat, N, V, hitPos, lambda, shadowSeed);
+                radiance = shadeHit(mat, N, V, hitPos, lambda, shadowSeed) * mat.opacity;
 
                 // Bounce rays with refraction support
                 float throughput = 1.f;
@@ -1615,6 +1826,8 @@ extern "C" __global__ void __raygen__spectral()
                             resolvedMat.baseColor.x*(1.f-b) + texCol.x*b,
                             resolvedMat.baseColor.y*(1.f-b) + texCol.y*b,
                             resolvedMat.baseColor.z*(1.f-b) + texCol.z*b);
+                        float texAlpha = sampleTextureAlphaGPU(resolvedMat.baseColorTexId, bUV);
+                        resolvedMat.opacity *= texAlpha;
                     }
                     bMat = &resolvedMat;
 
@@ -1645,23 +1858,29 @@ extern "C" __global__ void __raygen__spectral()
                         radiance += throughput * shadeHit(*bMat, bN, bV, bOrigin, lambda, bSeed);
                 }
             } else {
+            spectral_miss:
                 // Miss — dome background only when no volume (for comp)
                 radiance = 0.f;
-                if (params.numGpuVolumes == 0) {
-                    for (unsigned int li = 0; li < params.lightCount; ++li) {
-                        const GPULight& L = params.lights[li];
-                        if (L.type == 3) {
-                            float lumR = expf(-((lambda-630.f)*(lambda-630.f))/(2.f*30.f*30.f));
-                            float lumG = expf(-((lambda-532.f)*(lambda-532.f))/(2.f*30.f*30.f));
-                            float lumB = expf(-((lambda-460.f)*(lambda-460.f))/(2.f*25.f*25.f));
-                            radiance += (L.color.x*L.intensity*lumR + L.color.y*L.intensity*lumG + L.color.z*L.intensity*lumB);
-                        }
+                // Skip dome background — render to black for compositing
+                // Dome illumination comes through bounce paths, not background
+            }
+
+            // Alpha from material opacity (texture alpha modulates this)
+            float hitOpacity = 1.f;
+            if (isHit) {
+                int aMatId = int(p4)-1;
+                if (aMatId>=0 && aMatId<int(params.materialCount)) {
+                    hitOpacity = params.materials[aMatId].opacity;
+                    // Apply texture alpha if texture is present
+                    if (params.materials[aMatId].baseColorTexId >= 0 && params.materials[aMatId].textureBlend > 0.f) {
+                        float2 aUV = make_float2(__uint_as_float(p5), __uint_as_float(p6));
+                        hitOpacity *= sampleTextureAlphaGPU(params.materials[aMatId].baseColorTexId, aUV);
                     }
                 }
             }
 
             // GPU volume ray marching — gated by volumeSpp
-            float sampleAlpha = isHit ? 1.f : 0.f;
+            float sampleAlpha = isHit ? hitOpacity : 0.f;
             float vx=0.f, vy=0.f, vz=0.f;
             if (params.numGpuVolumes > 0 && s < params.volumeSpp) {
                 float surfT = isHit ? depth : 1e30f;

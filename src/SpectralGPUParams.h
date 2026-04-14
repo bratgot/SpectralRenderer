@@ -185,6 +185,13 @@ struct LaunchParams {
     unsigned int       textureCount;
 
     int                blueNoise;        // 1 = R2 sampling, 0 = random
+    int                scanlineCompat;   // 1 = direct RGB shading (no spectral XYZ)
+    int                projectionMode;   // 0=perspective, 1=UV, 2=spherical
+
+    // UV projection lookup (one entry per pixel, built CPU-side)
+    int*               uvTriIndex;      // triangle index per pixel (-1 = empty)
+    float*             uvBaryU;         // barycentric U per pixel
+    float*             uvBaryV;         // barycentric V per pixel
 
     // Volume data (VDB grid uploaded as 3D CUDA texture)
     cudaTextureObject_t volumeDensity;     // 3D density texture

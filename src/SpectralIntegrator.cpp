@@ -58,6 +58,9 @@ static double _noiseFBm(double x, double y, double z, int octaves, double roughn
 // ---------------------------------------------------------------------------
 // RenderFrame  — full image, parallel over rows
 // ---------------------------------------------------------------------------
+// File-scoped flag set by RenderFrame, read by _ShadeSpectral
+static bool s_scanlineCompat = false;
+
 void SpectralIntegrator::RenderFrame(
     const SpectralScene&  scene,
     const SpectralCamera& camera,
@@ -75,6 +78,7 @@ void SpectralIntegrator::RenderFrame(
     const SpectralVolume* const* volumes,
     int                   numVolumes)
 {
+    s_scanlineCompat = camera.scanlineCompat;
 #ifdef SPECTRAL_HAS_EMBREE
     SpectralBVH bvh;
     bvh.Build(scene);
@@ -208,6 +212,70 @@ void SpectralIntegrator::RenderFrame(
                         // Skip converged pixels (after first pass)
                         if (converged[pixIdx]) continue;
 
+                        // ── UV projection mode (CPU) ──
+                        if (camera.projectionMode == 1 && camera.uvTriIndex) {
+                            int triIdx = camera.uvTriIndex[pixIdx];
+                            if (triIdx < 0) continue;  // empty pixel
+                            float bU = camera.uvBaryU[pixIdx];
+                            float bV = camera.uvBaryV[pixIdx];
+                            float bW = 1.f - bU - bV;
+
+                            // Find the triangle
+                            const SpectralTriangle* tri = nullptr;
+                            int tCount = 0;
+                            for (const auto& mesh : scene.GetMeshes()) {
+                                if (triIdx < tCount + (int)mesh.second.triangles.size()) {
+                                    tri = &mesh.second.triangles[triIdx - tCount];
+                                    break;
+                                }
+                                tCount += (int)mesh.second.triangles.size();
+                            }
+                            if (!tri) continue;
+
+                            const SpectralMaterial& mat = scene.GetMaterial(tri->materialId);
+
+                            // Resolve texture at UV
+                            GfVec2f hitUV = tri->uv0 * bW + tri->uv1 * bU + tri->uv2 * bV;
+                            GfVec3f baseCol = mat.baseColor;
+                            float opacity = mat.opacity;
+                            if (mat.baseColorTexId >= 0 && mat.textureBlend > 0.f) {
+                                const SpectralTexture* tex = scene.GetTexture(mat.baseColorTexId);
+                                if (tex && tex->IsValid()) {
+                                    GfVec3f texCol = tex->Sample(hitUV);
+                                    float bl = mat.textureBlend;
+                                    baseCol = mat.baseColor * (1.f - bl) + texCol * bl;
+                                    if (tex->_channels >= 4) {
+                                        int tpx = std::max(0, std::min(int(hitUV[0]*tex->_width), tex->_width-1));
+                                        int tpy = std::max(0, std::min(int(hitUV[1]*tex->_height), tex->_height-1));
+                                        size_t tIdx = (size_t(tpy)*tex->_width+tpx)*tex->_channels+3;
+                                        if (tIdx < tex->_pixels.size()) opacity *= tex->_pixels[tIdx];
+                                    }
+                                }
+                            }
+                            if (opacity < 0.01f) continue;
+
+                            for (int s = passStart; s < passEnd; ++s) {
+                                unsigned int seed = pixIdx * 1031 + s * 6571;
+                                float wu = (float(s)+_Hash(seed+2))/float(spp);
+                                float lambda = SpectralSpectrum::SampleWavelength(wu);
+
+                                auto gauss = [](float l, float c, float sig) {
+                                    float t = (l - c) / sig; return std::exp(-0.5f * t * t);
+                                };
+                                float spectral = baseCol[0]*gauss(lambda,630.f,30.f)
+                                               + baseCol[1]*gauss(lambda,532.f,30.f)
+                                               + baseCol[2]*gauss(lambda,460.f,25.f);
+                                spectral = std::max(0.f, spectral) * opacity;
+
+                                GfVec3f xyz = SpectralSpectrum::RadianceToXYZ(spectral, lambda);
+                                accX[pixIdx] += xyz[0];
+                                accY[pixIdx] += xyz[1];
+                                accZ[pixIdx] += xyz[2];
+                                accAlpha[pixIdx] += opacity;
+                            }
+                            continue;  // skip normal ray tracing for this pixel
+                        }
+
                         for (int s = passStart; s < passEnd; ++s) {
                             unsigned int seed = (imageY * W + imageX) * 1031 + s * 6571;
 
@@ -253,6 +321,24 @@ void SpectralIntegrator::RenderFrame(
                                     lambda, mat, scene, hitPos, rayDir,
                                     shadeBounces, bounceSeed, bvh, rayTime, &comps,
                                     photonMap, gatherRadius, volumes, numVolumes);
+
+                                // Premultiply by opacity (texture alpha modulates this)
+                                {
+                                    float hitOpacity = mat.opacity;
+                                    if (mat.baseColorTexId >= 0 && mat.textureBlend > 0.f) {
+                                        const SpectralTexture* oTex = scene.GetTexture(mat.baseColorTexId);
+                                        if (oTex && oTex->IsValid() && oTex->_channels >= 4) {
+                                            float w3 = 1.f - float(hit.u) - float(hit.v);
+                                            GfVec2f oUV = hit.tri->uv0 * w3 + hit.tri->uv1 * float(hit.u) + hit.tri->uv2 * float(hit.v);
+                                            int opx = std::max(0, std::min(int(oUV[0] * oTex->_width), oTex->_width - 1));
+                                            int opy = std::max(0, std::min(int(oUV[1] * oTex->_height), oTex->_height - 1));
+                                            size_t oIdx = (size_t(opy) * oTex->_width + opx) * oTex->_channels + 3;
+                                            if (oIdx < oTex->_pixels.size())
+                                                hitOpacity *= oTex->_pixels[oIdx];
+                                        }
+                                    }
+                                    radiance *= hitOpacity;
+                                }
 
                                 GfVec3d viewHit = worldToView.Transform(worldHit);
                                 float camZ = static_cast<float>(-viewHit[2]);
@@ -715,9 +801,26 @@ void SpectralIntegrator::RenderFrame(
                                 }
                             }
 
-                            // Per-sample alpha
+                            // Per-sample alpha (uses material opacity + texture alpha)
                             {
-                                float sampleAlpha = hit.valid() ? 1.f : 0.f;
+                                float sampleAlpha = 0.f;
+                                if (hit.valid()) {
+                                    const SpectralMaterial& aMat = scene.GetMaterial(hit.tri->materialId);
+                                    sampleAlpha = aMat.opacity;
+                                    // Apply texture alpha
+                                    if (aMat.baseColorTexId >= 0 && aMat.textureBlend > 0.f) {
+                                        const SpectralTexture* aTex = scene.GetTexture(aMat.baseColorTexId);
+                                        if (aTex && aTex->IsValid() && aTex->_channels >= 4) {
+                                            float w2 = 1.f - float(hit.u) - float(hit.v);
+                                            GfVec2f aUV = hit.tri->uv0 * w2 + hit.tri->uv1 * float(hit.u) + hit.tri->uv2 * float(hit.v);
+                                            int apx = std::max(0, std::min(int(aUV[0] * aTex->_width), aTex->_width - 1));
+                                            int apy = std::max(0, std::min(int(aUV[1] * aTex->_height), aTex->_height - 1));
+                                            size_t aIdx = (size_t(apy) * aTex->_width + apx) * aTex->_channels + 3;
+                                            if (aIdx < aTex->_pixels.size())
+                                                sampleAlpha *= aTex->_pixels[aIdx];
+                                        }
+                                    }
+                                }
                                 sampleAlpha = 1.f - finalVolTrans * (1.f - sampleAlpha);
                                 accAlpha[pixIdx] += sampleAlpha;
                             }
@@ -1012,6 +1115,20 @@ GfRay SpectralIntegrator::_MakeRay(
     unsigned int px, unsigned int py,
     float jitterX, float jitterY)
 {
+    // Spherical (equirectangular) projection
+    if (cam.projectionMode == 2) {
+        double u = (px + jitterX) / cam.imageWidth;   // 0..1 → longitude
+        double v = (py + jitterY) / cam.imageHeight;  // 0..1 → latitude
+        double theta = u * 2.0 * M_PI;   // 0..2π
+        double phi   = v * M_PI;          // 0..π
+        GfVec3d localDir(std::sin(phi)*std::sin(theta), std::cos(phi), std::sin(phi)*std::cos(theta));
+        GfVec3d origin(cam.viewToWorld.GetRow(3)[0], cam.viewToWorld.GetRow(3)[1], cam.viewToWorld.GetRow(3)[2]);
+        GfVec3d worldDir = cam.viewToWorld.TransformDir(localDir);
+        GfRay ray;
+        ray.SetPointAndDirection(origin, worldDir);
+        return ray;
+    }
+
     // Simple NDC mapping — aspect correction is baked into projInverse
     const double ndcX =  2.0 * (px + jitterX) / cam.imageWidth  - 1.0;
     const double ndcY = -2.0 * (py + jitterY) / cam.imageHeight + 1.0;
@@ -1193,6 +1310,17 @@ static SpectralMaterial _ResolveMaterial(
             GfVec3f texColor = tex->Sample(uv);
             float b = mat.textureBlend;
             resolved.baseColor = mat.baseColor * (1.f - b) + texColor * b;
+
+            // Use texture alpha for opacity (RGBA textures)
+            if (tex->_channels >= 4) {
+                int px = std::max(0, std::min(int(uv[0] * tex->_width), tex->_width - 1));
+                int py = std::max(0, std::min(int(uv[1] * tex->_height), tex->_height - 1));
+                size_t idx = (size_t(py) * tex->_width + px) * tex->_channels + 3;
+                if (idx < tex->_pixels.size()) {
+                    float texAlpha = tex->_pixels[idx];
+                    resolved.opacity *= texAlpha;
+                }
+            }
         }
     }
 
@@ -1229,6 +1357,29 @@ float SpectralIntegrator::_ShadeSpectral(
     float gatherRadius,
     const SpectralVolume* const* volumes, int numVolumes)
 {
+    // ScanlineRender compat: no lights = constant shader (full material colour)
+    if (s_scanlineCompat && scene.GetLights().empty()) {
+        // Resolve texture before returning constant colour
+        float bw = float(1.0 - u - v);
+        GfVec2f cUV = tri.uv0 * bw + tri.uv1 * float(u) + tri.uv2 * float(v);
+        GfVec3f baseCol = mat.baseColor;
+        if (mat.baseColorTexId >= 0 && mat.textureBlend > 0.f) {
+            const SpectralTexture* tex = scene.GetTexture(mat.baseColorTexId);
+            if (tex && tex->IsValid()) {
+                GfVec3f texCol = tex->Sample(cUV);
+                float bl = mat.textureBlend;
+                baseCol = mat.baseColor * (1.f - bl) + texCol * bl;
+            }
+        }
+        auto gauss = [](float l, float c, float s) {
+            float t = (l - c) / s; return std::exp(-0.5f * t * t);
+        };
+        float spectral = baseCol[0] * gauss(lambda, 630.f, 30.f)
+                        + baseCol[1] * gauss(lambda, 532.f, 30.f)
+                        + baseCol[2] * gauss(lambda, 460.f, 25.f);
+        return std::max(0.f, spectral);
+    }
+
     float w  = float(1.0 - u - v);
     float uf = float(u);
     float vf = float(v);
@@ -2260,6 +2411,12 @@ static SpectralGPU* _GetGPU()
 bool SpectralIntegrator::IsGPUAvailable()
 {
     return _GetGPU() != nullptr;
+}
+
+void SpectralIntegrator::InvalidateGPUAccel()
+{
+    SpectralGPU* gpu = _GetGPU();
+    if (gpu) gpu->InvalidateAccel();
 }
 
 void SpectralIntegrator::RenderFrameGPU(
