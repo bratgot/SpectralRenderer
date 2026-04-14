@@ -1570,7 +1570,17 @@ extern "C" __global__ void __raygen__spectral()
                                OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0, bp0,bp1,bp2,bp3,bp4,bp5,bp6);
 
                     if (bp4 == 0u) {
-                        // Bounce miss — add dome contribution (MIS weight 0.5, other half in direct)
+                        // Bounce miss — march through volumes before adding dome
+                        if (params.numGpuVolumes > 0) {
+                            float3 volRGB; float volTrans;
+                            marchVolume(bOrig, bounceDir, 1e30f, lambda, bSeed + bounce*97u, volRGB, volTrans);
+                            // Convert RGB to spectral: weight by wavelength
+                            float volSpec = (lambda < 500.f) ? volRGB.z :
+                                           (lambda < 580.f) ? volRGB.y : volRGB.x;
+                            radiance += throughput * volSpec;
+                            throughput *= volTrans;
+                        }
+                        // Dome contribution (MIS weight 0.5, other half in direct)
                         for (unsigned int li = 0; li < params.lightCount; ++li) {
                             const GPULight& domeL = params.lights[li];
                             if (domeL.type != 3) continue;
@@ -1579,7 +1589,16 @@ extern "C" __global__ void __raygen__spectral()
                         break;
                     }
 
+                    // Bounce hit — march through volumes between origin and hit
                     float bDepth = __uint_as_float(bp3);
+                    if (params.numGpuVolumes > 0) {
+                        float3 volRGB; float volTrans;
+                        marchVolume(bOrig, bounceDir, bDepth, lambda, bSeed + bounce*97u, volRGB, volTrans);
+                        float volSpec = (lambda < 500.f) ? volRGB.z :
+                                       (lambda < 580.f) ? volRGB.y : volRGB.x;
+                        radiance += throughput * volSpec;
+                        throughput *= volTrans;
+                    }
                     int bMatId = int(bp4)-1;
                     if (bMatId<0||bMatId>=int(params.materialCount)) bMatId=0;
                     resolvedMat = params.materials[bMatId];  // copy for texture resolution

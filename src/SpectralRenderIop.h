@@ -272,6 +272,7 @@ private:
     int    _vpVolShadowSamples = 2; // 0=off, 1=4, 2=8, 3=16
     bool   _vpEnvReflections = true;
     bool   _vpGeoReflections = true;
+    bool   _vpVolReflections = true;
     int    _vpReflSteps = 1;        // 0=8, 1=16, 2=32, 3=64
     GLuint _glVolProg = 0;
     GLuint _glShadowProg = 0;
@@ -294,7 +295,7 @@ private:
     float  _glVolMaxTemp = 0.001f;
     void   _InitGLVolShader();
     void   _UploadGLVolTex(const pxr::SpectralVolume* vol);
-    void   _DrawVolumeShaded(ViewerContext* ctx);
+    void   _DrawVolumeShaded(ViewerContext* ctx, bool writeDepth = false);
 
     // Scene graph transform (from GeoTransform via USD stage)
     bool  _vdbHasSceneXform = false;

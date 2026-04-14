@@ -880,6 +880,11 @@ void SpectralRenderIop::knobs(Knob_Callback f)
     Tooltip(f, "One-bounce screen-space reflections of other geometry.\n"
                "Renders a pre-pass then traces in screen space.\n"
                "Best on smooth metallic surfaces facing other objects.");
+    Bool_knob(f, &_vpVolReflections, "vp_vol_reflections", "volume reflections");
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "Include volumes in viewport reflections.\n"
+               "Volumes are rendered to the reflection pre-pass FBO\n"
+               "so they appear in reflective surfaces.");
     {
         static const char* const reflOpts[] = {
             "8 steps", "16 steps", "32 steps", "64 steps", nullptr
@@ -1216,7 +1221,7 @@ int SpectralRenderIop::knob_changed(Knob* k)
         }
         return 1;
     }
-    if (k->is("vdb_3d_preview") || k->is("vdb_show_points") || k->is("vdb_shaded") || k->is("vdb_viewport_res") || k->is("vdb_point_density") || k->is("vdb_point_size") || k->is("vdb_show_bbox") || k->is("vdb_fast_scrub") || k->is("vp_shadow_pcf") || k->is("vp_vol_shadow") || k->is("vp_env_reflections") || k->is("vp_geo_reflections") || k->is("vp_refl_steps")) {
+    if (k->is("vdb_3d_preview") || k->is("vdb_show_points") || k->is("vdb_shaded") || k->is("vdb_viewport_res") || k->is("vdb_point_density") || k->is("vdb_point_size") || k->is("vdb_show_bbox") || k->is("vdb_fast_scrub") || k->is("vp_shadow_pcf") || k->is("vp_vol_shadow") || k->is("vp_env_reflections") || k->is("vp_geo_reflections") || k->is("vp_vol_reflections") || k->is("vp_refl_steps")) {
         _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
         if (k->is("vdb_fast_scrub") || k->is("vdb_viewport_res")) _vdbLoadedPath.clear();
         return 1;
@@ -3987,7 +3992,6 @@ uniform float uHasGeoRefl;
 uniform sampler2D uReflColorTex;
 uniform sampler2D uReflDepthTex;
 uniform mat4 uMVP;
-uniform int uReflSteps;
 uniform mat4 uLightVP;
 uniform float uShadowTexelSize;
 uniform float uShadowSoftness;
@@ -4137,60 +4141,48 @@ void main() {
     // Metallic tints reflections with base color, dielectric is white
     vec3 specColor = mix(vec3(1.0), uMatColor, uMetallic);
 
-    // Screen-space geometry reflection (one-bounce)
-    if (uHasGeoRefl > 0.5 && rough < 0.3) {
-        vec4 startClip = uMVP * vec4(vWorldPos, 1.0);
-        vec2 startSS = startClip.xy / startClip.w * 0.5 + 0.5;
+    // Geometry reflection — Y-flipped pre-pass lookup with roughness blur
+    if (uHasGeoRefl > 0.5 && rough < 0.5) {
+        vec4 fragClip = uMVP * vec4(vWorldPos, 1.0);
+        vec2 fragUV = fragClip.xy / fragClip.w * 0.5 + 0.5;
+        vec2 reflUV = vec2(fragUV.x, 1.0 - fragUV.y);
 
-        // March along reflection in screen space
-        vec4 endClip = uMVP * vec4(vWorldPos + R * 80.0, 1.0);
-        if (endClip.w > 0.01) {
-            vec2 endSS = endClip.xy / endClip.w * 0.5 + 0.5;
-            vec2 marchDir = endSS - startSS;
-            float marchLen = length(marchDir);
+        if (reflUV.x > 0.02 && reflUV.x < 0.98 && reflUV.y > 0.02 && reflUV.y < 0.98) {
+            // Roughness-based blur: sample in a disc pattern
+            float blurR = rough * rough * 0.06;  // blur radius in UV space
+            vec3 accumColor = vec3(0.0);
+            float accumAlpha = 0.0;
+            float totalWeight = 0.0;
 
-            if (marchLen > 0.001) {
-                marchDir /= marchLen;
-                float stepSize = max(marchLen / float(uReflSteps), 0.003);
-                float prevDepthDiff = -1.0;
+            // Centre sample + 8 surrounding samples (3x3 grid)
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    vec2 offset = vec2(float(dx), float(dy)) * blurR;
+                    vec2 sUV = reflUV + offset;
+                    if (sUV.x < 0.01 || sUV.x > 0.99 || sUV.y < 0.01 || sUV.y > 0.99) continue;
 
-                for (int i = 1; i <= 64; i++) {
-                    if (i > uReflSteps) break;
-                    vec2 sampleUV = startSS + marchDir * stepSize * float(i);
-                    if (sampleUV.x < 0.01 || sampleUV.x > 0.99 || sampleUV.y < 0.01 || sampleUV.y > 0.99) break;
+                    float sd = texture2D(uReflDepthTex, sUV).r;
+                    if (sd >= 0.9999) continue;  // sky — skip
 
-                    float sceneDepth = texture2D(uReflDepthTex, sampleUV).r;
-                    if (sceneDepth <= 0.0) continue;
-
-                    // Camera-space depth along reflection ray (matches stored -csPos.z)
-                    float t = float(i) / float(uReflSteps);
-                    vec4 rayCS = gl_ModelViewMatrix * vec4(vWorldPos + R * 80.0 * t, 1.0);
-                    float expectedDepth = -rayCS.z;
-
-                    float depthDiff = expectedDepth - sceneDepth;
-
-                    // Detect zero-crossing: ray passes behind surface
-                    if (depthDiff > 0.0 && prevDepthDiff < 0.0 && depthDiff < sceneDepth * 0.1) {
-                        // Binary search refinement (4 steps)
-                        float lo = stepSize * float(i-1), hi = stepSize * float(i);
-                        for (int b = 0; b < 4; b++) {
-                            float mid = (lo + hi) * 0.5;
-                            vec2 midUV = startSS + marchDir * mid;
-                            float midScene = texture2D(uReflDepthTex, midUV).r;
-                            float mt = mid / (stepSize * float(uReflSteps));
-                            vec4 midCS = gl_ModelViewMatrix * vec4(vWorldPos + R * 80.0 * mt, 1.0);
-                            float midExpected = -midCS.z;
-                            if (midExpected > midScene) hi = mid; else lo = mid;
-                        }
-                        vec2 hitUV = startSS + marchDir * (lo + hi) * 0.5;
-                        vec3 hitColor = texture2D(uReflColorTex, hitUV).rgb;
-                        float fade = 1.0 - t;
-                        float roughFade = 1.0 - rough * 4.0;
-                        refl = mix(refl, hitColor, clamp(fade * roughFade * 0.7, 0.0, 0.7));
-                        break;
-                    }
-                    prevDepthDiff = depthDiff;
+                    vec4 sCol = texture2D(uReflColorTex, sUV);
+                    // Weight: center=1, edges=0.5
+                    float w = (dx == 0 && dy == 0) ? 1.0 : 0.5;
+                    accumColor += sCol.rgb * sCol.a * w;  // premultiply by alpha
+                    accumAlpha += sCol.a * w;
+                    totalWeight += w;
                 }
+            }
+
+            if (accumAlpha > 0.01) {
+                // Un-premultiply to get clean color (avoids black edges on volumes)
+                vec3 reflColor = accumColor / accumAlpha;
+                float coverage = accumAlpha / max(totalWeight, 1.0);
+
+                float edgeFade = min(1.0, reflUV.x * 20.0) * min(1.0, (1.0 - reflUV.x) * 20.0)
+                               * min(1.0, reflUV.y * 20.0) * min(1.0, (1.0 - reflUV.y) * 20.0);
+                float roughFade = 1.0 - rough * 2.0;
+                float blend = clamp(edgeFade * roughFade * coverage * 0.6, 0.0, 0.6);
+                refl = mix(refl, reflColor, blend);
             }
         }
     }
@@ -4198,10 +4190,7 @@ void main() {
     // Specular: direct highlight + env reflection (clamped to prevent fireflies)
     vec3 specular = specColor * min(spec * uLightCol * shadow + refl * fresnel, vec3(8.0));
 
-    gl_FragData[0] = vec4(diffuse + ambient + specular, 1.0);
-    // Write linear camera depth to second attachment for SSR
-    vec4 csPos = gl_ModelViewMatrix * vec4(vWorldPos, 1.0);
-    gl_FragData[1] = vec4(-csPos.z, 0.0, 0.0, 1.0);  // linear depth (positive into screen)
+    gl_FragColor = vec4(diffuse + ambient + specular, 1.0);
 }
 )";
 
@@ -4387,7 +4376,7 @@ void SpectralRenderIop::_UploadGLVolTex(const pxr::SpectralVolume* vol)
 static void sunColorFromElevation(double elev, double turbidity, double& r, double& g, double& b);
 static void skyColorFromElevation(double elev, double turbidity, double& r, double& g, double& b);
 
-void SpectralRenderIop::_DrawVolumeShaded(ViewerContext* ctx)
+void SpectralRenderIop::_DrawVolumeShaded(ViewerContext* ctx, bool writeDepth)
 {
     if (_volumes.empty()) return;
     auto& vol = _volumes[0];
@@ -4454,7 +4443,8 @@ void SpectralRenderIop::_DrawVolumeShaded(ViewerContext* ctx)
 
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(writeDepth ? GL_TRUE : GL_FALSE);
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
 
@@ -4686,12 +4676,6 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
             }
             glEnd(); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         }
-    }
-
-    // ─── Shaded volume preview (GL ray march) ──────────────────────
-    bool vpHasAnyLight = _cachedEnvLight || _useBuiltinLight;
-    if (_vdbShadedPreview && !_volumes.empty() && _volumes[0] && _volumes[0]->IsValid() && vpHasAnyLight) {
-        _DrawVolumeShaded(ctx);
     }
 
     // ─── Light preview (subtle, professional) ────────────────────────
@@ -5118,35 +5102,28 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
                     glDeleteTextures(1, &_glReflDepthTex); _glReflDepthTex = 0;
                 }
                 if (!_glReflFBO) {
-                    // Color texture (RGB)
+                    // Color texture
                     glGenTextures(1, &_glReflColorTex);
                     glBindTexture(GL_TEXTURE_2D, _glReflColorTex);
-                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, rW, rH, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, rW, rH, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-                    // Depth texture (R32F — proper float precision)
+                    // Depth texture (GL depth — both geo and volume write to this naturally)
                     glGenTextures(1, &_glReflDepthTex);
                     glBindTexture(GL_TEXTURE_2D, _glReflDepthTex);
-                    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, rW, rH, 0, GL_RED, GL_FLOAT, nullptr);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, rW, rH, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-                    // FBO
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+                    // FBO: color + depth texture
                     glGenFramebuffers(1, &_glReflFBO);
                     glBindFramebuffer(GL_FRAMEBUFFER, _glReflFBO);
                     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, _glReflColorTex, 0);
-                    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, _glReflDepthTex, 0);
-                    GLenum drawBufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
-                    glDrawBuffers(2, drawBufs);
-                    // Also need a renderbuffer for GL depth test
-                    GLuint depthRB;
-                    glGenRenderbuffers(1, &depthRB);
-                    glBindRenderbuffer(GL_RENDERBUFFER, depthRB);
-                    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, rW, rH);
-                    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depthRB);
+                    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, _glReflDepthTex, 0);
                     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
                         glDeleteFramebuffers(1, &_glReflFBO); _glReflFBO = 0;
                     }
@@ -5170,9 +5147,21 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
                     glClearColor(0,0,0,0);
                     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
                     glEnable(GL_DEPTH_TEST);
-                    glDisable(GL_BLEND);
 
-                    // Pre-pass: no geo reflections, env only
+                    // ── Draw volume to reflection FBO ──
+                    if (_vpVolReflections && _vdbShadedPreview && _glVolProg && !_volumes.empty() && _volumes[0] && _volumes[0]->IsValid()) {
+                        bool vpHasAnyLight2 = _cachedEnvLight || _useBuiltinLight;
+                        if (vpHasAnyLight2) {
+                            glEnable(GL_BLEND);
+                            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                            _DrawVolumeShaded(nullptr, true);
+                            glDisable(GL_BLEND);
+                        }
+                    }
+
+                    // ── Draw geometry to reflection FBO ──
+                    glDisable(GL_BLEND);
+                    glUseProgram(_glGeoProg);
                     glUniform1f(glGetUniformLocation(_glGeoProg, "uHasGeoRefl"), 0.f);
                     glUniformMatrix4fv(glGetUniformLocation(_glGeoProg, "uMVP"), 1, GL_FALSE, mvpMat);
 
@@ -5203,12 +5192,9 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
                     glViewport(vpDims[0],vpDims[1],vpDims[2],vpDims[3]);
                     glEnable(GL_BLEND);
 
-                    // Bind for main pass
+                    // Main pass uniforms
                     glUniform1f(glGetUniformLocation(_glGeoProg,"uHasGeoRefl"),1.f);
                     glUniformMatrix4fv(glGetUniformLocation(_glGeoProg,"uMVP"),1,GL_FALSE,mvpMat);
-                    static const int reflLUT[]={8,16,32,64};
-                    glUniform1i(glGetUniformLocation(_glGeoProg,"uReflSteps"),
-                                reflLUT[std::min(std::max(_vpReflSteps,0),3)]);
                     glActiveTexture(GL_TEXTURE3);
                     glBindTexture(GL_TEXTURE_2D, _glReflColorTex);
                     glUniform1i(glGetUniformLocation(_glGeoProg,"uReflColorTex"),3);
@@ -5260,6 +5246,14 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
             glActiveTexture(GL_TEXTURE0);
             glUseProgram(prevProg);
             glPopAttrib();
+        }
+    }
+
+    // ─── Shaded volume (drawn AFTER geometry so depth test clips correctly) ───
+    {
+        bool vpHasAnyLight = _cachedEnvLight || _useBuiltinLight;
+        if (_vdbShadedPreview && !_volumes.empty() && _volumes[0] && _volumes[0]->IsValid() && vpHasAnyLight) {
+            _DrawVolumeShaded(ctx);
         }
     }
 

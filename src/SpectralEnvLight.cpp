@@ -382,7 +382,7 @@ void SpectralEnvLight::knobs(Knob_Callback f)
                "0-1 = subtle fill, 1-3 = strong, 3-5 = overcast.");
 
     Double_knob(f, &sunElevation, "sun_elevation", "elevation");
-    SetRange(f, -10, 90);
+    SetRange(f, -10, 180);
     Tooltip(f, "Sun angle above horizon in degrees.");
     Double_knob(f, &sunAzimuth, "sun_azimuth", "azimuth");
     ClearFlags(f, Knob::STARTLINE); SetRange(f, 0, 360);
