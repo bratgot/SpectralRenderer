@@ -74,8 +74,8 @@ static __forceinline__ __device__ void makeRay(
     if (params.projectionMode == 2) {
         float u = px / W;  // 0..1 → longitude
         float v = py / H;  // 0..1 → latitude
-        float theta = u * 6.28318f;        // 0..2π
-        float phi   = v * 3.14159f;         // 0..π
+        float theta = (1.f - u) * 6.28318f;   // reversed to match ScanlineRender
+        float phi   = v * 3.14159f;             // 0..π
         float3 localDir = make_float3(sinf(phi)*sinf(theta), cosf(phi), sinf(phi)*cosf(theta));
         // Camera position from viewToWorld matrix (column 3 = translation)
         origin = make_float3(params.camera.viewToWorld[3], params.camera.viewToWorld[7], params.camera.viewToWorld[11]);

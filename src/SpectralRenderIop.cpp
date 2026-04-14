@@ -6996,12 +6996,6 @@ void SpectralRenderIop::_EnsureFrameRendered()
     cam.blueNoise = _blueNoise;
     cam.scanlineCompat = _scanlineCompat;
     cam.projectionMode = _projectionMode;
-    if (_projectionMode == 1 && !_uvTriIndexBuf.empty()) {
-        cam.uvTriIndex = _uvTriIndexBuf.data();
-        cam.uvBaryU    = _uvBaryUBuf.data();
-        cam.uvBaryV    = _uvBaryVBuf.data();
-        cam.uvBufSize  = _uvTriIndexBuf.size();
-    }
     cam.fStop = _fStop;
     cam.focusDistance = _focusDistance;
     cam.volumeSpp = _volumeSpp;
@@ -7205,6 +7199,14 @@ void SpectralRenderIop::_EnsureFrameRendered()
             }
         }
         SLOG("SpectralRender: UV rasterization complete (%dx%d, %d triangles)\n", W, H, globalTriIdx);
+    }
+
+    // Set UV buffer pointers after rasterization completes
+    if (_projectionMode == 1 && !_uvTriIndexBuf.empty()) {
+        cam.uvTriIndex = _uvTriIndexBuf.data();
+        cam.uvBaryU    = _uvBaryUBuf.data();
+        cam.uvBaryV    = _uvBaryVBuf.data();
+        cam.uvBufSize  = _uvTriIndexBuf.size();
     }
 
     // Cache render params for strip rendering

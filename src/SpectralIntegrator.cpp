@@ -1119,8 +1119,8 @@ GfRay SpectralIntegrator::_MakeRay(
     if (cam.projectionMode == 2) {
         double u = (px + jitterX) / cam.imageWidth;   // 0..1 → longitude
         double v = (py + jitterY) / cam.imageHeight;  // 0..1 → latitude
-        double theta = u * 2.0 * M_PI;   // 0..2π
-        double phi   = v * M_PI;          // 0..π
+        double theta = (1.0 - u) * 2.0 * M_PI;   // reversed to match ScanlineRender
+        double phi   = v * M_PI;                   // 0..π
         GfVec3d localDir(std::sin(phi)*std::sin(theta), std::cos(phi), std::sin(phi)*std::cos(theta));
         GfVec3d origin(cam.viewToWorld.GetRow(3)[0], cam.viewToWorld.GetRow(3)[1], cam.viewToWorld.GetRow(3)[2]);
         GfVec3d worldDir = cam.viewToWorld.TransformDir(localDir);
