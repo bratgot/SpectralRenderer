@@ -1253,8 +1253,8 @@ static __forceinline__ __device__ void marchSingleVolume(
         outRGB.y += outTransmittance * absorption * stepRGB.y;
         outRGB.z += outTransmittance * absorption * stepRGB.z;
 
-        // Emission
-        if (rmode==4||rmode==5||vol.emissionIntensity>0.01f) {
+        // Emission — only in Temperature (4), Explosion (5), or if render mode explicitly uses emission
+        if (rmode==4||rmode==5) {
             float3 emRGB=make_float3(0.f,0.f,0.f);
             float temp2=sampleTemp(vol,u,v,w)*vol.tempMix;
             if (temp2>vol.tempMin) {

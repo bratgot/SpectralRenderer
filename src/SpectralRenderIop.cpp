@@ -4144,7 +4144,12 @@ void main() {
 
     // Diffuse (reduced by metallic — metals don't diffuse)
     vec3 diffuse = uMatColor * (1.0 - uMetallic) * uLightCol * NdL * shadow;
-    vec3 ambient = uMatColor * (1.0 - uMetallic) * uAmbient;
+
+    // Hemisphere ambient: sky fill stronger on surfaces facing up, dimmer facing down
+    float hemiBlend = N.y * 0.5 + 0.5;  // 1=facing sky, 0.5=horizontal, 0=facing ground
+    vec3 skyAmb = uAmbient * (0.4 + 0.6 * hemiBlend);  // sky contribution
+    vec3 groundAmb = uAmbient * 0.2 * (1.0 - hemiBlend);  // ground bounce
+    vec3 ambient = uMatColor * (1.0 - uMetallic) * (skyAmb + groundAmb);
 
     // Environment reflection with sun disc
     vec3 refl = vec3(0.0);
@@ -4953,7 +4958,7 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
                 float si = float(sunInt * sunInt * elevFactor * 0.32);
                 gLightR = float(r * si); gLightG = float(g * si); gLightB = float(b * si);
                 skyColorFromElevation(sunElev, turbidity, r, g, b);
-                float skyMul = float(std::min(skyInt * 0.12, 1.5));
+                float skyMul = float(std::min(skyInt * 0.3, 2.0));
                 gAmbR = float(r * skyMul); gAmbG = float(g * skyMul); gAmbB = float(b * skyMul);
             }
 
