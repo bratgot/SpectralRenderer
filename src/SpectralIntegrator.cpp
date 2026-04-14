@@ -79,6 +79,34 @@ void SpectralIntegrator::RenderFrame(
     int                   numVolumes)
 {
     s_scanlineCompat = camera.scanlineCompat;
+
+    // Compute white balance correction for neutral rendering
+    // The spectral round-trip (RGB→spectral→XYZ→RGB) introduces a colour tint.
+    // Pre-compute what white (1,1,1) produces and derive a correction factor.
+    GfVec3f wbCorrection(1.f, 1.f, 1.f);
+    if (camera.neutralBalance) {
+        float wbX = 0.f, wbY = 0.f, wbZ = 0.f;
+        const int wbN = std::max(spp, 64);
+        for (int s = 0; s < wbN; ++s) {
+            float wu = (float(s) + 0.5f) / float(wbN);
+            float lambda = SpectralSpectrum::SampleWavelength(wu);
+            auto gauss = [](float l, float c, float sig) {
+                float t = (l - c) / sig; return std::exp(-0.5f * t * t);
+            };
+            // White reflectance (1,1,1) → spectral
+            float spectral = gauss(lambda, 630.f, 30.f)
+                           + gauss(lambda, 532.f, 30.f)
+                           + gauss(lambda, 460.f, 25.f);
+            GfVec3f xyz = SpectralSpectrum::RadianceToXYZ(spectral, lambda);
+            wbX += xyz[0]; wbY += xyz[1]; wbZ += xyz[2];
+        }
+        wbX /= wbN; wbY /= wbN; wbZ /= wbN;
+        GfVec3f wbRGB = SpectralSpectrum::XYZtoRGB(wbX, wbY, wbZ,
+            static_cast<SpectralSpectrum::ColorSpace>(colorSpace));
+        if (wbRGB[0] > 0.01f) wbCorrection[0] = 1.f / wbRGB[0];
+        if (wbRGB[1] > 0.01f) wbCorrection[1] = 1.f / wbRGB[1];
+        if (wbRGB[2] > 0.01f) wbCorrection[2] = 1.f / wbRGB[2];
+    }
 #ifdef SPECTRAL_HAS_EMBREE
     SpectralBVH bvh;
     bvh.Build(scene);
@@ -314,6 +342,87 @@ void SpectralIntegrator::RenderFrame(
                                 GfVec3f rayDir = GfVec3f(ray.GetDirection());
                                 unsigned int bounceSeed = seed + 100u;
                                 int shadeBounces = std::max(maxBounces, camera.refractionBounces);
+
+                                // ScanlineRender compat: direct RGB shading (no spectral tint)
+                                if (s_scanlineCompat) {
+                                    float bw = 1.f - float(hit.u) - float(hit.v);
+                                    GfVec2f hitUV = hit.tri->uv0 * bw + hit.tri->uv1 * float(hit.u) + hit.tri->uv2 * float(hit.v);
+                                    GfVec3f baseCol = mat.baseColor;
+                                    if (mat.baseColorTexId >= 0 && mat.textureBlend > 0.f) {
+                                        const SpectralTexture* tex = scene.GetTexture(mat.baseColorTexId);
+                                        if (tex && tex->IsValid()) {
+                                            GfVec3f texCol = tex->Sample(hitUV);
+                                            float bl = mat.textureBlend;
+                                            baseCol = GfVec3f(
+                                                mat.baseColor[0]*(1.f-bl) + texCol[0]*bl,
+                                                mat.baseColor[1]*(1.f-bl) + texCol[1]*bl,
+                                                mat.baseColor[2]*(1.f-bl) + texCol[2]*bl);
+                                        }
+                                    }
+                                    // Opacity
+                                    float hitOpacity = mat.opacity;
+                                    if (mat.baseColorTexId >= 0 && mat.textureBlend > 0.f) {
+                                        const SpectralTexture* oTex = scene.GetTexture(mat.baseColorTexId);
+                                        if (oTex && oTex->IsValid() && oTex->_channels >= 4) {
+                                            int opx = std::max(0, std::min(int(hitUV[0] * oTex->_width), oTex->_width - 1));
+                                            int opy = std::max(0, std::min(int(hitUV[1] * oTex->_height), oTex->_height - 1));
+                                            size_t oIdx = (size_t(opy) * oTex->_width + opx) * oTex->_channels + 3;
+                                            if (oIdx < oTex->_pixels.size())
+                                                hitOpacity *= oTex->_pixels[oIdx];
+                                        }
+                                    }
+                                    if (hitOpacity < 0.01f) continue;
+
+                                    // Normal
+                                    GfVec3f N = hit.tri->n0 * bw + hit.tri->n1 * float(hit.u) + hit.tri->n2 * float(hit.v);
+                                    float nlen = N.GetLength();
+                                    if (nlen > 1e-6f) N /= nlen;
+
+                                    // Direct RGB Lambert shading
+                                    GfVec3f rgb(0.f);
+                                    const auto& lights = scene.GetLights();
+                                    if (lights.empty()) {
+                                        // No lights = constant shader
+                                        rgb = baseCol;
+                                    } else {
+                                        for (const auto& light : lights) {
+                                            GfVec3f L = light.position - hitPos;
+                                            float dist = L.GetLength();
+                                            if (dist < 1e-6f) continue;
+                                            L /= dist;
+                                            float NdotL = std::max(0.f, N[0]*L[0] + N[1]*L[1] + N[2]*L[2]);
+                                            float atten = 1.f / (dist * dist);
+                                            float intensity = light.EffectiveIntensity();
+                                            rgb[0] += baseCol[0] * light.color[0] * NdotL * atten * intensity;
+                                            rgb[1] += baseCol[1] * light.color[1] * NdotL * atten * intensity;
+                                            rgb[2] += baseCol[2] * light.color[2] * NdotL * atten * intensity;
+                                        }
+                                    }
+                                    // Emissive
+                                    rgb[0] += mat.emissiveColor[0];
+                                    rgb[1] += mat.emissiveColor[1];
+                                    rgb[2] += mat.emissiveColor[2];
+                                    // Premultiply opacity
+                                    rgb[0] *= hitOpacity;
+                                    rgb[1] *= hitOpacity;
+                                    rgb[2] *= hitOpacity;
+                                    // Accumulate directly as RGB (bypass spectral)
+                                    accX[pixIdx] += rgb[0];
+                                    accY[pixIdx] += rgb[1];
+                                    accZ[pixIdx] += rgb[2];
+                                    accCount[pixIdx]++;
+                                    accAlpha[pixIdx] += hitOpacity;
+                                    // Depth + IDs
+                                    GfVec3d viewHit2 = worldToView.Transform(worldHit);
+                                    float camZ2 = static_cast<float>(-viewHit2[2]);
+                                    if (camZ2 < depthBuf[pixIdx]) depthBuf[pixIdx] = camZ2;
+                                    if (objIdBuf[pixIdx] == 0) {
+                                        objIdBuf[pixIdx] = hit.tri->objectId;
+                                        matIdBuf[pixIdx] = hit.tri->materialId;
+                                    }
+                                    continue;
+                                }
+
                                 radiance = _ShadeSpectral(
                                     *hit.tri,
                                     static_cast<double>(hit.u),
@@ -923,9 +1032,19 @@ void SpectralIntegrator::RenderFrame(
             int n = accCount[i];
             if (n == 0) n = 1;
             float invN = 1.f / float(n);
-            GfVec3f rgb = SpectralSpectrum::XYZtoRGB(
-                accX[i] * invN, accY[i] * invN, accZ[i] * invN,
-                static_cast<SpectralSpectrum::ColorSpace>(colorSpace));
+            GfVec3f rgb;
+            if (s_scanlineCompat) {
+                // ScanlineCompat: accX/Y/Z are already RGB — no conversion needed
+                rgb = GfVec3f(accX[i] * invN, accY[i] * invN, accZ[i] * invN);
+            } else {
+                rgb = SpectralSpectrum::XYZtoRGB(
+                    accX[i] * invN, accY[i] * invN, accZ[i] * invN,
+                    static_cast<SpectralSpectrum::ColorSpace>(colorSpace));
+                // Apply white balance correction (neutral illuminant)
+                rgb[0] *= wbCorrection[0];
+                rgb[1] *= wbCorrection[1];
+                rgb[2] *= wbCorrection[2];
+            }
             float* px = pixels + i * 4;
             px[0] = std::max(0.f, rgb[0]);
             px[1] = std::max(0.f, rgb[1]);

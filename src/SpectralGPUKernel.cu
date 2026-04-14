@@ -1617,6 +1617,42 @@ extern "C" __global__ void __raygen__spectral()
 
             // Spectral accumulation with shading
             float3 V = make_float3(0,0,1);  // arbitrary view dir for UV mode
+
+            // ScanlineRender compat: direct RGB (no spectral tint)
+            if (params.scanlineCompat) {
+                float3 baseCol = make_float3(mat.baseColor.x, mat.baseColor.y, mat.baseColor.z);
+                if (mat.baseColorTexId >= 0 && mat.textureBlend > 0.f) {
+                    float3 texCol = sampleTextureGPU(mat.baseColorTexId, make_float2(hitUV.x, hitUV.y));
+                    float bl = mat.textureBlend;
+                    baseCol = make_float3(
+                        baseCol.x*(1.f-bl)+texCol.x*bl,
+                        baseCol.y*(1.f-bl)+texCol.y*bl,
+                        baseCol.z*(1.f-bl)+texCol.z*bl);
+                }
+                float3 rgb = make_float3(0.f, 0.f, 0.f);
+                if (params.lightCount == 0) {
+                    rgb = baseCol;
+                } else {
+                    for (unsigned int li = 0; li < params.lightCount; ++li) {
+                        float3 lp = params.lights[li].position;
+                        float3 L = make_float3(lp.x-hitPos.x, lp.y-hitPos.y, lp.z-hitPos.z);
+                        float dist = sqrtf(L.x*L.x+L.y*L.y+L.z*L.z);
+                        if (dist < 1e-6f) continue;
+                        L.x/=dist; L.y/=dist; L.z/=dist;
+                        float NdotL = fmaxf(0.f, N.x*L.x+N.y*L.y+N.z*L.z);
+                        float atten = 1.f/(dist*dist);
+                        float intensity = params.lights[li].intensity;
+                        rgb.x += baseCol.x*params.lights[li].color.x*NdotL*atten*intensity;
+                        rgb.y += baseCol.y*params.lights[li].color.y*NdotL*atten*intensity;
+                        rgb.z += baseCol.z*params.lights[li].color.z*NdotL*atten*intensity;
+                    }
+                }
+                rgb.x *= mat.opacity; rgb.y *= mat.opacity; rgb.z *= mat.opacity;
+                params.framebuffer[pixIdx] = make_float4(fmaxf(0.f,rgb.x),fmaxf(0.f,rgb.y),fmaxf(0.f,rgb.z), mat.opacity);
+                if (params.depthbuffer) params.depthbuffer[pixIdx] = 0.f;
+                return;
+            }
+
             float X=0.f, Y=0.f, Z=0.f;
             for (int s = 0; s < spp; ++s) {
                 unsigned int seed = pixIdx*1031u + s*6571u;
@@ -1645,6 +1681,89 @@ extern "C" __global__ void __raygen__spectral()
         }
 
         // Spectral with BSDF + lights + bounces
+        // ScanlineRender compat: direct RGB shading (no spectral tint)
+        if (params.scanlineCompat) {
+            float alphaAccum = 0.f;
+            float minDepth = 1e30f;
+            float rAcc=0.f, gAcc=0.f, bAcc=0.f;
+
+            for (int s = 0; s < spp; ++s) {
+                unsigned int seed = pixIdx*1031u + s*6571u;
+                float jx = hashRNG(seed); float jy = hashRNG(seed+1u);
+                if (params.blueNoise) {
+                    unsigned int pixSeed = py * dim.x + px;
+                    jx = fmodf(hashRNG(pixSeed*2u) + float(s)*0.7548776662f, 1.f);
+                    jy = fmodf(hashRNG(pixSeed*2u+1u) + float(s)*0.5698402909f, 1.f);
+                }
+
+                float3 origin, dir;
+                makeRay(px+jx, py+jy, W, H, origin, dir, seed + 50u);
+
+                unsigned int p0=0,p1=0,p2=0,p3=__float_as_uint(1e30f),p4=0,p5=0,p6=0;
+                optixTraverse(params.traversable, origin, dir, 1e-4f,1e30f,0.f,
+                              OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0);
+                optixReorder();
+                optixInvoke(p0,p1,p2,p3,p4,p5,p6);
+
+                float depth = __uint_as_float(p3);
+                bool isHit = (p4 > 0u);
+                if (!isHit) continue;
+
+                int matId = int(p4)-1;
+                if (matId<0||matId>=int(params.materialCount)) matId=0;
+                GPUMaterial mat = params.materials[matId];
+
+                // Resolve texture
+                float2 hitUV = make_float2(__uint_as_float(p5), __uint_as_float(p6));
+                float3 baseCol = make_float3(mat.baseColor.x, mat.baseColor.y, mat.baseColor.z);
+                if (mat.baseColorTexId >= 0 && mat.textureBlend > 0.f) {
+                    float3 texCol = sampleTextureGPU(mat.baseColorTexId, hitUV);
+                    float bl = mat.textureBlend;
+                    baseCol = make_float3(
+                        baseCol.x*(1.f-bl)+texCol.x*bl,
+                        baseCol.y*(1.f-bl)+texCol.y*bl,
+                        baseCol.z*(1.f-bl)+texCol.z*bl);
+                    mat.opacity *= sampleTextureAlphaGPU(mat.baseColorTexId, hitUV);
+                }
+                if (mat.opacity < 0.01f) continue;
+
+                float3 N = normalize3(make_float3(
+                    __uint_as_float(p0),__uint_as_float(p1),__uint_as_float(p2)));
+                float3 hitPos = make_float3(origin.x+depth*dir.x, origin.y+depth*dir.y, origin.z+depth*dir.z);
+                if (depth < minDepth) minDepth = depth;
+
+                // Direct RGB Lambert
+                float3 rgb = make_float3(0.f, 0.f, 0.f);
+                if (params.lightCount == 0) {
+                    rgb = baseCol;
+                } else {
+                    for (unsigned int li = 0; li < params.lightCount; ++li) {
+                        float3 lp = params.lights[li].position;
+                        float3 L = make_float3(lp.x-hitPos.x, lp.y-hitPos.y, lp.z-hitPos.z);
+                        float dist = sqrtf(L.x*L.x+L.y*L.y+L.z*L.z);
+                        if (dist < 1e-6f) continue;
+                        L.x/=dist; L.y/=dist; L.z/=dist;
+                        float NdotL = fmaxf(0.f, N.x*L.x+N.y*L.y+N.z*L.z);
+                        float atten = 1.f/(dist*dist);
+                        float intensity = params.lights[li].intensity;
+                        rgb.x += baseCol.x*params.lights[li].color.x*NdotL*atten*intensity;
+                        rgb.y += baseCol.y*params.lights[li].color.y*NdotL*atten*intensity;
+                        rgb.z += baseCol.z*params.lights[li].color.z*NdotL*atten*intensity;
+                    }
+                }
+                rgb.x += mat.emissiveColor.x; rgb.y += mat.emissiveColor.y; rgb.z += mat.emissiveColor.z;
+                rAcc += rgb.x * mat.opacity;
+                gAcc += rgb.y * mat.opacity;
+                bAcc += rgb.z * mat.opacity;
+                alphaAccum += mat.opacity;
+            }
+            float inv = 1.f/float(spp);
+            params.framebuffer[pixIdx] = make_float4(fmaxf(0.f,rAcc*inv),fmaxf(0.f,gAcc*inv),fmaxf(0.f,bAcc*inv),
+                                                        alphaAccum * inv);
+            if (params.depthbuffer) params.depthbuffer[pixIdx] = minDepth;
+            return;
+        }
+
         float X=0.f, Y=0.f, Z=0.f;
         float alphaAccum = 0.f;
         float minDepth = 1e30f;

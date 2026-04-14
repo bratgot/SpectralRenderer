@@ -59,6 +59,7 @@ struct SpectralCamera {
     float  adaptiveThreshold = 0.05f; // 0 = disabled, 0.05 = default
     bool   blueNoise         = true;  // R2 quasi-random sampling
     bool   scanlineCompat    = true;  // Direct RGB shading (no spectral XYZ)
+    bool   neutralBalance    = true;  // Correct spectral white balance shift
     int    projectionMode    = 0;     // 0=perspective, 1=UV, 2=spherical
 
     // UV projection lookup (CPU-rasterized, passed to GPU)
