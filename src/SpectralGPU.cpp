@@ -494,6 +494,7 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
                 gpuMats[i].fluorAbsorb     = mats[i].fluorAbsorb;
                 gpuMats[i].fluorEmit       = mats[i].fluorEmit;
                 gpuMats[i].fluorStrength   = mats[i].fluorStrength;
+                gpuMats[i].isShadowCatcher = 0;
             }
             const size_t matBytes = gpuMats.size() * sizeof(spectral_gpu::GPUMaterial);
             CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_materials), matBytes));
@@ -671,6 +672,7 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
             gpuMats[i].fluorAbsorb     = mats[i].fluorAbsorb;
             gpuMats[i].fluorEmit       = mats[i].fluorEmit;
             gpuMats[i].fluorStrength   = mats[i].fluorStrength;
+            gpuMats[i].isShadowCatcher = 0;
         }
         const size_t matBytes = gpuMats.size() * sizeof(spectral_gpu::GPUMaterial);
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_materials), matBytes));
@@ -928,6 +930,23 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     launchParams.blueNoise    = camera.blueNoise ? 1 : 0;
     launchParams.scanlineCompat = camera.scanlineCompat ? 1 : 0;
     launchParams.projectionMode = camera.projectionMode;
+    launchParams.edgeSamples    = camera.edgeSamples;
+    launchParams.wireframeEnable = camera.wireframeEnable ? 1 : 0;
+    launchParams.wireThickness  = camera.wireThickness;
+    launchParams.wireOpacity    = camera.wireOpacity;
+    launchParams.wireColor      = make_float3(camera.wireColor[0], camera.wireColor[1], camera.wireColor[2]);
+    launchParams.wireDashed     = camera.wireDashed ? 1 : 0;
+    launchParams.wireDashLength = camera.wireDashLength;
+    launchParams.wireGapLength  = camera.wireGapLength;
+    launchParams.wireNth        = camera.wireNth;
+    launchParams.wireStyle      = camera.wireStyle;
+
+    // Shadow catcher bitmask from camera
+    unsigned int scMask = 0;
+    for (int id : camera.shadowCatcherMatIds) {
+        if (id >= 0 && id < 32) scMask |= (1u << id);
+    }
+    launchParams.shadowCatcherMask = scMask;
 
     // UV projection lookup buffers
     if (_d_uvTriIndex) { cudaFree(reinterpret_cast<void*>(_d_uvTriIndex)); _d_uvTriIndex = 0; }

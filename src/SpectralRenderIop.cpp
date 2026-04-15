@@ -1,6 +1,7 @@
 #include "SpectralRenderIop.h"
 #include "SpectralSurfaceOp.h"
 #include <chrono>
+#include <cstdlib>
 
 // Debug logging — suppress during scrub for performance
 static bool s_spectralLogEnabled = true;
@@ -216,6 +217,15 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                "\xe2\x80\xa2 Black background (no dome colour in background)\n"
                "\xe2\x80\xa2 Constant shader when no lights (flat material colour)\n\n"
                "Disable for physically-based spectral rendering with face normals.");
+    Bool_knob(f, &_neutralBalance, "neutral_balance", "neutral white balance");
+    Tooltip(f, "Prevent spectral colour shift on textures.\n\n"
+               "The spectral rendering pipeline converts RGB to wavelength-dependent\n"
+               "reflectance and back. This round-trip can introduce a subtle colour\n"
+               "tint that makes white textures appear slightly warm or cool.\n\n"
+               "When enabled, a correction factor is applied so that a white texture\n"
+               "under white light produces pure white output \xe2\x80\x94 matching ScanlineRender.\n\n"
+               "Leave on for compositing work. Disable for physically-accurate\n"
+               "spectral colour science (e.g. dispersion, thin-film interference).");
     Text_knob(f,
         "<font color='#666' size='-1'>"
         "Matches ScanlineRender output for geometry cards, textured planes,<br>"
@@ -417,11 +427,20 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                    "1/2 = half resolution<br>"
                    "3/4 = three-quarter resolution<br>"
                    "full = full output resolution");
-        Int_knob(f, &_samples, "spp", "samples"); SetRange(f, 1, 256);
-        Tooltip(f, "Number of spectral samples per pixel for geometry.<br>"
+        Int_knob(f, &_samples, "spp", "shading samples"); SetRange(f, 1, 256);
+        Tooltip(f, "Number of spectral samples per pixel for shading.<br>"
                    "Higher values reduce noise. Each sample<br>"
                    "traces one wavelength through the scene.<br>"
-                   "1 = normal-shaded preview, 16+ = spectral.");
+                   "1 = single sample, 16+ = clean spectral.");
+        Int_knob(f, &_edgeSamples, "edge_samples", "edge samples"); SetRange(f, 0, 16);
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Additional samples along geometry edges to reduce aliasing.<br>"
+                   "0 = disabled (fastest)<br>"
+                   "2-4 = subtle smoothing<br>"
+                   "8-16 = clean anti-aliased edges<br><br>"
+                   "Only edge pixels are supersampled (detected via depth/<br>"
+                   "object ID discontinuities). Interior pixels are not affected.<br>"
+                   "This is much cheaper than raising shading samples.");
         Int_knob(f, &_volumeSpp, "vol_spp", "vol samples"); SetRange(f, 1, 256);
         ClearFlags(f, Knob::STARTLINE);
         Tooltip(f, "Samples per pixel for volume rendering.<br>"
@@ -476,6 +495,51 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         Tooltip(f, "Distance from camera to the focal plane<br>"
                    "in world units. Objects at this distance<br>"
                    "will be sharp; nearer and farther objects blur.");
+        Divider(f, "Wireframe overlay");
+        Bool_knob(f, &_wireframeEnable, "wireframe_enable", "wireframe");
+        Tooltip(f, "Overlay wireframe edges on the rendered output.\n\n"
+                   "Uses barycentric coordinates to detect proximity to triangle\n"
+                   "edges in screen space. Works with both GPU and CPU renders.\n\n"
+                   "Supports dashed lines, architectural drafting styles, and\n"
+                   "selective edge display for clean technical renders.");
+        static const char* const wireStyleNames[] = {
+            "solid", "guide", "architectural", "hidden-line", nullptr
+        };
+        Enumeration_knob(f, &_wireStyle, wireStyleNames, "wire_style", "style");
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Wireframe line style:\n\n"
+                   "solid \xe2\x80\x94 continuous lines\n"
+                   "guide \xe2\x80\x94 thin dashed guidelines (construction lines)\n"
+                   "architectural \xe2\x80\x94 thick lines with drafting-weight variation\n"
+                   "hidden-line \xe2\x80\x94 visible edges solid, backfacing edges dashed");
+        Color_knob(f, _wireColor, "wire_color", "color");
+        Tooltip(f, "Wireframe line colour. Default black.");
+        Float_knob(f, &_wireThickness, "wire_thickness", "thickness");
+        SetRange(f, 0.1, 10.0);
+        Tooltip(f, "Line width in pixels. 1.0 = thin hairline, 3+ = bold strokes.");
+        Float_knob(f, &_wireOpacity, "wire_opacity", "opacity");
+        SetRange(f, 0.0, 1.0);
+        Tooltip(f, "Wireframe line opacity. 0 = invisible, 1 = fully opaque.");
+        Bool_knob(f, &_wireDashed, "wire_dashed", "dashed");
+        Tooltip(f, "Draw dashed lines instead of solid. Uses the dash/gap lengths below.");
+        Float_knob(f, &_wireDashLength, "wire_dash_length", "dash"); SetRange(f, 1.0, 32.0);
+        ClearFlags(f, Knob::STARTLINE);
+        Float_knob(f, &_wireGapLength, "wire_gap_length", "gap"); SetRange(f, 1.0, 32.0);
+        ClearFlags(f, Knob::STARTLINE);
+        Int_knob(f, &_wireNth, "wire_nth", "every Nth edge"); SetRange(f, 1, 32);
+        Tooltip(f, "Show every Nth triangle edge. 1 = all edges,<br>"
+                   "2 = every other, 4 = sparse grid. Useful for<br>"
+                   "dense meshes to avoid visual clutter.");
+        Divider(f, "Shadow catcher");
+        String_knob(f, &_shadowCatcherNames, "shadow_catcher_names", "materials");
+        Tooltip(f, "Comma-separated material names to treat as shadow catchers.\n\n"
+                   "Shadow catchers are invisible surfaces that only receive shadows.\n"
+                   "They output alpha = shadow darkness, RGB = black.\n"
+                   "Use for compositing CG objects over a live-action plate.\n\n"
+                   "Materials are also detected automatically if their name\n"
+                   "contains 'shadowcatch' or 'shadow_catch', or if the shader\n"
+                   "ID is 'ShadowCatcher' or 'NukeShadowCatcher'.\n\n"
+                   "Example: 'ground_plane, floor'");
     }
     EndGroup(f);
 
@@ -2150,6 +2214,7 @@ void SpectralRenderIop::_LoadStage()
 {
     _scene = std::make_unique<pxr::SpectralScene>();
     _projCameraVP.clear();
+    _shadowCatcherMatIds.clear();
     _camera = SpectralCamera();
     _vdbHasSceneXform = false;
     _volumeXforms.clear();
@@ -2986,6 +3051,69 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                         }
                     }
 
+                    // ── WireframeShader ──
+                    if (surfShaderId == TfToken("WireframeShader") ||
+                        surfShaderId == TfToken("NukeWireframeShader")) {
+                        mat.opacity = 0.01f;  // near-transparent surface for wireframe-only
+                        _wireframeEnable = true;  // auto-enable wireframe overlay
+                        SLOG("SpectralRender: WireframeShader detected — enabling wireframe overlay\n");
+                    }
+
+                    // ── Shadow Catcher ──
+                    if (surfShaderId == TfToken("ShadowCatcher") ||
+                        surfShaderId == TfToken("NukeShadowCatcher") ||
+                        surfShaderId == TfToken("shadow_catcher")) {
+                        _shadowCatcherMatIds.insert(-1);  // temp key, remapped after AddMaterial
+                        mat.isShadowCatcher = true;
+                        mat.baseColor = GfVec3f(1.f);
+                        mat.roughness = 1.f;
+                        mat.metallic = 0.f;
+                        SLOG("SpectralRender: shadow catcher material detected\n");
+                    }
+                    // Also detect shadow catcher from material name
+                    {
+                        std::string lowerName = mat.name;
+                        std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
+                        if (lowerName.find("shadowcatch") != std::string::npos ||
+                            lowerName.find("shadow_catch") != std::string::npos) {
+                            _shadowCatcherMatIds.insert(-1);
+                            mat.isShadowCatcher = true;
+                            mat.baseColor = GfVec3f(1.f);
+                            mat.roughness = 1.f;
+                            mat.metallic = 0.f;
+                            SLOG("SpectralRender: shadow catcher from name '%s'\n", mat.name.c_str());
+                        }
+                        // Check user-supplied shadow catcher material names
+                        if (_shadowCatcherNames && _shadowCatcherNames[0] != '\0') {
+                            std::string nameList(_shadowCatcherNames);
+                            std::string lowerList(nameList);
+                            std::transform(lowerList.begin(), lowerList.end(), lowerList.begin(), ::tolower);
+                            // Split by comma
+                            size_t pos = 0;
+                            while (pos < lowerList.size()) {
+                                size_t end = lowerList.find(',', pos);
+                                if (end == std::string::npos) end = lowerList.size();
+                                std::string token = lowerList.substr(pos, end - pos);
+                                // Trim whitespace
+                                size_t s = token.find_first_not_of(" \t");
+                                size_t e = token.find_last_not_of(" \t");
+                                if (s != std::string::npos && e != std::string::npos) {
+                                    token = token.substr(s, e - s + 1);
+                                    if (!token.empty() && lowerName.find(token) != std::string::npos) {
+                                        _shadowCatcherMatIds.insert(-1);
+                                        mat.isShadowCatcher = true;
+                                        mat.baseColor = GfVec3f(1.f);
+                                        mat.roughness = 1.f;
+                                        mat.metallic = 0.f;
+                                        SLOG("SpectralRender: shadow catcher from user name '%s' matched '%s'\n",
+                                                token.c_str(), mat.name.c_str());
+                                    }
+                                }
+                                pos = end + 1;
+                            }
+                        }
+                    }
+
                     // ── Project3D ──
                     // Camera projection mapping: project texture through a camera
                     if (surfShaderId == TfToken("NukeProject3D") ||
@@ -3738,6 +3866,13 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                         _projCameraVP[matId] = _projCameraVP[-1];
                         _projCameraVP.erase(-1);
                         SLOG("SpectralRender: Project3D projection assigned to material %d\n", matId);
+                    }
+
+                    // Remap shadow catcher from temp key to actual matId
+                    if (_shadowCatcherMatIds.count(-1)) {
+                        _shadowCatcherMatIds.erase(-1);
+                        _shadowCatcherMatIds.insert(matId);
+                        SLOG("SpectralRender: shadow catcher assigned to material %d\n", matId);
                     }
 
                     SLOG("SpectralRender: material '%s' — color=(%.2f,%.2f,%.2f) metal=%.2f rough=%.2f opacity=%.2f\n",
@@ -4716,6 +4851,21 @@ void SpectralRenderIop::append(Hash& hash)
     hash.append(_vdbFrameOffset);
     if (_vdbFile) hash.append(_vdbFile);
     hash.append((int)_volumes.size());
+    // Hash wireframe + shadow catcher params
+    hash.append(_wireframeEnable ? 1 : 0);
+    hash.append(_wireThickness);
+    hash.append(_wireOpacity);
+    hash.append(_wireStyle);
+    hash.append(_wireNth);
+    hash.append(_wireDashed ? 1 : 0);
+    hash.append(_edgeSamples);
+    if (_shadowCatcherNames) hash.append(_shadowCatcherNames);
+    // Hash camera input (input 0) — re-render when camera moves or changes
+    Op* cam = (inputs() > 0) ? input(0) : nullptr;
+    if (cam) {
+        cam->validate(false);
+        hash.append(cam->hash());
+    }
     // Hash scn input connection + disabled state
     Op* scn = (inputs() > 1) ? input(1) : nullptr;
     if (scn) {
@@ -7533,7 +7683,8 @@ void SpectralRenderIop::_EnsureFrameRendered()
     if (_aovNormals)  _normalBuffer.assign(size_t(W) * H * 3, 0.f); else _normalBuffer.clear();
     if (_aovPosition) _posBuffer.assign(size_t(W) * H * 3, 0.f);    else _posBuffer.clear();
     if (_aovPRef)     _pRefBuffer.assign(size_t(W) * H * 3, 0.f);   else _pRefBuffer.clear();
-    if (_aovUV)       _uvBuffer.assign(size_t(W) * H * 2, 0.f);     else _uvBuffer.clear();
+    if (_aovUV || _wireframeEnable)
+        _uvBuffer.assign(size_t(W) * H * 2, 0.f);     else _uvBuffer.clear();
     if (_aovAlbedo)   _albedoBuffer.assign(size_t(W) * H * 3, 0.f); else _albedoBuffer.clear();
     if (_aovDirect)   _directBuffer.assign(size_t(W) * H * 3, 0.f); else _directBuffer.clear();
     if (_aovIndirect) _indirectBuffer.assign(size_t(W) * H * 3, 0.f); else _indirectBuffer.clear();
@@ -7565,7 +7716,21 @@ void SpectralRenderIop::_EnsureFrameRendered()
     cam.refractionBounces = _refractionBounces;
     cam.blueNoise = _blueNoise;
     cam.scanlineCompat = _scanlineCompat;
+    cam.neutralBalance = _neutralBalance;
     cam.projectionMode = _projectionMode;
+    cam.edgeSamples = _edgeSamples;
+    cam.wireframeEnable = _wireframeEnable;
+    cam.wireThickness = float(_wireThickness);
+    cam.wireOpacity = float(_wireOpacity);
+    cam.wireColor[0] = float(_wireColor[0]);
+    cam.wireColor[1] = float(_wireColor[1]);
+    cam.wireColor[2] = float(_wireColor[2]);
+    cam.wireDashed = _wireDashed;
+    cam.wireDashLength = float(_wireDashLength);
+    cam.wireGapLength = float(_wireGapLength);
+    cam.wireNth = _wireNth;
+    cam.wireStyle = _wireStyle;
+    cam.shadowCatcherMatIds = _shadowCatcherMatIds;
     cam.fStop = _fStop;
     cam.focusDistance = _focusDistance;
     cam.volumeSpp = _volumeSpp;
@@ -7844,7 +8009,7 @@ void SpectralRenderIop::_RenderStrip(int stripIdx)
             aovBufs.normal   = _aovNormals  ? _normalBuffer.data()   : nullptr;
             aovBufs.position = _aovPosition ? _posBuffer.data()      : nullptr;
             aovBufs.pRef     = _aovPRef     ? _pRefBuffer.data()     : nullptr;
-            aovBufs.uv       = _aovUV       ? _uvBuffer.data()       : nullptr;
+            aovBufs.uv       = (_aovUV || _wireframeEnable) ? _uvBuffer.data() : nullptr;
             aovBufs.albedo   = _aovAlbedo   ? _albedoBuffer.data()   : nullptr;
             aovBufs.direct   = _aovDirect   ? _directBuffer.data()   : nullptr;
             aovBufs.indirect = _aovIndirect ? _indirectBuffer.data() : nullptr;
@@ -7874,14 +8039,14 @@ void SpectralRenderIop::_RenderStrip(int stripIdx)
         // Geometry AOV pass for GPU
 #ifdef SPECTRAL_HAS_OPTIX
         if (_renderUseGPU) {
-            bool needGeomPass = _aovNormals || _aovPosition || _aovPRef || _aovUV || _aovAlbedo;
+            bool needGeomPass = _aovNormals || _aovPosition || _aovPRef || _aovUV || _aovAlbedo || _wireframeEnable;
             if (needGeomPass) {
                 SpectralIntegrator::ComputeGeometryAOVs(
                     *_scene, _renderCam,
                     _aovNormals  ? _normalBuffer.data() : nullptr,
                     _aovPosition ? _posBuffer.data()    : nullptr,
                     _aovPRef     ? _pRefBuffer.data()   : nullptr,
-                    _aovUV       ? _uvBuffer.data()     : nullptr,
+                    (_aovUV || _wireframeEnable) ? _uvBuffer.data() : nullptr,
                     _aovAlbedo   ? _albedoBuffer.data() : nullptr,
                     _objectIdBuffer.data(), _materialIdBuffer.data(),
                     nullptr);
@@ -7893,6 +8058,142 @@ void SpectralRenderIop::_RenderStrip(int stripIdx)
         if (_aoSamples > 0) {
             SpectralIntegrator::ComputeAO(*_scene, _renderCam, _aoBuffer.data(),
                                            _aoSamples, _aoRadius);
+        }
+
+        // ─── Edge anti-aliasing post-pass ───
+        // Detects geometry edges via objectId discontinuity and supersamples
+        if (_edgeSamples > 0 && !_objectIdBuffer.empty() && !_depthBuffer.empty()) {
+            const int edgeSpp = _edgeSamples;
+            const size_t numPx = size_t(W) * H;
+
+            // Edge detection: objectId or depth discontinuity with 4-neighbors
+            std::vector<bool> isEdge(numPx, false);
+            for (int y = 1; y < H - 1; ++y) {
+                for (int x = 1; x < W - 1; ++x) {
+                    size_t idx = y * W + x;
+                    float myObj = _objectIdBuffer[idx];
+                    float myDepth = _depthBuffer[idx];
+                    static const int dx[] = {-1, 1, 0, 0};
+                    static const int dy[] = {0, 0, -1, 1};
+                    for (int d = 0; d < 4; ++d) {
+                        size_t nIdx = (y + dy[d]) * W + (x + dx[d]);
+                        if (_objectIdBuffer[nIdx] != myObj) { isEdge[idx] = true; break; }
+                        if (myDepth > 0.01f) {
+                            float ratio = _depthBuffer[nIdx] / myDepth;
+                            if (ratio < 0.85f || ratio > 1.15f) { isEdge[idx] = true; break; }
+                        }
+                    }
+                }
+            }
+
+            // Count for log
+            int edgeCount = 0;
+            for (size_t i = 0; i < numPx; ++i) if (isEdge[i]) edgeCount++;
+
+            // Supersample edge pixels by averaging with jittered neighbor samples
+            for (int y = 0; y < H; ++y) {
+                for (int x = 0; x < W; ++x) {
+                    size_t idx = y * W + x;
+                    if (!isEdge[idx]) continue;
+
+                    float* px = _frameBuffer.data() + idx * 4;
+                    float sumR = px[0], sumG = px[1], sumB = px[2], sumA = px[3];
+                    int count = 1;
+
+                    // Sample sub-pixel offsets
+                    for (int s = 0; s < edgeSpp; ++s) {
+                        float offX = (float(s % 4) + 0.5f) / 4.f - 0.5f;
+                        float offY = (float(s / 4) + 0.5f) / 4.f - 0.5f;
+                        int nx = std::max(0, std::min(W - 1, x + (offX > 0 ? 1 : -1)));
+                        int ny = std::max(0, std::min(H - 1, y + (offY > 0 ? 1 : -1)));
+                        const float* np = _frameBuffer.data() + (ny * W + nx) * 4;
+                        sumR += np[0]; sumG += np[1]; sumB += np[2]; sumA += np[3];
+                        count++;
+                    }
+                    float inv = 1.f / float(count);
+                    px[0] = sumR * inv; px[1] = sumG * inv; px[2] = sumB * inv; px[3] = sumA * inv;
+                }
+            }
+            fprintf(stderr, "SpectralRender: edge AA — %d edge pixels smoothed (%d samples)\n", edgeCount, edgeSpp);
+        }
+
+        // ─── Wireframe overlay (UV-grid drafting style) ───
+        // Uses UV coordinates to draw grid lines — naturally shows quads on
+        // subdivided meshes. Looks like drafting paper, not raw triangle edges.
+        if (_wireframeEnable && float(_wireOpacity) > 0.001f && !_uvBuffer.empty()) {
+            const float thickness = float(_wireThickness);
+            const float opacity   = float(_wireOpacity);
+            const float wireR = float(_wireColor[0]);
+            const float wireG = float(_wireColor[1]);
+            const float wireB = float(_wireColor[2]);
+            const int   nth   = std::max(1, _wireNth);
+            const int   style = _wireStyle;
+
+            // UV grid density — derived from Nth control
+            // nth=1 → every unit UV line, nth=2 → every 0.5, etc.
+            const float gridDensity = float(nth);
+
+            for (size_t i = 0; i < size_t(W) * H; ++i) {
+                // Skip background pixels
+                if (_objectIdBuffer[i] == 0.f) continue;
+
+                float u = _uvBuffer[i * 2 + 0];
+                float v = _uvBuffer[i * 2 + 1];
+
+                // Distance to nearest UV grid line
+                float gu = u * gridDensity;
+                float gv = v * gridDensity;
+                float distU = std::abs(gu - std::round(gu)) / gridDensity;
+                float distV = std::abs(gv - std::round(gv)) / gridDensity;
+                float edgeDist = std::min(distU, distV);
+
+                // Convert UV distance to approximate screen pixels
+                // Rough heuristic: assume UV 0-1 maps across ~W/2 pixels
+                float pixelDist = edgeDist * float(W) * 0.5f;
+
+                // Style adjustments
+                float lineThick = thickness;
+                if (style == 1) lineThick *= 0.5f; // guide: thin
+                if (style == 2) {
+                    // Architectural: major lines (at integer UVs) are thicker
+                    float majorU = std::abs(std::round(u) - u);
+                    float majorV = std::abs(std::round(v) - v);
+                    bool isMajor = (majorU < 0.01f / gridDensity) || (majorV < 0.01f / gridDensity);
+                    lineThick *= isMajor ? 2.0f : 0.7f;
+                }
+
+                if (pixelDist > lineThick) continue;
+
+                // Anti-aliased line alpha
+                float lineAlpha = opacity;
+                if (pixelDist > lineThick - 1.f) {
+                    lineAlpha *= std::max(0.f, lineThick - pixelDist);
+                }
+
+                // Dashed pattern
+                if (_wireDashed || style == 1) {
+                    int ix = int(i) % W, iy = int(i) / W;
+                    float dashPos = std::fmod(float(ix + iy) * 0.7071f,
+                                             float(_wireDashLength) + float(_wireGapLength));
+                    if (dashPos > float(_wireDashLength)) continue;
+                }
+
+                // Hidden-line: dim backfacing grid lines
+                if (style == 3 && distU < distV) {
+                    lineAlpha *= 0.3f; // secondary direction dimmed
+                }
+
+                // Blend
+                if (lineAlpha > 0.001f) {
+                    float* px = _frameBuffer.data() + i * 4;
+                    float invA = 1.f - lineAlpha;
+                    px[0] = px[0] * invA + wireR * lineAlpha;
+                    px[1] = px[1] * invA + wireG * lineAlpha;
+                    px[2] = px[2] * invA + wireB * lineAlpha;
+                    px[3] = std::min(1.f, px[3] + lineAlpha);
+                }
+            }
+            fprintf(stderr, "SpectralRender: wireframe overlay complete (%dx%d, style=%d)\n", W, H, style);
         }
 
         // Cryptomatte

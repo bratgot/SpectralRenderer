@@ -43,6 +43,8 @@ struct GPUMaterial {
     float  fluorAbsorb;      // absorption center wavelength (nm)
     float  fluorEmit;        // emission center wavelength (nm)
     float  fluorStrength;    // intensity, 0=disabled
+    // Shadow catcher
+    int    isShadowCatcher;  // 1 = shadow catcher material
 };
 
 // GPU-side texture (header only — pixel data is a separate device buffer)
@@ -187,6 +189,21 @@ struct LaunchParams {
     int                blueNoise;        // 1 = R2 sampling, 0 = random
     int                scanlineCompat;   // 1 = direct RGB shading (no spectral XYZ)
     int                projectionMode;   // 0=perspective, 1=UV, 2=spherical
+    int                edgeSamples;      // edge AA supersamples (0=disabled)
+
+    // Wireframe overlay
+    int                wireframeEnable;
+    float              wireThickness;
+    float              wireOpacity;
+    float3             wireColor;
+    int                wireDashed;
+    float              wireDashLength;
+    float              wireGapLength;
+    int                wireNth;
+    int                wireStyle;  // 0=solid,1=guide,2=architectural,3=hidden-line
+
+    // Shadow catcher: bitmask of material IDs (supports up to 32 materials)
+    unsigned int       shadowCatcherMask;
 
     // UV projection lookup (one entry per pixel, built CPU-side)
     int*               uvTriIndex;      // triangle index per pixel (-1 = empty)

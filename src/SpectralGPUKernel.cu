@@ -1492,88 +1492,9 @@ extern "C" __global__ void __raygen__spectral()
             return;
         }
 
-        // Normal-as-colour (or volume density preview for spp=1)
-        float3 origin, dir;
-        unsigned int dofSeed = pixIdx * 7919u;
-        makeRay(px+0.5f, py+0.5f, W, H, origin, dir, dofSeed);
-        unsigned int p0=0,p1=0,p2=0,p3=__float_as_uint(1e30f),p4=0,p5=0,p6=0;
-
-        // Hit Object API: traverse → reorder → invoke (SER for volume coherence)
-        optixTraverse(params.traversable, origin, dir, 1e-4f,1e30f,0.f,
-                      OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0);
-        optixReorder();
-        optixInvoke(p0,p1,p2,p3,p4,p5,p6);
-
-        float r = __uint_as_float(p0);
-        float g = __uint_as_float(p1);
-        float b = __uint_as_float(p2);
-        bool spp1Hit = (p4 > 0u);
-
-        // ScanlineRender compat: no lights = constant shader (flat colour)
-        if (spp1Hit && params.scanlineCompat && params.lightCount == 0) {
-            int cMatId = int(p4)-1;
-            if (cMatId>=0 && cMatId<int(params.materialCount)) {
-                GPUMaterial cMat = params.materials[cMatId];
-                // Apply texture
-                if (cMat.baseColorTexId >= 0 && cMat.textureBlend > 0.f) {
-                    float2 cUV = make_float2(__uint_as_float(p5), __uint_as_float(p6));
-                    float3 texCol = sampleTextureGPU(cMat.baseColorTexId, cUV);
-                    float bl = cMat.textureBlend;
-                    cMat.baseColor = make_float3(
-                        cMat.baseColor.x*(1.f-bl)+texCol.x*bl,
-                        cMat.baseColor.y*(1.f-bl)+texCol.y*bl,
-                        cMat.baseColor.z*(1.f-bl)+texCol.z*bl);
-                }
-                r = cMat.baseColor.x; g = cMat.baseColor.y; b = cMat.baseColor.z;
-            }
-        }
-
-        // Background: black for compositing (dome comes through bounce paths)
-        if (!spp1Hit) {
-            r = 0.f; g = 0.f; b = 0.f;
-        }
-
-        // Alpha from material opacity (texture alpha)
-        float spp1Alpha = 0.f;
-        if (spp1Hit) {
-            spp1Alpha = 1.f;
-            int sMatId = int(p4)-1;
-            if (sMatId>=0 && sMatId<int(params.materialCount)) {
-                spp1Alpha = params.materials[sMatId].opacity;
-                if (params.materials[sMatId].baseColorTexId >= 0 && params.materials[sMatId].textureBlend > 0.f) {
-                    float2 sUV = make_float2(__uint_as_float(p5), __uint_as_float(p6));
-                    spp1Alpha *= sampleTextureAlphaGPU(params.materials[sMatId].baseColorTexId, sUV);
-                }
-            }
-            // Alpha cutout: transparent texture = no shading
-            if (spp1Alpha < 0.01f) {
-                r = 0.f; g = 0.f; b = 0.f;
-                spp1Hit = false;
-            } else if (spp1Alpha < 0.99f) {
-                // Premultiply color by alpha for compositing
-                r *= spp1Alpha; g *= spp1Alpha; b *= spp1Alpha;
-            }
-        }
-        if (params.numGpuVolumes > 0) {
-            float surfT = spp1Hit ? __uint_as_float(p3) : 1e30f;
-            float3 volRGB = make_float3(0.f,0.f,0.f); float volTrans = 1.f;
-            marchVolume(origin, dir, surfT, 550.f, dofSeed + 200u, volRGB, volTrans);
-            r = volRGB.x + volTrans * r;
-            g = volRGB.y + volTrans * g;
-            b = volRGB.z + volTrans * b;
-            spp1Alpha = 1.f - volTrans * (1.f - spp1Alpha);
-        }
-
-        params.framebuffer[pixIdx] = make_float4(r, g, b, spp1Alpha);
-        if (params.depthbuffer) {
-            float d = __uint_as_float(p3);
-            // Volume depth fallback: if no surface hit but volume had contribution
-            if (d >= 1e29f && params.numGpuVolumes > 0 && spp1Alpha > 0.001f) {
-                d = volumeFirstDenseT(origin, dir);
-            }
-            params.depthbuffer[pixIdx] = d;
-        }
-    } else {
+        // spp=1: fall through to multi-spp path for real single-sample render
+    }
+    {
         // ── UV projection mode (multi-SPP) ──
         if (params.projectionMode == 1 && params.uvTriIndex) {
             int triIdx = params.uvTriIndex[pixIdx];
@@ -1735,6 +1656,32 @@ extern "C" __global__ void __raygen__spectral()
 
                 // Direct RGB Lambert
                 float3 rgb = make_float3(0.f, 0.f, 0.f);
+
+                // Shadow catcher: compute shadow only
+                bool isSC = (matId < 32) && (params.shadowCatcherMask & (1u << matId));
+                if (isSC) {
+                    float shadow = 0.f;
+                    for (unsigned int li = 0; li < params.lightCount; ++li) {
+                        float3 lp = params.lights[li].position;
+                        float3 L = make_float3(lp.x-hitPos.x, lp.y-hitPos.y, lp.z-hitPos.z);
+                        float dist = sqrtf(L.x*L.x+L.y*L.y+L.z*L.z);
+                        if (dist < 1e-6f) continue;
+                        L.x/=dist; L.y/=dist; L.z/=dist;
+                        float NdotL = fmaxf(0.f, N.x*L.x+N.y*L.y+N.z*L.z);
+                        if (NdotL < 0.001f) { shadow += 1.f; continue; }
+                        // Shadow ray
+                        float3 sOrig = make_float3(hitPos.x+N.x*0.001f, hitPos.y+N.y*0.001f, hitPos.z+N.z*0.001f);
+                        unsigned int sp0=0,sp1=0,sp2=0,sp3=__float_as_uint(1e30f),sp4=0,sp5=0,sp6=0;
+                        optixTrace(params.traversable, sOrig, L, 0.001f, dist-0.002f, 0.f,
+                                   OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
+                                   0,1,0, sp0,sp1,sp2,sp3,sp4,sp5,sp6);
+                        if (sp4 > 0u) shadow += 1.f;
+                    }
+                    float sFactor = params.lightCount > 0 ? shadow / float(params.lightCount) : 0.f;
+                    alphaAccum += sFactor;
+                    continue;  // no RGB contribution
+                }
+
                 if (params.lightCount == 0) {
                     rgb = baseCol;
                 } else {
@@ -1854,6 +1801,30 @@ extern "C" __global__ void __raygen__spectral()
 
                 float3 hitPos = make_float3(origin.x+depth*dir.x, origin.y+depth*dir.y, origin.z+depth*dir.z);
                 if (depth < minDepth) minDepth = depth;
+
+                // Shadow catcher: shadow-only alpha, no radiance
+                bool isSC = (matId < 32) && (params.shadowCatcherMask & (1u << matId));
+                if (isSC) {
+                    float shadow = 0.f;
+                    for (unsigned int li = 0; li < params.lightCount; ++li) {
+                        float3 lp = params.lights[li].position;
+                        float3 L = make_float3(lp.x-hitPos.x, lp.y-hitPos.y, lp.z-hitPos.z);
+                        float dist = sqrtf(L.x*L.x+L.y*L.y+L.z*L.z);
+                        if (dist < 1e-6f) continue;
+                        L.x/=dist; L.y/=dist; L.z/=dist;
+                        float NdotL = fmaxf(0.f, N.x*L.x+N.y*L.y+N.z*L.z);
+                        if (NdotL < 0.001f) { shadow += 1.f; continue; }
+                        float3 sOrig = make_float3(hitPos.x+N.x*0.001f, hitPos.y+N.y*0.001f, hitPos.z+N.z*0.001f);
+                        unsigned int sp0=0,sp1=0,sp2=0,sp3=__float_as_uint(1e30f),sp4=0,sp5=0,sp6=0;
+                        optixTrace(params.traversable, sOrig, L, 0.001f, dist-0.002f, 0.f,
+                                   OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
+                                   0,1,0, sp0,sp1,sp2,sp3,sp4,sp5,sp6);
+                        if (sp4 > 0u) shadow += 1.f;
+                    }
+                    float sFactor = params.lightCount > 0 ? shadow / float(params.lightCount) : 0.f;
+                    alphaAccum += sFactor;
+                    continue;  // no spectral contribution
+                }
 
                 // Direct lighting at primary hit (scaled by opacity for premultiplied alpha)
                 unsigned int shadowSeed = seed + 50u;
@@ -2066,16 +2037,9 @@ extern "C" __global__ void __closesthit__spectral()
     int matId = getHitMaterialId();
     float2 hitUV = getHitUV();
 
-    if (params.spp <= 1) {
-        float3 c = shadeNormal(normal);
-        optixSetPayload_0(__float_as_uint(c.x));
-        optixSetPayload_1(__float_as_uint(c.y));
-        optixSetPayload_2(__float_as_uint(c.z));
-    } else {
-        optixSetPayload_0(__float_as_uint(normal.x));
-        optixSetPayload_1(__float_as_uint(normal.y));
-        optixSetPayload_2(__float_as_uint(normal.z));
-    }
+    optixSetPayload_0(__float_as_uint(normal.x));
+    optixSetPayload_1(__float_as_uint(normal.y));
+    optixSetPayload_2(__float_as_uint(normal.z));
     optixSetPayload_3(__float_as_uint(tHit));
     optixSetPayload_4(static_cast<unsigned int>(matId+1));
     optixSetPayload_5(__float_as_uint(hitUV.x));

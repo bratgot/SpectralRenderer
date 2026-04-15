@@ -20,6 +20,7 @@ PXR_NAMESPACE_USING_DIRECTIVE
 #include <DDImage/DeepOp.h>
 #include <DDImage/Knobs.h>
 #include <DDImage/Row.h>
+#include <unordered_set>
 #include <map>
 #include <DDImage/Format.h>
 #include <DDImage/ViewerContext.h>
@@ -134,10 +135,25 @@ private:
     // Knobs
     const char* _usdFilePath = "";
     int   _frame      = 1;
-    int   _samples    = 4;            // spectral needs 2+ (default 4)
+    int   _samples    = 4;            // shading samples (spectral needs 2+)
+    int   _edgeSamples = 0;           // edge AA samples (0=disabled, 2-16)
     int   _volumeSpp  = 0;            // 0 = use _samples, else separate vol spp
     int   _maxBounces = 4;
     int   _refractionBounces = 8;  // separate limit for glass paths
+
+    // Wireframe overlay
+    bool   _wireframeEnable = false;
+    double _wireThickness = 1.0;      // pixel width
+    double _wireOpacity = 1.0;
+    double _wireColor[3] = {0, 0, 0}; // black default
+    bool   _wireDashed = false;
+    double _wireDashLength = 8.0;     // pixels
+    double _wireGapLength = 4.0;      // pixels
+    int    _wireNth = 1;              // show every Nth edge (1=all)
+    int    _wireStyle = 0;            // 0=solid, 1=guide, 2=architectural, 3=hidden-line
+
+    // Shadow catcher
+    const char* _shadowCatcherNames = "";  // comma-separated material names
 
     // Built-in lighting rig
     bool   _useBuiltinLight = true;  // enable built-in sun/sky when no EnvLight connected
@@ -250,6 +266,7 @@ private:
 
     // VDB viewport preview
     bool   _scanlineCompat = true;  // ScanlineRender compatible mode
+    bool   _neutralBalance = true;  // Correct spectral white balance
     bool   _vdb3dPreview = true;   // true = SpectralRender draws its own GL preview
     bool   _vdbShowBbox = true;
     bool   _vdbShowPoints = true;
@@ -293,6 +310,7 @@ private:
 
     // Project3D: per-material projection camera matrices
     std::unordered_map<int, pxr::GfMatrix4d> _projCameraVP;  // matId → viewProjection
+    std::unordered_set<int> _shadowCatcherMatIds;  // materials acting as shadow catchers
     GLuint _glVolTempTex = 0;
     int    _glVolTexFrame = -1;
     int    _glVolTexResX = 0, _glVolTexResY = 0, _glVolTexResZ = 0;

@@ -67,6 +67,9 @@ struct SpectralMaterial
     GfVec3f sssColor       = GfVec3f(0.f);  // scattering colour (0=disabled)
     float   sssRadius      = 0.f;   // mean free path (world units, 0=disabled)
 
+    // Shadow catcher
+    bool    isShadowCatcher = false; // receives shadows only, transparent where lit
+
     // Identifier
     std::string name = "default";
 

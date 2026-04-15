@@ -33,6 +33,7 @@
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/gf/ray.h>
+#include <unordered_set>
 
 #include <vector>
 #include <functional>
@@ -61,6 +62,21 @@ struct SpectralCamera {
     bool   scanlineCompat    = true;  // Direct RGB shading (no spectral XYZ)
     bool   neutralBalance    = true;  // Correct spectral white balance shift
     int    projectionMode    = 0;     // 0=perspective, 1=UV, 2=spherical
+    int    edgeSamples       = 0;     // Edge AA supersamples (0=disabled)
+
+    // Wireframe overlay
+    bool   wireframeEnable   = false;
+    float  wireThickness     = 1.f;
+    float  wireOpacity       = 1.f;
+    float  wireColor[3]      = {0.f, 0.f, 0.f};
+    bool   wireDashed        = false;
+    float  wireDashLength    = 8.f;
+    float  wireGapLength     = 4.f;
+    int    wireNth           = 1;
+    int    wireStyle         = 0;  // 0=solid, 1=guide, 2=architectural, 3=hidden-line
+
+    // Shadow catcher material IDs
+    std::unordered_set<int> shadowCatcherMatIds;
 
     // UV projection lookup (CPU-rasterized, passed to GPU)
     const int*   uvTriIndex  = nullptr;

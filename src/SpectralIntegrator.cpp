@@ -381,6 +381,41 @@ void SpectralIntegrator::RenderFrame(
                                     // Direct RGB Lambert shading
                                     GfVec3f rgb(0.f);
                                     const auto& lights = scene.GetLights();
+
+                                    // Shadow catcher: compute shadow only, transparent otherwise
+                                    bool isShadowCatcher = camera.shadowCatcherMatIds.count(hit.tri->materialId) > 0;
+                                    if (isShadowCatcher) {
+                                        float shadow = 0.f;
+                                        for (const auto& light : lights) {
+                                            GfVec3f L = light.position - hitPos;
+                                            float dist = L.GetLength();
+                                            if (dist < 1e-6f) continue;
+                                            L /= dist;
+                                            float NdotL = std::max(0.f, N[0]*L[0] + N[1]*L[1] + N[2]*L[2]);
+                                            if (NdotL < 0.001f) { shadow += 1.f; continue; }
+                                            // Shadow ray
+                                            GfRay shadowRay(GfVec3d(hitPos) + GfVec3d(N)*0.001, GfVec3d(L));
+                                            SpectralBVH::Hit sHit = bvh.Intersect(shadowRay, 0.f);
+                                            if (sHit.valid() && sHit.t < dist) {
+                                                shadow += 1.f;  // in shadow
+                                            }
+                                        }
+                                        float shadowFactor = lights.empty() ? 0.f : shadow / float(lights.size());
+                                        accX[pixIdx] += 0.f;
+                                        accY[pixIdx] += 0.f;
+                                        accZ[pixIdx] += 0.f;
+                                        accCount[pixIdx]++;
+                                        accAlpha[pixIdx] += shadowFactor;  // alpha = shadow darkness
+                                        GfVec3d viewHit2 = worldToView.Transform(worldHit);
+                                        float camZ2 = static_cast<float>(-viewHit2[2]);
+                                        if (camZ2 < depthBuf[pixIdx]) depthBuf[pixIdx] = camZ2;
+                                        if (objIdBuf[pixIdx] == 0) {
+                                            objIdBuf[pixIdx] = hit.tri->objectId;
+                                            matIdBuf[pixIdx] = hit.tri->materialId;
+                                        }
+                                        continue;
+                                    }
+
                                     if (lights.empty()) {
                                         // No lights = constant shader
                                         rgb = baseCol;
@@ -417,6 +452,38 @@ void SpectralIntegrator::RenderFrame(
                                     GfVec3d viewHit2 = worldToView.Transform(worldHit);
                                     float camZ2 = static_cast<float>(-viewHit2[2]);
                                     if (camZ2 < depthBuf[pixIdx]) depthBuf[pixIdx] = camZ2;
+                                    if (objIdBuf[pixIdx] == 0) {
+                                        objIdBuf[pixIdx] = hit.tri->objectId;
+                                        matIdBuf[pixIdx] = hit.tri->materialId;
+                                    }
+                                    continue;
+                                }
+
+                                // Shadow catcher: shadow-only alpha, no radiance
+                                if (camera.shadowCatcherMatIds.count(hit.tri->materialId) > 0) {
+                                    float bw = 1.f - float(hit.u) - float(hit.v);
+                                    GfVec3f N = hit.tri->n0 * bw + hit.tri->n1 * float(hit.u) + hit.tri->n2 * float(hit.v);
+                                    float nlen = N.GetLength();
+                                    if (nlen > 1e-6f) N /= nlen;
+                                    float shadow = 0.f;
+                                    const auto& lights = scene.GetLights();
+                                    for (const auto& light : lights) {
+                                        GfVec3f L = light.position - hitPos;
+                                        float dist = L.GetLength();
+                                        if (dist < 1e-6f) continue;
+                                        L /= dist;
+                                        float NdotL = std::max(0.f, N[0]*L[0] + N[1]*L[1] + N[2]*L[2]);
+                                        if (NdotL < 0.001f) { shadow += 1.f; continue; }
+                                        GfRay shadowRay(GfVec3d(hitPos) + GfVec3d(N) * 0.001, GfVec3d(L));
+                                        SpectralBVH::Hit sHit = bvh.Intersect(shadowRay, 0.f);
+                                        if (sHit.valid() && sHit.t < dist) shadow += 1.f;
+                                    }
+                                    float sFactor = lights.empty() ? 0.f : shadow / float(lights.size());
+                                    accAlpha[pixIdx] += sFactor;
+                                    accCount[pixIdx]++;
+                                    GfVec3d viewHit = worldToView.Transform(worldHit);
+                                    float camZ = static_cast<float>(-viewHit[2]);
+                                    if (camZ < depthBuf[pixIdx]) depthBuf[pixIdx] = camZ;
                                     if (objIdBuf[pixIdx] == 0) {
                                         objIdBuf[pixIdx] = hit.tri->objectId;
                                         matIdBuf[pixIdx] = hit.tri->materialId;
@@ -1083,6 +1150,9 @@ void SpectralIntegrator::RenderFrame(
                 write3(aovs->transmission,    accTransX[i],   accTransY[i],   accTransZ[i]);
             }
         }
+
+        // Edge AA and wireframe overlay are applied as post-processes in the Iop
+        // (works for both CPU and GPU renders)
 
         // ---- Ambient occlusion pass ----
         if (aoOut && camera.aoSamples > 0) {
