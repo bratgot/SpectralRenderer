@@ -59,7 +59,7 @@ rather than priority. Treat them as labels.
 | **25**| Validation suite & showcase assets | Pending |
 | **28**| Gravitational lensing, Einstein ring | Future |
 | **29**| Hydra render delegate (HdSpectral) full | Future |
-| **30**| Object motion blur (CPU done, GPU pending) | Partial |
+| **30**| Object motion blur (CPU+GPU) | Done |
 | **31**| Linux build (GCC/Clang) | Pending |
 | **32**| Marketing website / product page | Pending |
 
@@ -68,6 +68,40 @@ rather than priority. Treat them as labels.
 ## Near-term backlog (next 1-3 sessions)
 
 Ordered roughly by value. Nothing here is committed; reorder as needed.
+
+### SpectralVelocity node (deformation motion blur)
+
+Currently we capture motion from transform chains (GeoTransform animation) but
+not from vertex-level deformation -- animated geometry where individual points
+move relative to the object (cloth sim, morph targets, rigged characters,
+procedural deformation). For true per-vertex motion blur we need an explicit
+velocity attribute.
+
+A `SpectralVelocity` GeomOp would:
+- Sample mesh points at frame t and t+1 (or t-0.5 / t+0.5 for centered).
+- Compute per-vertex velocity = (pt_close - pt_open) * fps, stored as a
+  float3 primvar (Houdini names it `v`, same convention works here).
+- Write it onto the USD mesh as a `primvars:velocities` attribute so it
+  survives the scene graph into `_LoadFromPxrStage`.
+
+SpectralRenderIop changes:
+- Read the velocity primvar alongside points when building SpectralTriangles.
+  If present and object motion blur is on, set each triangle's `v*_close`
+  from `point + v * shutterInterval` rather than from the chain-walk xform.
+  Per-triangle `hasMotion` flag becomes true when any of its vertices has
+  nonzero velocity, OR the transform chain has motion (both paths compose
+  -- rigid xform motion multiplies through velocity).
+- Existing chain-walk path continues to drive rigid-body motion for static
+  meshes; velocity path drives deformation on top.
+
+GPU side: no kernel changes -- the motion GAS already takes arbitrary
+per-vertex close positions, so cloth / rigged characters "just work" once
+the close vertices carry the deformed positions.
+
+Reference: Houdini's Trail SOP in velocity mode, or the `v` attribute
+convention in Alembic / USD / VDB point caches. The node should accept
+either "compute from animation" (needs a 2-frame sample) or "passthrough
+existing v attribute" (for sim caches that already carry velocity).
 
 ### Finish SpectralMeshProperties wiring
 
@@ -92,36 +126,6 @@ why the current approach is brittle with multiple modifier nodes.
 Glass containing smoke / fire / fog. Currently refraction rays see the
 volume as empty space. Needs the refraction path to call the volume
 integrator between hits, not just surface-to-surface.
-
-### GPU object motion blur (Phase 30 completion)
-
-CPU path is fully wired: `SpectralTriangle::v*_close` + `hasMotion` + two-
-timestep Embree motion BVH + per-sample `rayTime ∈ [shutterOpen,
-shutterClose]` threaded through primary / shadow / transmission / bounce.
-Works end-to-end today; the new `object_motion_blur` toggle lets users
-opt out for reference frames.
-
-GPU path falls back to CPU when object motion blur is active. To finish:
-
-- **SpectralGPU::BuildAccel**: detect scene motion (any tri with
-  `hasMotion`), build GAS with two vertex buffers and
-  `OptixMotionOptions { numKeys = 2, timeBegin = 0, timeEnd = 1,
-  flags = OPTIX_MOTION_FLAG_NONE }`. Vertex buffer at time 1 uses
-  `v*_close` positions.
-- **Pipeline compile options**: `usesMotionBlur = true` whenever the
-  current GAS has motion keys. Requires pipeline rebuild on scene motion
-  state change; cheap since it only happens when the scene topology
-  changes.
-- **SpectralGPUKernel.cu**: each `optixTrace` call gets a `rayTime`
-  argument (it's the 6th arg, inserted between `tmax` and `mask`).
-  Generate `rayTime = shutterOpen + hashRNG * (shutterClose - shutterOpen)`
-  in `__raygen__spectral`, thread it through shadow / transmission /
-  bounce calls (same pattern as CPU).
-- **Fallback removal**: drop the `useGPU = false` gate in
-  `SpectralRenderIop` once the kernel path is complete.
-
-Estimated 100-150 lines across the three files. The bones are ready, it's
-mostly wiring + testing against known-good CPU output.
 
 ### Emission from volumes lighting geometry
 
@@ -152,65 +156,34 @@ Curated spectral material presets as a picker menu:
 - Skin (with matching SSS profile)
 - Common plastics, ceramics, woods
 
-### SpectralShaderMerge (shader combining)
-
-Currently a mesh binds exactly one ShaderOp via GeoBindMaterial. There's no
-clean way to combine, say, SpectralSurface + SpectralWireframe on the same
-geometry -- SpectralWireframe happens to work alongside surface shaders
-today only because SpectralRenderIop detects the wireframe shader by prim
-path and applies the overlay as a post-process. That's a workaround, not a
-model.
-
-A SpectralShaderMerge node would take N ShaderOp inputs and emit a single
-combined shader downstream. Use cases:
-
-- **Layered overlays**: SpectralSurface + SpectralWireframe as a single
-  combined shader, cleanly bound once. Same pattern for
-  SpectralShadowCatcher-as-overlay and any future non-photoreal passes.
-- **Material blending**: two SpectralSurfaces mixed by alpha / mask input
-  (worn paint over metal, dirt over plastic, frost over glass).
-- **Modifier stacking**: SpectralSurface as base + a diffraction node +
-  a fluorescence node, each contributing a specific spectral effect
-  without requiring every knob to live on one monolithic SpectralSurface.
-
-Design questions worth thinking through before building:
-
-- Do we combine at the USD shader graph level (let UsdPreviewSurface and
-  friends be the merge surface) or at the SpectralRenderIop material-resolve
-  level (merge in the registry read)?
-- Alpha-blend mode: spatial mask from texture input, constant slider, or
-  per-channel control?
-- Does merge commute? (Surface + Wireframe vs Wireframe + Surface -- should
-  wireframe always draw on top, or should input order matter?)
-- Registry implications: a merge node is itself a ShaderOp; does it own
-  a registry entry that references its inputs' entries, or does it flatten
-  them at resolve time?
-
-Low priority until we have a concrete user pull. But worth sketching the
-design before Phase 18 lands, because a materials library built around
-combining primitives is more composable than one of monolithic presets.
-
 ---
 
 ## Technical debt / known issues
 
 Tracked here so we don't forget. Each line is roughly the shape of an issue.
 
+- **SpectralDrafting doesn't motion blur**: the overlay is a post-process
+  pass applied per-pixel after primary hit, using current-frame geometry.
+  With object motion blur on, primary hits are temporally jittered across
+  the shutter but the drafting overlay is stamped once using static screen-
+  space coordinates -- lines stay crisp while the underlying shaded surface
+  smears beneath them. Fix needs either (a) sampling the overlay per
+  rayTime sample in the kernel (expensive -- re-evaluating edge distances
+  per sample), or (b) computing an overlay motion mask and applying a
+  directional blur to the overlay output correlated with the scene's pixel
+  velocity. (b) is cheaper and closer to how 2D post-process line-art
+  typically works in compositing.
 - **SpectralMeshProperties path matching**: `size() == 1` fallback is brittle;
   breaks with >1 modifier node. Fix in `processScenegraph` via prim-path
   registration. Tagged with `TODO` in `SpectralRenderIop.cpp`.
-- **Registry cleanup on node delete**: static registries never have entries
-  removed when nodes are deleted or renamed. Harmless but unclean. Add
-  destructors to the Op classes that erase from the registry.
-- **ShaderOp `RegisterParams` ignores `node_disabled()`**: when a
-  SpectralWireframe (and SpectralShadowCatcher, SpectralSurface) node is
-  disabled in Nuke, its registry entry persists, so SpectralRenderIop still
-  applies the shader's overrides. Symptom: disabling a SpectralWireframe
-  doesn't stop it rendering; scrubbing sometimes hits a cache where it
-  does and sometimes hits one where it doesn't. Fix: mirror the pattern
-  already in `SpectralMeshPropertiesOp::RegisterParams` -- early-return
-  with `GetRegistry().erase(node_name())` when `node_disabled()` is true.
-  Must land in all three ShaderOps.
+- **Registry cleanup on node rename**: node deletion is now handled by
+  destructors in the four registry-owning Ops (Surface, Drafting,
+  ShadowCatcher, MeshProperties). Rename is NOT handled: Nuke doesn't
+  destroy the Op on rename, so `RegisterParams` inserts a second entry
+  under the new name while the old one lingers. Fix would store previous
+  name in the Op and erase the old entry when `RegisterParams` sees a
+  change. Harmless in typical workflows (you rename before you hook things
+  up); annoying for Ops that are already affecting a render.
 - **`Iop::append(hash)` not called at top of `SpectralRenderIop::append`**:
   we're manually hashing each knob that affects output. Brittle -- new knobs
   are easy to forget. Switch to base-class default + any registry extras.
@@ -302,8 +275,8 @@ Keeping these explicit prevents scope creep conversations.
 No hard timeline, but rough phases:
 
 ### Private beta
-Complete: Phase 18 (materials library) + Phase 30 (object motion blur) +
-SpectralMeshProperties polish + Phase 31 (Linux).
+Complete: Phase 18 (materials library) + SpectralMeshProperties polish +
+Phase 31 (Linux). Phase 30 (object motion blur) landed 2026-04-18.
 
 Ship to a handful of trusted VFX users for feedback.
 
@@ -329,27 +302,39 @@ screenshots, zero production need. Save for when the fundamentals are solid.
 One-line-per-session record of what happened. Add to the top. Serves as a
 memory aid for "what did I work on last week?"
 
-- **2026-04-18** -- Wireframe overhaul: full registry hashing (fixes
-  scrub-to-refresh on SpectralWireframe knobs), topo height uses world Y
-  instead of normal Y, normalized curvature buffer with flat-region skip
-  (fixes all-white on smooth surfaces), pencil wobble/hatch moved to UV
-  cells (follows animating mesh), smoothstep AA knob + width, Line
-  controls promoted out of twirly group, `depth.Z` default AOV, CPU AOV
-  parity via `_WriteFirstHitAOVs` helper across all four first-hit
-  shading branches (fixes CPU wireframe silence on scanline-compat /
-  shadow-catcher paths), `_WriteFirstHitAOVs` promoted to private static
-  member (fixes MSVC C2511 cascade), `ComputeGeometryAOVs` post-pass now
-  runs on both CPU and GPU (fixes CPU-solid-looks-like-pencil from
-  per-sample UV jitter), `Iop::append(hash)` added as base-class default
-  at top of Iop append (pre-empts whole class of toggle-doesn't-refresh
-  bugs), `node_disabled()` respected in RegisterParams across all three
-  ShaderOps (Wireframe / ShadowCatcher / Surface -- fixes disabled
-  shader still rendering). SpectralShaderMerge design sketched into
-  near-term backlog. Object motion blur surfaced as a discoverable
-  feature: `object_motion_blur` knob (default on), UI relabel of the
-  volume-velocity blur knob, motion-blur-enabled gate now honours the
-  knob, GPU auto-falls-back to CPU with a one-time log when object
-  mblur is active. Phase 30 moved from Pending to Partial (CPU done).
+- **2026-04-18 (pm)** -- Housekeeping. (1) Registry cleanup on node
+  destruction: added `~SpectralSurfaceOp`, `~SpectralWireframeOp`,
+  `~SpectralShadowCatcherOp`, `~SpectralMeshPropertiesOp` destructors
+  that erase `node_name()` from each class's static registry. Fixes the
+  phantom-override leak on node delete / script close. Rename remains a
+  known-leak (Nuke doesn't destroy Op on rename); tracked in tech debt.
+  (2) Rename SpectralWireframe -> SpectralDrafting. Files:
+  `SpectralWireframeOp.{h,cpp}` -> `SpectralDraftingOp.{h,cpp}`. Class,
+  nested struct (`WireframeParams` -> `DraftingParams`), `CLASS` string,
+  help text, UI heading, error log prefix all updated. Consumer changes
+  in `SpectralRenderIop.cpp` (include + 2 call sites + comment + SLOG),
+  `menu.py`, `CMakeLists.txt`. Kept internal names unchanged: knob group
+  IDs (`wireframe_*_grp` preserve .nk twirl state), `_wireframeEnable` /
+  `_wireThickness` and friends (the underlying rendering feature is
+  still wireframe; the node is Drafting because it does more than wires).
+  Backwards compatibility: .nk files saved with the old `SpectralWireframe`
+  class will not load cleanly -- users need to search/replace in saved
+  scripts, or we add a Python class-alias in menu.py later.
+- **2026-04-18** -- Object motion blur Phase 30 full: (1) chain-walk fix for
+  GeoTransform animation (USG bridge bakes stage at global frame and ignores
+  sampleTime; workaround reads knobs directly via `get_value_at` and composes
+  SRT matrix with ZXY rotation order). (2) Motion Blur tab consolidation --
+  removed latent duplicate `shutter_open`/`shutter_close` knob declarations
+  (line 531-538 + 1378-1381), single canonical declaration under new
+  Motion Blur tab. (3) Shutter defaults corrected from 360 deg to 180 deg
+  (-0.25/+0.25) matching industry standard; `shutter_preset` enum wired into
+  `knob_changed`. (4) GPU motion blur: `usesMotionBlur=true` in pipeline
+  options (always-on, no per-frame recompile), 2-keyframe motion GAS built
+  conditionally on `anyTriHasMotion`, `OptixMotionOptions` with timeBegin=0,
+  timeEnd=1 matching host-side [0,1] normalization; `rayTime` threaded
+  through all 8 trace sites (6 `optixTrace` + 2 `optixTraverse`), through
+  `shadeHit` / `marchVolume` / `marchSingleVolume` signatures, sampled once
+  per primary ray so shadow and bounce rays share time with the primary.
 - **2026-04-17** -- SpectralMeshProperties subdivision bug fixes (4 patches),
   normal mode (auto/smooth/faceted/vertex), flip-normals, scanline constant
   shader fix (fallback dome skipped when scanlineCompat on), hash invalidation
