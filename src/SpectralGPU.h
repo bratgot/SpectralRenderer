@@ -72,8 +72,7 @@ public:
                 const SpectralVolume* const* volumes = nullptr,
                 int numVolumes = 0,
                 StripCallback stripCallback = nullptr,
-                int numStrips = 1,
-                float* shadowCatcherAOV = nullptr);
+                int numStrips = 1);
 
     /// Denoise the framebuffer in-place on GPU, copy result to host pixels.
     bool Denoise(unsigned int width, unsigned int height, float* pixels);
@@ -102,6 +101,7 @@ private:
     // Acceleration structure
     CUdeviceptr            _gasBuffer   = 0;
     OptixTraversableHandle _gasHandle   = 0;
+    bool                   _hasMotionGAS = false; // built with 2 keyframes
 
     // SBT
     OptixShaderBindingTable _sbt = {};
@@ -112,8 +112,6 @@ private:
     // Device buffers
     CUdeviceptr            _d_framebuffer  = 0;
     CUdeviceptr            _d_depthbuffer  = 0;
-    // Shadow catcher AOV (float4 per pixel). Allocated lazily on first use.
-    CUdeviceptr            _d_shadowCatcherAOV = 0;
     CUdeviceptr            _d_normals      = 0;
     CUdeviceptr            _d_materialIds  = 0;
     CUdeviceptr            _d_materials    = 0;

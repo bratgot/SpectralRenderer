@@ -77,6 +77,11 @@ struct CameraParams {
     float viewToWorld[16];
     float viewToWorldClose[16]; // camera at shutter close (motion blur)
     int   cameraMblur;          // 0 = off, 1 = on
+    // Object motion blur: rayTime is sampled uniformly from
+    // [shutterOpen, shutterClose]. When the two are equal (default 0,0)
+    // motion blur is off and every ray has time=0.
+    float shutterOpen;          // normalized to [0,1] matching GAS motion keys
+    float shutterClose;
     float fStop;            // 0 = pinhole
     float focusDistance;
     float focalLength;      // mm
@@ -204,11 +209,6 @@ struct LaunchParams {
 
     // Shadow catcher: bitmask of material IDs (supports up to 32 materials)
     unsigned int       shadowCatcherMask;
-
-    // Shadow catcher AOV output buffer (4 floats per pixel: R=G=B=A=shadow).
-    // Null when the Iop isn't asking for the pass. Written alongside the
-    // alphaAccum contribution in the shadow catcher kernel branches.
-    float4*            shadowCatcherAOV;
 
     // UV projection lookup (one entry per pixel, built CPU-side)
     int*               uvTriIndex;      // triangle index per pixel (-1 = empty)
