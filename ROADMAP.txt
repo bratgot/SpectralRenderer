@@ -122,26 +122,65 @@ Curated spectral material presets as a picker menu:
 - Skin (with matching SSS profile)
 - Common plastics, ceramics, woods
 
+### SpectralShaderMerge (shader combining)
+
+Currently a mesh binds exactly one ShaderOp via GeoBindMaterial. There's no
+clean way to combine, say, SpectralSurface + SpectralWireframe on the same
+geometry -- SpectralWireframe happens to work alongside surface shaders
+today only because SpectralRenderIop detects the wireframe shader by prim
+path and applies the overlay as a post-process. That's a workaround, not a
+model.
+
+A SpectralShaderMerge node would take N ShaderOp inputs and emit a single
+combined shader downstream. Use cases:
+
+- **Layered overlays**: SpectralSurface + SpectralWireframe as a single
+  combined shader, cleanly bound once. Same pattern for
+  SpectralShadowCatcher-as-overlay and any future non-photoreal passes.
+- **Material blending**: two SpectralSurfaces mixed by alpha / mask input
+  (worn paint over metal, dirt over plastic, frost over glass).
+- **Modifier stacking**: SpectralSurface as base + a diffraction node +
+  a fluorescence node, each contributing a specific spectral effect
+  without requiring every knob to live on one monolithic SpectralSurface.
+
+Design questions worth thinking through before building:
+
+- Do we combine at the USD shader graph level (let UsdPreviewSurface and
+  friends be the merge surface) or at the SpectralRenderIop material-resolve
+  level (merge in the registry read)?
+- Alpha-blend mode: spatial mask from texture input, constant slider, or
+  per-channel control?
+- Does merge commute? (Surface + Wireframe vs Wireframe + Surface -- should
+  wireframe always draw on top, or should input order matter?)
+- Registry implications: a merge node is itself a ShaderOp; does it own
+  a registry entry that references its inputs' entries, or does it flatten
+  them at resolve time?
+
+Low priority until we have a concrete user pull. But worth sketching the
+design before Phase 18 lands, because a materials library built around
+combining primitives is more composable than one of monolithic presets.
+
 ---
 
 ## Technical debt / known issues
 
 Tracked here so we don't forget. Each line is roughly the shape of an issue.
 
-- **SpectralMeshProperties affects scene when detached**: when the node is
-  in the script but its input is disconnected (floating in the DAG), its
-  registry entry still persists and is applied by SpectralRenderIop to
-  whichever mesh happens to match by substring / size-1 fallback. Reproduced
-  2026-04-18. Related to the `size() == 1` matching fallback below --
-  proper prim-path registration would fix both. Workaround: delete or
-  fully disable (both master `enable` knob OFF and Nuke D-key) the node
-  when not actively driving geometry.
 - **SpectralMeshProperties path matching**: `size() == 1` fallback is brittle;
   breaks with >1 modifier node. Fix in `processScenegraph` via prim-path
   registration. Tagged with `TODO` in `SpectralRenderIop.cpp`.
 - **Registry cleanup on node delete**: static registries never have entries
   removed when nodes are deleted or renamed. Harmless but unclean. Add
   destructors to the Op classes that erase from the registry.
+- **ShaderOp `RegisterParams` ignores `node_disabled()`**: when a
+  SpectralWireframe (and SpectralShadowCatcher, SpectralSurface) node is
+  disabled in Nuke, its registry entry persists, so SpectralRenderIop still
+  applies the shader's overrides. Symptom: disabling a SpectralWireframe
+  doesn't stop it rendering; scrubbing sometimes hits a cache where it
+  does and sometimes hits one where it doesn't. Fix: mirror the pattern
+  already in `SpectralMeshPropertiesOp::RegisterParams` -- early-return
+  with `GetRegistry().erase(node_name())` when `node_disabled()` is true.
+  Must land in all three ShaderOps.
 - **`Iop::append(hash)` not called at top of `SpectralRenderIop::append`**:
   we're manually hashing each knob that affects output. Brittle -- new knobs
   are easy to forget. Switch to base-class default + any registry extras.
@@ -260,6 +299,23 @@ screenshots, zero production need. Save for when the fundamentals are solid.
 One-line-per-session record of what happened. Add to the top. Serves as a
 memory aid for "what did I work on last week?"
 
+- **2026-04-18** -- Wireframe overhaul: full registry hashing (fixes
+  scrub-to-refresh on SpectralWireframe knobs), topo height uses world Y
+  instead of normal Y, normalized curvature buffer with flat-region skip
+  (fixes all-white on smooth surfaces), pencil wobble/hatch moved to UV
+  cells (follows animating mesh), smoothstep AA knob + width, Line
+  controls promoted out of twirly group, `depth.Z` default AOV, CPU AOV
+  parity via `_WriteFirstHitAOVs` helper across all four first-hit
+  shading branches (fixes CPU wireframe silence on scanline-compat /
+  shadow-catcher paths), `_WriteFirstHitAOVs` promoted to private static
+  member (fixes MSVC C2511 cascade), `ComputeGeometryAOVs` post-pass now
+  runs on both CPU and GPU (fixes CPU-solid-looks-like-pencil from
+  per-sample UV jitter), `Iop::append(hash)` added as base-class default
+  at top of Iop append (pre-empts whole class of toggle-doesn't-refresh
+  bugs), `node_disabled()` respected in RegisterParams across all three
+  ShaderOps (Wireframe / ShadowCatcher / Surface -- fixes disabled
+  shader still rendering). SpectralShaderMerge design sketched into
+  near-term backlog.
 - **2026-04-17** -- SpectralMeshProperties subdivision bug fixes (4 patches),
   normal mode (auto/smooth/faceted/vertex), flip-normals, scanline constant
   shader fix (fallback dome skipped when scanlineCompat on), hash invalidation

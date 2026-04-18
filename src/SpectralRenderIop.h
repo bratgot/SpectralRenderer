@@ -172,6 +172,11 @@ private:
     double _topoContourInterval = 0.5;  // number of contour lines per unit
     int    _topoMajorEvery = 5;         // every Nth contour is major
 
+    // Antialiasing controls (overlay is a single post-process pass -- render
+    // samples don't touch it, so flicker has to be fixed here).
+    int    _wireAAMode = 1;             // 0=off, 1=edge, 2=2x2, 3=4x4
+    double _wireAAWidth = 1.5;          // smoothstep band width in pixels
+
     // Shadow catcher
     const char* _shadowCatcherNames = "";  // comma-separated material names
 
@@ -394,12 +399,10 @@ private:
     bool  _aovPRef    = true;
     bool  _aovUV       = true;
     bool  _aovAlbedo   = true;
+    bool  _aovDepth    = true;   // camera-space Z output as depth.Z
     bool  _aovDirect   = false;
     bool  _aovIndirect = false;
     bool  _aovEmission = false;
-    // Shadow catcher pass -- writes shadowcatcherAOV.{red,green,blue,alpha}
-    // with the per-pixel shadow factor (R=G=B=A) for use as a mask in comp.
-    bool  _aovShadowCatcher = false;
 
     // Volume-specific AOVs
     bool  _aovVolDensity = false;
@@ -489,9 +492,6 @@ private:
     std::vector<float>  _specularIndirectBuffer;
     std::vector<float>  _transmissionBuffer;
 
-    // Shadow catcher AOV: 4 floats per pixel (R=G=B=A=shadow factor).
-    std::vector<float>  _shadowCatcherBuffer;
-
     // Cryptomatte
     std::vector<float>  _cryptoObjectBuffer;  // (hash, coverage) pairs
 
@@ -505,6 +505,7 @@ private:
     Channel _chanPRefX = Chan_Black, _chanPRefY = Chan_Black, _chanPRefZ = Chan_Black;
     Channel _chanUu = Chan_Black, _chanUv = Chan_Black;
     Channel _chanAlbedoR = Chan_Black, _chanAlbedoG = Chan_Black, _chanAlbedoB = Chan_Black;
+    Channel _chanDepth  = Chan_Black;   // depth.Z -- camera-space Z from _depthBuffer
     Channel _chanDirectR = Chan_Black, _chanDirectG = Chan_Black, _chanDirectB = Chan_Black;
     Channel _chanIndirectR = Chan_Black, _chanIndirectG = Chan_Black, _chanIndirectB = Chan_Black;
     Channel _chanEmissionR = Chan_Black, _chanEmissionG = Chan_Black, _chanEmissionB = Chan_Black;
@@ -515,10 +516,6 @@ private:
     Channel _chanDiffIndirectR = Chan_Black, _chanDiffIndirectG = Chan_Black, _chanDiffIndirectB = Chan_Black;
     Channel _chanSpecIndirectR = Chan_Black, _chanSpecIndirectG = Chan_Black, _chanSpecIndirectB = Chan_Black;
     Channel _chanTransmitR = Chan_Black, _chanTransmitG = Chan_Black, _chanTransmitB = Chan_Black;
-
-    // Shadow catcher AOV channels -- layer "shadowcatcherAOV", RGBA.
-    Channel _chanShadowCatcherR = Chan_Black, _chanShadowCatcherG = Chan_Black;
-    Channel _chanShadowCatcherB = Chan_Black, _chanShadowCatcherA = Chan_Black;
 
     // Cryptomatte
     Channel _chanCryptoR = Chan_Black, _chanCryptoG = Chan_Black;

@@ -1195,6 +1195,13 @@ void SpectralRenderIop::knobs(Knob_Callback f)
     Tooltip(f, "Surface albedo (unlit base colour) as aov_albedo.\n"
                "The material colour before any lighting.\n"
                "Useful for colour grading without affecting lighting.");
+    Bool_knob(f, &_aovDepth, "aov_depth", "depth (Z)");
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "Camera-space Z as depth.Z (single channel).\n"
+               "On by default -- Nuke's ZDefocus, ZBlur and ZMerge all\n"
+               "read this channel. Values are positive metres (or scene\n"
+               "units) going away from the camera. Background pixels\n"
+               "read 1e30 (far plane sentinel).");
 
     Divider(f, "Lighting decomposition");
     Text_knob(f,
@@ -1215,15 +1222,6 @@ void SpectralRenderIop::knobs(Knob_Callback f)
     ClearFlags(f, Knob::STARTLINE);
     Tooltip(f, "Self-illumination (glowing materials, fire, neon).\n"
                "Add to adjust glow intensity in comp.");
-
-    Bool_knob(f, &_aovShadowCatcher, "aov_shadowcatcher", "shadow catcher");
-    ClearFlags(f, Knob::STARTLINE);
-    Tooltip(f, "Shadow catcher pass written to shadowcatcherAOV.{red,green,blue,alpha}.\n"
-               "  RGB = diffuse lighting that was blocked at this pixel, scaled by\n"
-               "        the standard Lambert BRDF (NdotL * intensity / pi per light).\n"
-               "        Reads in normal exposure range, not raw light intensities.\n"
-               "  A   = shadow fraction (0=fully lit, 1=fully shadowed).\n"
-               "Use RGB to comp the shadow's colour, A as the mask.");
 
     BeginClosedGroup(f, "aov_lpe", "LPE decomposition (advanced)");
     {
@@ -1873,6 +1871,11 @@ void SpectralRenderIop::_validate(bool forReal)
         _chanAlbedoR = getChannel("albedo.red"); _chanAlbedoG = getChannel("albedo.green"); _chanAlbedoB = getChannel("albedo.blue");
         channels += _chanAlbedoR; channels += _chanAlbedoG; channels += _chanAlbedoB;
     }
+    if (_aovDepth) {
+        // Nuke's depth.Z convention -- ZDefocus / ZBlur / ZMerge all read this.
+        _chanDepth = getChannel("depth.Z");
+        channels += _chanDepth;
+    }
     if (_aovDirect) {
         _chanDirectR = getChannel("direct.red"); _chanDirectG = getChannel("direct.green"); _chanDirectB = getChannel("direct.blue");
         channels += _chanDirectR; channels += _chanDirectG; channels += _chanDirectB;
@@ -1904,14 +1907,6 @@ void SpectralRenderIop::_validate(bool forReal)
     if (_aovTransmission) {
         _chanTransmitR = getChannel("transmission.red"); _chanTransmitG = getChannel("transmission.green"); _chanTransmitB = getChannel("transmission.blue");
         channels += _chanTransmitR; channels += _chanTransmitG; channels += _chanTransmitB;
-    }
-    if (_aovShadowCatcher) {
-        _chanShadowCatcherR = getChannel("shadowcatcherAOV.red");
-        _chanShadowCatcherG = getChannel("shadowcatcherAOV.green");
-        _chanShadowCatcherB = getChannel("shadowcatcherAOV.blue");
-        _chanShadowCatcherA = getChannel("shadowcatcherAOV.alpha");
-        channels += _chanShadowCatcherR; channels += _chanShadowCatcherG;
-        channels += _chanShadowCatcherB; channels += _chanShadowCatcherA;
     }
     // Cryptomatte: Nuke gizmo expects crypto_object00 RGBA
     _chanCryptoR = getChannel("crypto_object00.red");
@@ -2125,6 +2120,9 @@ void SpectralRenderIop::engine(
     writeIdChannel(_chanObjectId, _objectIdBuffer);
     writeIdChannel(_chanMaterialId, _materialIdBuffer);
     writeIdChannel(_chanAO, _aoBuffer);
+    // _depthBuffer is a single float per pixel (camera-space Z, background
+    // sentinel 1e30). Same shape as the ID buffers so it rides the same helper.
+    writeIdChannel(_chanDepth, _depthBuffer);
 
     // Output vector AOV channels (3 floats per pixel)
     auto write3Channel = [&](Channel chR, Channel chG, Channel chB,
@@ -2160,25 +2158,6 @@ void SpectralRenderIop::engine(
     write3Channel(_chanDiffIndirectR, _chanDiffIndirectG, _chanDiffIndirectB, _diffuseIndirectBuffer, 3);
     write3Channel(_chanSpecIndirectR, _chanSpecIndirectG, _chanSpecIndirectB, _specularIndirectBuffer, 3);
     write3Channel(_chanTransmitR, _chanTransmitG, _chanTransmitB, _transmissionBuffer, 3);
-
-    // Shadow catcher AOV: shadowcatcherAOV.{red,green,blue,alpha}
-    // Buffer layout is 4 floats per pixel (R,G,B,A) with R=G=B=A=shadow.
-    if (!_shadowCatcherBuffer.empty()) {
-        auto writeSCChannel = [&](Channel ch, int comp) {
-            if (!(channels & ch)) return;
-            float* out = row.writable(ch);
-            for (int px = x; px < r; ++px) {
-                int proxyX = isProxy ? (px * W / fullW) : px;
-                if (proxyX >= 0 && proxyX < W && bufY >= 0 && bufY < H)
-                    out[px] = _shadowCatcherBuffer[static_cast<size_t>(bufY) * W * 4 + proxyX * 4 + comp];
-                else out[px] = 0.f;
-            }
-        };
-        writeSCChannel(_chanShadowCatcherR, 0);
-        writeSCChannel(_chanShadowCatcherG, 1);
-        writeSCChannel(_chanShadowCatcherB, 2);
-        writeSCChannel(_chanShadowCatcherA, 3);
-    }
 
     // Cryptomatte: crypto_object00 RGBA
     if (!_cryptoObjectBuffer.empty()) {
@@ -3954,6 +3933,8 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                                 _topoUpVector[2] = entry.second.topoUpVector[2];
                                 _topoContourInterval = entry.second.topoContourInterval;
                                 _topoMajorEvery = entry.second.topoMajorEvery;
+                                _wireAAMode = entry.second.aaMode;
+                                _wireAAWidth = entry.second.aaWidth;
                                 mat.opacity = 0.02f;
                                 SLOG("SpectralRender: wireframe from SpectralWireframe '%s'\n",
                                         entry.first.c_str());
@@ -5075,6 +5056,21 @@ std::string SpectralRenderIop::_resolveFramePath(int frame) const
 // ---------------------------------------------------------------------------
 void SpectralRenderIop::append(Hash& hash)
 {
+    // Iop::append auto-hashes every registered knob on this node plus the
+    // output context (frame, view, proxy scale). This single line pre-empts
+    // the entire class of "I toggle a knob but the frame doesn't refresh
+    // until I scrub the timeline" bugs we've chased repeatedly -- any new
+    // knob added to the node gets covered for free. See CLAUDE.md's
+    // "Hash invalidation" section: this was technical debt #3 in the
+    // roadmap and this is the fix.
+    //
+    // The manual hash.append() calls below remain as defensive double-
+    // coverage AND to cover things Iop::append() can't see: registries
+    // populated by other nodes (SpectralWireframeOp etc.), internal state
+    // that isn't knob-backed (_volumes.size, _shadowCatcherNames), and
+    // the multi-hop scene graph walk below. Those must stay.
+    Iop::append(hash);
+
     hash.append(outputContext().frame());
     hash.append(_vdbFrameOffset);
     // Knobs that change the rendered output but aren't on any input chain,
@@ -5084,7 +5080,6 @@ void SpectralRenderIop::append(Hash& hash)
     hash.append(_scanlineCompat ? 1 : 0);
     hash.append(_useBuiltinLight ? 1 : 0);
     hash.append(_deviceMode);
-    hash.append(_aovShadowCatcher ? 1 : 0);
     if (_vdbFile) hash.append(_vdbFile);
     hash.append((int)_volumes.size());
     // Hash wireframe + shadow catcher params
@@ -5109,18 +5104,48 @@ void SpectralRenderIop::append(Hash& hash)
     hash.append(_topoUpVector[2]);
     hash.append(_topoContourInterval);
     hash.append(_topoMajorEvery);
+    hash.append(_wireAAMode);
+    hash.append(_wireAAWidth);
     hash.append(_edgeSamples);
     if (_shadowCatcherNames) hash.append(_shadowCatcherNames);
-    // Hash wireframe registry
+    // Hash wireframe registry — every field that affects output. The
+    // previous version only hashed thickness/opacity/style/nth, so changing
+    // the pencil or topo knobs on a SpectralWireframe node would update the
+    // registry but fail to invalidate the Iop's cached frame until the user
+    // scrubbed the timeline. Classic CLAUDE.md gotcha #1.
     {
         const auto& wireReg = SpectralWireframeOp::GetRegistry();
         hash.append((int)wireReg.size());
         for (const auto& kv : wireReg) {
+            const auto& p = kv.second;
             hash.append(kv.first.c_str());
-            hash.append(kv.second.thickness);
-            hash.append(kv.second.opacity);
-            hash.append(kv.second.style);
-            hash.append(kv.second.nth);
+            hash.append(p.thickness); hash.append(p.opacity);
+            hash.append(p.color[0]); hash.append(p.color[1]); hash.append(p.color[2]);
+            hash.append(p.dashed ? 1 : 0);
+            hash.append(p.dashLength); hash.append(p.gapLength);
+            hash.append(p.nth); hash.append(p.style);
+            hash.append(p.gridDensity);
+            hash.append(p.showTriangles ? 1 : 0);
+            hash.append(p.archSilhouetteWeight);
+            hash.append(p.archMediumWeight);
+            hash.append(p.archThinWeight);
+            hash.append(p.archSilhouetteColor[0]);
+            hash.append(p.archSilhouetteColor[1]);
+            hash.append(p.archSilhouetteColor[2]);
+            hash.append(p.archThinOpacity);
+            hash.append(p.pencilWobble);
+            hash.append(p.pencilPressure);
+            hash.append(p.pencilCrossHatch ? 1 : 0);
+            hash.append(p.pencilHatchDensity);
+            hash.append(p.pencilHatchAngle);
+            hash.append(p.topoDirection);
+            hash.append(p.topoUpVector[0]);
+            hash.append(p.topoUpVector[1]);
+            hash.append(p.topoUpVector[2]);
+            hash.append(p.topoContourInterval);
+            hash.append(p.topoMajorEvery);
+            hash.append(p.aaMode);
+            hash.append(p.aaWidth);
         }
     }
     // Hash shadow catcher registry
@@ -6414,11 +6439,13 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
             glUniform3f(glGetUniformLocation(_glGeoProg, "uLightCol"), gLightR, gLightG, gLightB);
             glUniform3f(glGetUniformLocation(_glGeoProg, "uAmbient"), gAmbR, gAmbG, gAmbB);
 
-            // Constant mode: scanlineCompat = flat material colour in viewport,
-            // regardless of whether lights happen to be in the scene. Matches
-            // the CPU/GPU render-time constant path.
-            glUniform1i(glGetUniformLocation(_glGeoProg, "uConstantMode"),
-                        _scanlineCompat ? 1 : 0);
+            // Constant mode: scanlineCompat + no lights = flat colour in viewport
+            {
+                bool noLights = (gLightR < 0.001f && gLightG < 0.001f && gLightB < 0.001f &&
+                                 gAmbR < 0.001f && gAmbG < 0.001f && gAmbB < 0.001f);
+                glUniform1i(glGetUniformLocation(_glGeoProg, "uConstantMode"),
+                            (_scanlineCompat && noLights) ? 1 : 0);
+            }
 
             // ─── Shadow map pass: render geometry from light POV ───
             float lightVP[16] = {};
@@ -6528,8 +6555,12 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
             glUniform3f(glGetUniformLocation(_glGeoProg, "uLightDir"), gLightDirX, gLightDirY, gLightDirZ);
             glUniform3f(glGetUniformLocation(_glGeoProg, "uLightCol"), gLightR, gLightG, gLightB);
             glUniform3f(glGetUniformLocation(_glGeoProg, "uAmbient"), gAmbR, gAmbG, gAmbB);
-            glUniform1i(glGetUniformLocation(_glGeoProg, "uConstantMode"),
-                        _scanlineCompat ? 1 : 0);
+            {
+                bool noLights = (gLightR < 0.001f && gLightG < 0.001f && gLightB < 0.001f &&
+                                 gAmbR < 0.001f && gAmbG < 0.001f && gAmbB < 0.001f);
+                glUniform1i(glGetUniformLocation(_glGeoProg, "uConstantMode"),
+                            (_scanlineCompat && noLights) ? 1 : 0);
+            }
             glUniform1f(glGetUniformLocation(_glGeoProg, "uHasShadowMap"), hasShadowMap ? 1.f : 0.f);
             glUniform1f(glGetUniformLocation(_glGeoProg, "uShadowTexelSize"), 1.f / float(kShadowMapSize));
             glUniform1f(glGetUniformLocation(_glGeoProg, "uShadowSoftness"), vpShadowSoft);
@@ -7769,11 +7800,7 @@ void SpectralRenderIop::_BuildLightRig()
     }
 
     // ---- Fallback: use SpectralRender's own lighting knobs if no light nodes connected ----
-    // Skipped when scanlineCompat is on: in that mode the intent is for the
-    // scene to have zero lights, which triggers the constant-shader path on
-    // both CPU and GPU backends and matches Nuke's ScanlineRender output.
-    if (_useBuiltinLight && !_scanlineCompat
-        && _allEnvLights.empty() && _allStudioLights.empty()) {
+    if (_useBuiltinLight && _allEnvLights.empty() && _allStudioLights.empty()) {
         // Sun/sky from local knobs
         if (_skyPreset > 0 && _skyMix > 0.001) {
             double m = _skyMix;
@@ -7976,9 +8003,15 @@ void SpectralRenderIop::_EnsureFrameRendered()
     _objectIdBuffer.assign(size_t(W) * H, 0.f);
     _materialIdBuffer.assign(size_t(W) * H, 0.f);
     _aoBuffer.assign(size_t(W) * H, 1.f);
+    // Topographic wireframe in height / custom-direction mode needs the
+    // world-space position buffer. Force it on even if the AOV checkbox is
+    // off, otherwise topo falls back to normal.y (which is slope, not height).
+    const bool wireTopoNeedsPos = _wireframeEnable && _wireStyle == 5 &&
+                                  (_topoDirection == 0 || _topoDirection == 1);
     if (_aovNormals || _wireframeEnable)
         _normalBuffer.assign(size_t(W) * H * 3, 0.f); else _normalBuffer.clear();
-    if (_aovPosition) _posBuffer.assign(size_t(W) * H * 3, 0.f);    else _posBuffer.clear();
+    if (_aovPosition || wireTopoNeedsPos)
+        _posBuffer.assign(size_t(W) * H * 3, 0.f);    else _posBuffer.clear();
     if (_aovPRef)     _pRefBuffer.assign(size_t(W) * H * 3, 0.f);   else _pRefBuffer.clear();
     if (_aovUV || _wireframeEnable)
         _uvBuffer.assign(size_t(W) * H * 2, 0.f);     else _uvBuffer.clear();
@@ -7991,7 +8024,6 @@ void SpectralRenderIop::_EnsureFrameRendered()
     if (_aovDiffuseIndirect) _diffuseIndirectBuffer.assign(size_t(W) * H * 3, 0.f); else _diffuseIndirectBuffer.clear();
     if (_aovSpecularIndirect) _specularIndirectBuffer.assign(size_t(W) * H * 3, 0.f); else _specularIndirectBuffer.clear();
     if (_aovTransmission)    _transmissionBuffer.assign(size_t(W) * H * 3, 0.f);    else _transmissionBuffer.clear();
-    if (_aovShadowCatcher)   _shadowCatcherBuffer.assign(size_t(W) * H * 4, 0.f);   else _shadowCatcherBuffer.clear();
     _cryptoObjectBuffer.assign(size_t(W) * H * 4, 0.f);  // RGBA: (hash0, cov0, hash1, cov1)
 
     SpectralCamera cam = _camera;
@@ -8299,14 +8331,15 @@ void SpectralRenderIop::_RenderStrip(int stripIdx)
                                                 _colorSpace,
                                                 _renderVolPtrs.empty() ? nullptr : _renderVolPtrs.data(),
                                                 (int)_renderVolPtrs.size(),
-                                                nullptr, 4,
-                                                _aovShadowCatcher ? _shadowCatcherBuffer.data() : nullptr);
+                                                nullptr, 4);
         } else
 #endif
         {
             SpectralIntegrator::AOVBuffers aovBufs;
+            const bool wireTopoNeedsPosCpu = _wireframeEnable && _wireStyle == 5 &&
+                                             (_topoDirection == 0 || _topoDirection == 1);
             aovBufs.normal   = (_aovNormals || _wireframeEnable) ? _normalBuffer.data() : nullptr;
-            aovBufs.position = _aovPosition ? _posBuffer.data()      : nullptr;
+            aovBufs.position = (_aovPosition || wireTopoNeedsPosCpu) ? _posBuffer.data() : nullptr;
             aovBufs.pRef     = _aovPRef     ? _pRefBuffer.data()     : nullptr;
             aovBufs.uv       = (_aovUV || _wireframeEnable) ? _uvBuffer.data() : nullptr;
             aovBufs.albedo   = _aovAlbedo   ? _albedoBuffer.data()   : nullptr;
@@ -8318,7 +8351,6 @@ void SpectralRenderIop::_RenderStrip(int stripIdx)
             aovBufs.diffuseIndirect = _aovDiffuseIndirect ? _diffuseIndirectBuffer.data() : nullptr;
             aovBufs.specularIndirect = _aovSpecularIndirect ? _specularIndirectBuffer.data() : nullptr;
             aovBufs.transmission    = _aovTransmission    ? _transmissionBuffer.data()    : nullptr;
-            aovBufs.shadowCatcher   = _aovShadowCatcher   ? _shadowCatcherBuffer.data()   : nullptr;
 
             SpectralIntegrator::RenderFrame(*_scene, _renderCam, _frameBuffer.data(),
                                              _renderSpp, _depthBuffer.data(), _maxBounces,
@@ -8336,15 +8368,30 @@ void SpectralRenderIop::_RenderStrip(int stripIdx)
         }
 #endif
 
-        // Geometry AOV pass for GPU
-#ifdef SPECTRAL_HAS_OPTIX
-        if (_renderUseGPU) {
+        // Geometry AOV pass — clean, pixel-centred UV / N / P / ID.
+        //
+        // This matters for both paths:
+        //   GPU: the main render doesn't fill these, so the pass is the
+        //        only source of them.
+        //   CPU: the main render *does* write these inline via
+        //        _WriteFirstHitAOVs, but it writes the FIRST sample's
+        //        jittered UV, not the pixel centre. Per-pixel sub-pixel
+        //        noise makes the wireframe overlay's grid-distance test
+        //        noisy -- every style looks wobbly, but it's most
+        //        obviously wrong on "solid" (user-reported "CPU solid
+        //        line renders as pencil sketch" -- the wobble was
+        //        indistinguishable from the pencil wobble). Re-running
+        //        with centre-of-pixel rays overwrites the jittered
+        //        values with deterministic ones.
+        {
+            const bool wireTopoNeedsPosGeom = _wireframeEnable && _wireStyle == 5 &&
+                                              (_topoDirection == 0 || _topoDirection == 1);
             bool needGeomPass = _aovNormals || _aovPosition || _aovPRef || _aovUV || _aovAlbedo || _wireframeEnable;
             if (needGeomPass) {
                 SpectralIntegrator::ComputeGeometryAOVs(
                     *_scene, _renderCam,
                     (_aovNormals || _wireframeEnable) ? _normalBuffer.data() : nullptr,
-                    _aovPosition ? _posBuffer.data()    : nullptr,
+                    (_aovPosition || wireTopoNeedsPosGeom) ? _posBuffer.data() : nullptr,
                     _aovPRef     ? _pRefBuffer.data()   : nullptr,
                     (_aovUV || _wireframeEnable) ? _uvBuffer.data() : nullptr,
                     _aovAlbedo   ? _albedoBuffer.data() : nullptr,
@@ -8352,7 +8399,6 @@ void SpectralRenderIop::_RenderStrip(int stripIdx)
                     nullptr);
             }
         }
-#endif
 
         // AO pass
         if (_aoSamples > 0) {
@@ -8428,6 +8474,34 @@ void SpectralRenderIop::_RenderStrip(int stripIdx)
             const int   style = _wireStyle;
             const float gridFreq = float(nth);
             const bool  hasNormals = !_normalBuffer.empty();
+            const bool  hasPosition = !_posBuffer.empty();
+
+            // Antialiasing: the overlay runs once after the integrator, so
+            // render samples do nothing for it. The previous falloff was a
+            // 1-pixel linear ramp, which left plenty of binary-like
+            // inclusion changes frame to frame. A smoothstep across a wider
+            // band is essentially free and kills most of that flicker.
+            //
+            // aaMode:  0=off, 1=smooth (1x), 2=soft (1.5x), 3=softest (2.5x)
+            // aaWidth: base band width in pixels
+            const int   aaMode  = _wireAAMode;
+            const float aaBase  = std::max(0.01f, float(_wireAAWidth));
+            const float aaBand  = (aaMode == 0) ? 0.f :
+                                  (aaMode == 1) ? aaBase :
+                                  (aaMode == 2) ? aaBase * 1.5f :
+                                                  aaBase * 2.5f;
+            auto coverage = [aaMode, aaBand](float pixDist, float thick) -> float {
+                if (aaMode == 0) {
+                    // Original hard-edged behaviour: 1-pixel linear ramp
+                    if (pixDist > thick) return 0.f;
+                    if (pixDist > thick - 1.f) return std::max(0.f, thick - pixDist);
+                    return 1.f;
+                }
+                if (pixDist <= thick) return 1.f;
+                if (pixDist >= thick + aaBand) return 0.f;
+                float t = (pixDist - thick) / aaBand;
+                return 1.f - t * t * (3.f - 2.f * t);   // 1 - smoothstep
+            };
 
             // Pencil sketch: precompute noise LUT
             auto pencilNoise = [](int x, int y) -> float {
@@ -8435,6 +8509,56 @@ void SpectralRenderIop::_RenderStrip(int stripIdx)
                 h = (h ^ (h >> 13)) * 1274126177u;
                 return float(h & 0xFFFF) / 65535.f;
             };
+
+            // Precompute normalized curvature for topo=curvature mode.
+            // The previous inline version had two bugs: (1) getElev didn't
+            // handle the curvature case so the screen-space derivative was
+            // garbage, and (2) flat regions produced elevation=0 which puts
+            // every pixel exactly on the zero-contour — hence "all white".
+            // Precomputing means getElev can just index the buffer, and the
+            // normalization + flat-region skip below fixes the white-out.
+            std::vector<float> curvBuf;
+            if (style == 5 && _topoDirection == 2 && hasNormals) {
+                curvBuf.assign(size_t(W) * H, 0.f);
+                float maxCurv = 0.f;
+                for (int cy = 0; cy < H; ++cy) {
+                    for (int cx = 0; cx < W; ++cx) {
+                        size_t ci = size_t(cy) * W + cx;
+                        if (_objectIdBuffer[ci] == 0.f) continue;
+                        float nx = _normalBuffer[ci*3+0];
+                        float ny = _normalBuffer[ci*3+1];
+                        float nz = _normalBuffer[ci*3+2];
+                        float sum = 0.f; int nc = 0;
+                        for (int dd = 0; dd < 4; ++dd) {
+                            int x2 = cx + ((dd==0)?1:(dd==1)?-1:0);
+                            int y2 = cy + ((dd==2)?1:(dd==3)?-1:0);
+                            if (x2 < 0 || x2 >= W || y2 < 0 || y2 >= H) continue;
+                            size_t ni = size_t(y2) * W + x2;
+                            if (_objectIdBuffer[ni] == 0.f) continue;
+                            float dnx = _normalBuffer[ni*3+0] - nx;
+                            float dny = _normalBuffer[ni*3+1] - ny;
+                            float dnz = _normalBuffer[ni*3+2] - nz;
+                            sum += std::sqrt(dnx*dnx + dny*dny + dnz*dnz);
+                            nc++;
+                        }
+                        float c = (nc > 0) ? sum / float(nc) : 0.f;
+                        curvBuf[ci] = c;
+                        if (c > maxCurv) maxCurv = c;
+                    }
+                }
+                // Normalize to [0,1] so the contour-interval knob behaves
+                // consistently across meshes / zoom levels.
+                if (maxCurv > 1e-6f) {
+                    float invMax = 1.f / maxCurv;
+                    for (auto& c : curvBuf) c *= invMax;
+                } else {
+                    SLOG("SpectralRender: wireframe topo=curvature - mesh is effectively flat, no contours\n");
+                }
+            }
+
+            if (style == 5 && (_topoDirection == 0 || _topoDirection == 1) && !hasPosition) {
+                SLOG("SpectralRender: wireframe topo=height/custom needs _posBuffer - no contours rendered\n");
+            }
 
             for (int y = 0; y < H; ++y) {
                 for (int x = 0; x < W; ++x) {
@@ -8463,41 +8587,41 @@ void SpectralRenderIop::_RenderStrip(int stripIdx)
                     float lineThick = thickness;
 
                     // ── Style 5: Topographic contour lines ──
-                    if (style == 5 && (hasNormals || _topoDirection == 3)) {
+                    // Case 0: true height — contours of equal world Y position
+                    // Case 1: arbitrary axis — contours of dot(P, customVec)
+                    // Case 2: surface curvature — precomputed normalized
+                    // Case 3: barycentric — UV-derived, for mesh QC
+                    bool topoDataOk =
+                        (_topoDirection == 0 && hasPosition) ||
+                        (_topoDirection == 1 && hasPosition) ||
+                        (_topoDirection == 2 && !curvBuf.empty()) ||
+                        (_topoDirection == 3);
+                    if (style == 5 && topoDataOk) {
                         float elevation = 0.f;
                         float dEdx = 0.f;
 
                         if (_topoDirection == 0) {
-                            // World Y (up) — dot(N, (0,1,0))
-                            elevation = _normalBuffer[i * 3 + 1];
+                            // True topographic height — world Y of the surface
+                            // point, not N.y (which was slope, not height).
+                            elevation = _posBuffer[i * 3 + 1];
                         } else if (_topoDirection == 1) {
-                            // Custom direction vector
+                            // Axis-aligned slice: dot(P, customVec)
                             float ux = float(_topoUpVector[0]);
                             float uy = float(_topoUpVector[1]);
                             float uz = float(_topoUpVector[2]);
                             float len = std::sqrt(ux*ux + uy*uy + uz*uz);
                             if (len > 1e-6f) { ux /= len; uy /= len; uz /= len; }
-                            elevation = _normalBuffer[i*3+0]*ux + _normalBuffer[i*3+1]*uy + _normalBuffer[i*3+2]*uz;
+                            elevation = _posBuffer[i*3+0]*ux
+                                      + _posBuffer[i*3+1]*uy
+                                      + _posBuffer[i*3+2]*uz;
                         } else if (_topoDirection == 2) {
-                            // Normal curvature — compare normal with neighbors
-                            float nx = _normalBuffer[i*3+0], ny = _normalBuffer[i*3+1], nz = _normalBuffer[i*3+2];
-                            float curvature = 0.f;
-                            int neighbors = 0;
-                            for (int dd = 0; dd < 4; ++dd) {
-                                int nx2 = x + ((dd==0)?1:(dd==1)?-1:0);
-                                int ny2 = y + ((dd==2)?1:(dd==3)?-1:0);
-                                if (nx2 < 0 || nx2 >= W || ny2 < 0 || ny2 >= H) continue;
-                                size_t ni = ny2 * W + nx2;
-                                if (_objectIdBuffer[ni] == 0.f) continue;
-                                float dnx = _normalBuffer[ni*3+0] - nx;
-                                float dny = _normalBuffer[ni*3+1] - ny;
-                                float dnz = _normalBuffer[ni*3+2] - nz;
-                                curvature += std::sqrt(dnx*dnx + dny*dny + dnz*dnz);
-                                neighbors++;
-                            }
-                            elevation = (neighbors > 0) ? curvature / float(neighbors) : 0.f;
-                        } else if (_topoDirection == 3) {
-                            // Barycentric — use UV fractional part as elevation proxy
+                            elevation = curvBuf[i];
+                            // Skip flat regions. Without this, curvature=0
+                            // lands exactly on the zero-contour and every
+                            // smooth pixel gets drawn (the "all white" bug).
+                            if (elevation < 0.02f) continue;
+                        } else /* _topoDirection == 3 */ {
+                            // Barycentric — UV fractional part as elevation proxy
                             elevation = std::fmod(std::abs(u * 7.13f + v * 11.07f), 1.f);
                         }
 
@@ -8509,13 +8633,16 @@ void SpectralRenderIop::_RenderStrip(int stripIdx)
                         // Screen-space derivative of elevation
                         if (_topoDirection != 3) {
                             auto getElev = [&](size_t idx) -> float {
-                                if (_topoDirection == 0) return _normalBuffer[idx*3+1];
+                                if (_topoDirection == 0) return _posBuffer[idx*3+1];
                                 if (_topoDirection == 1) {
                                     float ux=float(_topoUpVector[0]), uy=float(_topoUpVector[1]), uz=float(_topoUpVector[2]);
                                     float len=std::sqrt(ux*ux+uy*uy+uz*uz);
                                     if(len>1e-6f){ux/=len;uy/=len;uz/=len;}
-                                    return _normalBuffer[idx*3]*ux+_normalBuffer[idx*3+1]*uy+_normalBuffer[idx*3+2]*uz;
+                                    return _posBuffer[idx*3]*ux
+                                         + _posBuffer[idx*3+1]*uy
+                                         + _posBuffer[idx*3+2]*uz;
                                 }
+                                if (_topoDirection == 2) return curvBuf[idx];
                                 return 0.f;
                             };
                             if (x+1 < W && _objectIdBuffer[i+1] != 0.f)
@@ -8537,11 +8664,12 @@ void SpectralRenderIop::_RenderStrip(int stripIdx)
                         bool isMajor = (majorDist < 0.15f);
                         lineThick = isMajor ? thickness * 2.5f : thickness;
 
-                        if (pixDistE < lineThick) {
-                            lineAlpha = opacity;
-                            if (pixDistE > lineThick - 1.f)
-                                lineAlpha *= std::max(0.f, lineThick - pixDistE);
-                            if (!isMajor) lineAlpha *= 0.5f;
+                        if (pixDistE < lineThick + aaBand) {
+                            float cov = coverage(pixDistE, lineThick);
+                            if (cov > 0.f) {
+                                lineAlpha = opacity * cov;
+                                if (!isMajor) lineAlpha *= 0.5f;
+                            }
                         }
                     } else {
 
@@ -8556,19 +8684,17 @@ void SpectralRenderIop::_RenderStrip(int stripIdx)
 
                         // ── Style 0: Solid ──
                         if (style == 0) {
-                            if (pixelDist > lineThick) continue;
-                            lineAlpha = opacity;
-                            if (pixelDist > lineThick - 1.f)
-                                lineAlpha *= std::max(0.f, lineThick - pixelDist);
+                            float cov = coverage(pixelDist, lineThick);
+                            if (cov <= 0.f) continue;
+                            lineAlpha = opacity * cov;
                         }
 
                         // ── Style 1: Guide (thin dashed construction lines) ──
                         else if (style == 1) {
                             lineThick *= 0.5f;
-                            if (pixelDist > lineThick) continue;
-                            lineAlpha = opacity * 0.6f;
-                            if (pixelDist > lineThick - 1.f)
-                                lineAlpha *= std::max(0.f, lineThick - pixelDist);
+                            float cov = coverage(pixelDist, lineThick);
+                            if (cov <= 0.f) continue;
+                            lineAlpha = opacity * 0.6f * cov;
                             // Dash pattern
                             float dashPos = std::fmod(float(x + y) * 0.7071f,
                                                      float(_wireDashLength) + float(_wireGapLength));
@@ -8596,10 +8722,9 @@ void SpectralRenderIop::_RenderStrip(int stripIdx)
                                 lineThick *= float(_archThinWeight);
                             }
 
-                            if (pixelDist > lineThick) continue;
-                            lineAlpha = opacity;
-                            if (pixelDist > lineThick - 1.f)
-                                lineAlpha *= std::max(0.f, lineThick - pixelDist);
+                            float cov = coverage(pixelDist, lineThick);
+                            if (cov <= 0.f) continue;
+                            lineAlpha = opacity * cov;
 
                             // Line hierarchy opacity
                             if (!isMajor && !isMedium) lineAlpha *= float(_archThinOpacity);
@@ -8619,10 +8744,9 @@ void SpectralRenderIop::_RenderStrip(int stripIdx)
 
                         // ── Style 3: Hidden-line ──
                         else if (style == 3) {
-                            if (pixelDist > lineThick) continue;
-                            lineAlpha = opacity;
-                            if (pixelDist > lineThick - 1.f)
-                                lineAlpha *= std::max(0.f, lineThick - pixelDist);
+                            float cov = coverage(pixelDist, lineThick);
+                            if (cov <= 0.f) continue;
+                            lineAlpha = opacity * cov;
                             // Secondary direction dimmed and dashed
                             if (distU < distV) {
                                 lineAlpha *= 0.3f;
@@ -8636,35 +8760,49 @@ void SpectralRenderIop::_RenderStrip(int stripIdx)
                             float wobbleAmt = float(_pencilWobble);
                             float pressureAmt = float(_pencilPressure);
 
+                            // UV-space noise cells: the pattern is keyed off
+                            // the mesh surface, not screen pixels, so it
+                            // follows the geometry under animation / camera
+                            // moves. Cell size ~1 pixel at current zoom.
+                            const float invUVSize = 1.f / pixelUVSize;
+                            int cellU = int(u * invUVSize);
+                            int cellV = int(v * invUVSize);
+
                             // Wobble: offset the grid distance with noise
-                            float noise = pencilNoise(x, y);
+                            float noise = pencilNoise(cellU, cellV);
                             float wobble = (noise - 0.5f) * wobbleAmt * pixelUVSize;
                             float distUw = std::abs((gu + wobble * gridFreq) - std::round(gu + wobble * gridFreq)) / gridFreq;
                             float distVw = std::abs((gv + wobble * gridFreq) - std::round(gv + wobble * gridFreq)) / gridFreq;
                             float edgeDistW = std::min(distUw, distVw);
                             float pixDistW = edgeDistW / pixelUVSize;
 
-                            // Variable thickness from pressure
-                            float thickNoise = pencilNoise(x / 4, y / 4);
+                            // Variable thickness from pressure — lower-freq
+                            // noise (every ~4 pixels worth of UV).
+                            int cellU4 = int(u * invUVSize * 0.25f);
+                            int cellV4 = int(v * invUVSize * 0.25f);
+                            float thickNoise = pencilNoise(cellU4, cellV4);
                             float pencilThick = lineThick * (1.f - pressureAmt + thickNoise * pressureAmt * 2.f);
 
-                            if (pixDistW > pencilThick) continue;
-                            lineAlpha = opacity * (1.f - pressureAmt * 0.5f + thickNoise * pressureAmt * 0.5f);
-                            if (pixDistW > pencilThick - 1.f)
-                                lineAlpha *= std::max(0.f, pencilThick - pixDistW);
+                            float cov = coverage(pixDistW, pencilThick);
+                            if (cov <= 0.f) continue;
+                            lineAlpha = opacity * (1.f - pressureAmt * 0.5f + thickNoise * pressureAmt * 0.5f) * cov;
 
-                            // Cross-hatch in shadowed areas
+                            // Cross-hatch in shadowed areas — UV-space too,
+                            // so the hatch pattern rides the surface.
                             if (_pencilCrossHatch && hasNormals) {
                                 float ny = _normalBuffer[i * 3 + 1];
                                 if (ny < 0.3f) {
-                                    float hatchSpacing = float(_pencilHatchDensity);
+                                    // Hatch spacing scaled from screen pixels
+                                    // into UV units at current zoom, so the
+                                    // knob remains "pixels between lines".
+                                    float hatchSpacing = float(_pencilHatchDensity) * pixelUVSize;
                                     float angleRad = float(_pencilHatchAngle) * float(M_PI) / 180.f;
-                                    float hatchCoord = float(x) * std::cos(angleRad) + float(y) * std::sin(angleRad);
+                                    float hatchCoord = u * std::cos(angleRad) + v * std::sin(angleRad);
                                     float hatch = std::fmod(std::abs(hatchCoord), hatchSpacing);
                                     if (hatch < hatchSpacing * 0.3f) {
                                         float hatchAlpha = opacity * 0.3f * (0.3f - ny);
-                                        // Wobble the hatch lines too
-                                        hatchAlpha *= (0.7f + pencilNoise(x + 999, y + 999) * 0.6f);
+                                        // Wobble the hatch lines too — also UV-keyed.
+                                        hatchAlpha *= (0.7f + pencilNoise(cellU + 999, cellV + 999) * 0.6f);
                                         lineAlpha = std::max(lineAlpha, hatchAlpha);
                                     }
                                 }

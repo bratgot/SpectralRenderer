@@ -145,14 +145,6 @@ public:
         float* diffuseIndirect = nullptr;
         float* specularIndirect = nullptr;
         float* transmission    = nullptr;
-        // Shadow catcher AOV: 4 floats per pixel.
-        //   RGB = diffuse (Lambert) lighting that was blocked at this pixel,
-        //         matching what a white-diffuse surface would have received from
-        //         the blocked lights (NdotL * attenuation * intensity / pi per light,
-        //         weighted by light colour). Reads in natural 0..1-ish range for
-        //         typical lighting, not blown-out raw light intensities.
-        //   A   = per-pixel shadow fraction in [0,1] (same scalar as the beauty alpha).
-        float* shadowCatcher   = nullptr;
     };
 
     static void RenderFrame(
@@ -186,8 +178,7 @@ public:
         const SpectralVolume* const* volumes = nullptr,
         int numVolumes = 0,
         StripCallback stripCallback = nullptr,
-        int numStrips = 1,
-        float* shadowCatcherAOV = nullptr);
+        int numStrips = 1);
 
     static bool IsGPUAvailable();
     static void DenoiseGPU(unsigned int width, unsigned int height, float* pixels);
@@ -286,6 +277,19 @@ private:
 
     // Simple hash-based RNG for per-pixel, per-sample jitter
     static float _Hash(unsigned int seed);
+
+    // First-hit geometry AOV writer — keeps RenderFrame's four shading
+    // branches (scanline shadow catcher / scanline constant / spectral
+    // shadow catcher / full spectral) writing identical AOVs, matching the
+    // GPU ComputeGeometryAOVs pass. Previously only full-spectral wrote
+    // them, so CPU wireframe overlay broke on the other paths.
+    static void _WriteFirstHitAOVs(const AOVBuffers* aovs,
+                                    size_t pixIdx,
+                                    const SpectralTriangle& tri,
+                                    float u, float v,
+                                    const GfVec3f& hitPos,
+                                    const GfVec3f& rayDir,
+                                    const SpectralScene& scene);
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

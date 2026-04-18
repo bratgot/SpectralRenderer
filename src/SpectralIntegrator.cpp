@@ -21,6 +21,72 @@ static SpectralMaterial _ResolveMaterial(
     float w, float u, float v, const SpectralScene& scene);
 
 // ---------------------------------------------------------------------------
+// _WriteFirstHitAOVs — populate geometry AOVs (N, P, pRef, UV, albedo) for
+// the first hit at a pixel. Called from every shading branch in RenderFrame
+// so the CPU path writes the same AOVs as the GPU ComputeGeometryAOVs pass.
+//
+// Previously only the full-spectral branch wrote AOVs; scanline-compat
+// (shadow catcher and constant shader) and the spectral shadow-catcher
+// branch skipped them. That left _uvBuffer zero-filled on those paths, so
+// the wireframe overlay's grid distance computation degenerated and nothing
+// drew on CPU -- "CPU doesn't work" despite GPU working fine. Factoring
+// this out keeps the four sites in sync.
+//
+// Promoted to a private static member (rather than a file-scope static) so
+// the AOVBuffers type is looked up in class scope, not at file scope --
+// which tripped MSVC and cascaded into a C2511 on the unrelated
+// RenderFrameGPU definition a few thousand lines later.
+// ---------------------------------------------------------------------------
+void SpectralIntegrator::_WriteFirstHitAOVs(
+    const AOVBuffers* aovs,
+    size_t pixIdx,
+    const SpectralTriangle& tri,
+    float u, float v,
+    const GfVec3f& hitPos,
+    const GfVec3f& rayDir,
+    const SpectralScene& scene)
+{
+    if (!aovs) return;
+    float w = 1.f - u - v;
+    GfVec3f N = tri.n0 * w + tri.n1 * u + tri.n2 * v;
+    float nlen = N.GetLength();
+    if (nlen > 1e-6f) N /= nlen;
+    GfVec3f V = -rayDir;
+    float vlen = V.GetLength();
+    if (vlen > 1e-6f) V /= vlen;
+    if (N[0]*V[0] + N[1]*V[1] + N[2]*V[2] < 0.f) N = -N;
+
+    if (aovs->normal) {
+        aovs->normal[pixIdx*3+0] = N[0];
+        aovs->normal[pixIdx*3+1] = N[1];
+        aovs->normal[pixIdx*3+2] = N[2];
+    }
+    if (aovs->position) {
+        aovs->position[pixIdx*3+0] = hitPos[0];
+        aovs->position[pixIdx*3+1] = hitPos[1];
+        aovs->position[pixIdx*3+2] = hitPos[2];
+    }
+    if (aovs->pRef) {
+        GfVec3f pRef = tri.pRef0 * w + tri.pRef1 * u + tri.pRef2 * v;
+        aovs->pRef[pixIdx*3+0] = pRef[0];
+        aovs->pRef[pixIdx*3+1] = pRef[1];
+        aovs->pRef[pixIdx*3+2] = pRef[2];
+    }
+    if (aovs->uv) {
+        GfVec2f uv2 = tri.uv0 * w + tri.uv1 * u + tri.uv2 * v;
+        aovs->uv[pixIdx*2+0] = uv2[0];
+        aovs->uv[pixIdx*2+1] = uv2[1];
+    }
+    if (aovs->albedo) {
+        const SpectralMaterial& mat = scene.GetMaterial(tri.materialId);
+        SpectralMaterial resolved = _ResolveMaterial(mat, tri, w, u, v, scene);
+        aovs->albedo[pixIdx*3+0] = resolved.baseColor[0];
+        aovs->albedo[pixIdx*3+1] = resolved.baseColor[1];
+        aovs->albedo[pixIdx*3+2] = resolved.baseColor[2];
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Procedural fBm noise — deterministic, no tables, world-space
 // Ported from VDBmarcher (Marten Blumen)
 // ---------------------------------------------------------------------------
@@ -187,12 +253,6 @@ void SpectralIntegrator::RenderFrame(
         std::vector<float> accLumSqSum(numPixels, 0.f); // for variance
         std::vector<int>   accCount(numPixels, 0);
         std::vector<float> accAlpha(numPixels, 0.f);
-        // Shadow-catcher AOV accumulator: RGBA per pixel.
-        //   RGB = per-sample sum of (blocked_for_each_light * light.color * light.intensity)
-        //   A   = per-sample shadow fraction (matching the existing beauty alpha)
-        // Normalised by accCount at finalisation. Only populated when the
-        // caller set aovs->shadowCatcher.
-        std::vector<float> accShadowCatcher(numPixels * 4, 0.f);
         std::vector<bool>  converged(numPixels, false);
         std::vector<float> depthBuf(numPixels, 1e30f);
         std::vector<int>   objIdBuf(numPixels, 0);
@@ -392,50 +452,19 @@ void SpectralIntegrator::RenderFrame(
                                     bool isShadowCatcher = camera.shadowCatcherMatIds.count(hit.tri->materialId) > 0;
                                     if (isShadowCatcher) {
                                         float shadow = 0.f;
-                                        // Per-sample colored shadow: sum of blocked-light contributions.
-                                        // A light blocked by occluder adds its colour * intensity to the
-                                        // AOV RGB for this sample; unblocked lights add nothing.
-                                        GfVec3f sampleShadowRGB(0.f, 0.f, 0.f);
-                                        unsigned int li = 0;
                                         for (const auto& light : lights) {
-                                            // Jittered direction: for sphere / area / dome lights,
-                                            // SampleDirection returns a direction to a random point
-                                            // on the light's extent, giving the penumbra when averaged
-                                            // across samples. Distant lights are deterministic.
-                                            float su1 = _Hash(seed + 41u + li * 17u);
-                                            float su2 = _Hash(seed + 42u + li * 17u);
-                                            GfVec3f L = light.SampleDirection(hitPos, su1, su2, N);
+                                            GfVec3f L = light.position - hitPos;
+                                            float dist = L.GetLength();
+                                            if (dist < 1e-6f) continue;
+                                            L /= dist;
                                             float NdotL = std::max(0.f, N[0]*L[0] + N[1]*L[1] + N[2]*L[2]);
-                                            float blocked = 0.f;
-                                            if (NdotL < 0.001f) {
-                                                blocked = 1.f;  // back-facing counts as shadowed
-                                            } else {
-                                                GfRay shadowRay(GfVec3d(hitPos) + GfVec3d(N)*0.001, GfVec3d(L));
-                                                SpectralBVH::Hit sHit = bvh.Intersect(shadowRay, 0.f);
-                                                if (sHit.valid()) {
-                                                    if (light.type == SpectralLight::Type::Distant ||
-                                                        light.type == SpectralLight::Type::Dome) {
-                                                        blocked = 1.f;
-                                                    } else {
-                                                        float lightDist = (light.position - hitPos).GetLength();
-                                                        if (sHit.t < lightDist) blocked = 1.f;
-                                                    }
-                                                }
+                                            if (NdotL < 0.001f) { shadow += 1.f; continue; }
+                                            // Shadow ray
+                                            GfRay shadowRay(GfVec3d(hitPos) + GfVec3d(N)*0.001, GfVec3d(L));
+                                            SpectralBVH::Hit sHit = bvh.Intersect(shadowRay, 0.f);
+                                            if (sHit.valid() && sHit.t < dist) {
+                                                shadow += 1.f;  // in shadow
                                             }
-                                            shadow += blocked;
-                                            // Lambert diffuse contribution -- matches the main shader's
-                                            // direct-lighting term so the AOV reads in the same range as
-                                            // a white-diffuse surface lit by these same lights (no HDR
-                                            // clipping on bright suns).
-                                            //   contrib = NdotL * attenuation * intensity / pi
-                                            float atten = light.Attenuation(hitPos);
-                                            float contrib = NdotL * atten
-                                                          * light.EffectiveIntensity()
-                                                          * 0.31830988618f;  // 1/pi
-                                            sampleShadowRGB[0] += blocked * light.color[0] * contrib;
-                                            sampleShadowRGB[1] += blocked * light.color[1] * contrib;
-                                            sampleShadowRGB[2] += blocked * light.color[2] * contrib;
-                                            ++li;
                                         }
                                         float shadowFactor = lights.empty() ? 0.f : shadow / float(lights.size());
                                         accX[pixIdx] += 0.f;
@@ -443,18 +472,15 @@ void SpectralIntegrator::RenderFrame(
                                         accZ[pixIdx] += 0.f;
                                         accCount[pixIdx]++;
                                         accAlpha[pixIdx] += shadowFactor;  // alpha = shadow darkness
-                                        // AOV accumulator: RGB = colored shadow contribution,
-                                        // A = shadow fraction. Normalised by sample count later.
-                                        accShadowCatcher[pixIdx*4+0] += sampleShadowRGB[0];
-                                        accShadowCatcher[pixIdx*4+1] += sampleShadowRGB[1];
-                                        accShadowCatcher[pixIdx*4+2] += sampleShadowRGB[2];
-                                        accShadowCatcher[pixIdx*4+3] += shadowFactor;
                                         GfVec3d viewHit2 = worldToView.Transform(worldHit);
                                         float camZ2 = static_cast<float>(-viewHit2[2]);
                                         if (camZ2 < depthBuf[pixIdx]) depthBuf[pixIdx] = camZ2;
                                         if (objIdBuf[pixIdx] == 0) {
                                             objIdBuf[pixIdx] = hit.tri->objectId;
                                             matIdBuf[pixIdx] = hit.tri->materialId;
+                                            _WriteFirstHitAOVs(aovs, pixIdx, *hit.tri,
+                                                               float(hit.u), float(hit.v),
+                                                               hitPos, rayDir, scene);
                                         }
                                         continue;
                                     }
@@ -498,6 +524,9 @@ void SpectralIntegrator::RenderFrame(
                                     if (objIdBuf[pixIdx] == 0) {
                                         objIdBuf[pixIdx] = hit.tri->objectId;
                                         matIdBuf[pixIdx] = hit.tri->materialId;
+                                        _WriteFirstHitAOVs(aovs, pixIdx, *hit.tri,
+                                                           float(hit.u), float(hit.v),
+                                                           hitPos, rayDir, scene);
                                     }
                                     continue;
                                 }
@@ -509,56 +538,30 @@ void SpectralIntegrator::RenderFrame(
                                     float nlen = N.GetLength();
                                     if (nlen > 1e-6f) N /= nlen;
                                     float shadow = 0.f;
-                                    GfVec3f sampleShadowRGB(0.f, 0.f, 0.f);
                                     const auto& lights = scene.GetLights();
-                                    unsigned int li = 0;
                                     for (const auto& light : lights) {
-                                        // Jittered sample direction -- see block #1 for rationale.
-                                        float su1 = _Hash(seed + 41u + li * 17u);
-                                        float su2 = _Hash(seed + 42u + li * 17u);
-                                        GfVec3f L = light.SampleDirection(hitPos, su1, su2, N);
+                                        GfVec3f L = light.position - hitPos;
+                                        float dist = L.GetLength();
+                                        if (dist < 1e-6f) continue;
+                                        L /= dist;
                                         float NdotL = std::max(0.f, N[0]*L[0] + N[1]*L[1] + N[2]*L[2]);
-                                        float blocked = 0.f;
-                                        if (NdotL < 0.001f) {
-                                            blocked = 1.f;
-                                        } else {
-                                            GfRay shadowRay(GfVec3d(hitPos) + GfVec3d(N) * 0.001, GfVec3d(L));
-                                            SpectralBVH::Hit sHit = bvh.Intersect(shadowRay, 0.f);
-                                            if (sHit.valid()) {
-                                                if (light.type == SpectralLight::Type::Distant ||
-                                                    light.type == SpectralLight::Type::Dome) {
-                                                    blocked = 1.f;
-                                                } else {
-                                                    float lightDist = (light.position - hitPos).GetLength();
-                                                    if (sHit.t < lightDist) blocked = 1.f;
-                                                }
-                                            }
-                                        }
-                                        shadow += blocked;
-                                        // Lambert diffuse contribution -- see block #1.
-                                        float atten = light.Attenuation(hitPos);
-                                        float contrib = NdotL * atten
-                                                      * light.EffectiveIntensity()
-                                                      * 0.31830988618f;  // 1/pi
-                                        sampleShadowRGB[0] += blocked * light.color[0] * contrib;
-                                        sampleShadowRGB[1] += blocked * light.color[1] * contrib;
-                                        sampleShadowRGB[2] += blocked * light.color[2] * contrib;
-                                        ++li;
+                                        if (NdotL < 0.001f) { shadow += 1.f; continue; }
+                                        GfRay shadowRay(GfVec3d(hitPos) + GfVec3d(N) * 0.001, GfVec3d(L));
+                                        SpectralBVH::Hit sHit = bvh.Intersect(shadowRay, 0.f);
+                                        if (sHit.valid() && sHit.t < dist) shadow += 1.f;
                                     }
                                     float sFactor = lights.empty() ? 0.f : shadow / float(lights.size());
                                     accAlpha[pixIdx] += sFactor;
                                     accCount[pixIdx]++;
-                                    // AOV: colored shadow in RGB, shadow fraction in A.
-                                    accShadowCatcher[pixIdx*4+0] += sampleShadowRGB[0];
-                                    accShadowCatcher[pixIdx*4+1] += sampleShadowRGB[1];
-                                    accShadowCatcher[pixIdx*4+2] += sampleShadowRGB[2];
-                                    accShadowCatcher[pixIdx*4+3] += sFactor;
                                     GfVec3d viewHit = worldToView.Transform(worldHit);
                                     float camZ = static_cast<float>(-viewHit[2]);
                                     if (camZ < depthBuf[pixIdx]) depthBuf[pixIdx] = camZ;
                                     if (objIdBuf[pixIdx] == 0) {
                                         objIdBuf[pixIdx] = hit.tri->objectId;
                                         matIdBuf[pixIdx] = hit.tri->materialId;
+                                        _WriteFirstHitAOVs(aovs, pixIdx, *hit.tri,
+                                                           float(hit.u), float(hit.v),
+                                                           hitPos, rayDir, scene);
                                     }
                                     continue;
                                 }
@@ -595,46 +598,9 @@ void SpectralIntegrator::RenderFrame(
                                 if (objIdBuf[pixIdx] == 0) {
                                     objIdBuf[pixIdx] = hit.tri->objectId;
                                     matIdBuf[pixIdx] = hit.tri->materialId;
-
-                                    // Geometry AOVs — first hit only
-                                    if (aovs) {
-                                        float w = 1.f - float(hit.u) - float(hit.v);
-                                        GfVec3f N = hit.tri->n0 * w + hit.tri->n1 * float(hit.u) + hit.tri->n2 * float(hit.v);
-                                        float nlen = N.GetLength();
-                                        if (nlen > 1e-6f) N /= nlen;
-                                        GfVec3f V = GfVec3f(-rayDir);
-                                        float vlen = V.GetLength();
-                                        if (vlen > 1e-6f) V /= vlen;
-                                        if (N[0]*V[0]+N[1]*V[1]+N[2]*V[2] < 0.f) N = -N;
-
-                                        if (aovs->normal) {
-                                            aovs->normal[pixIdx*3+0] = N[0];
-                                            aovs->normal[pixIdx*3+1] = N[1];
-                                            aovs->normal[pixIdx*3+2] = N[2];
-                                        }
-                                        if (aovs->position) {
-                                            aovs->position[pixIdx*3+0] = hitPos[0];
-                                            aovs->position[pixIdx*3+1] = hitPos[1];
-                                            aovs->position[pixIdx*3+2] = hitPos[2];
-                                        }
-                                        if (aovs->pRef) {
-                                            GfVec3f pRef = hit.tri->pRef0 * w + hit.tri->pRef1 * float(hit.u) + hit.tri->pRef2 * float(hit.v);
-                                            aovs->pRef[pixIdx*3+0] = pRef[0];
-                                            aovs->pRef[pixIdx*3+1] = pRef[1];
-                                            aovs->pRef[pixIdx*3+2] = pRef[2];
-                                        }
-                                        if (aovs->uv) {
-                                            GfVec2f uv = hit.tri->uv0 * w + hit.tri->uv1 * float(hit.u) + hit.tri->uv2 * float(hit.v);
-                                            aovs->uv[pixIdx*2+0] = uv[0];
-                                            aovs->uv[pixIdx*2+1] = uv[1];
-                                        }
-                                        if (aovs->albedo) {
-                                            SpectralMaterial resolved = _ResolveMaterial(mat, *hit.tri, w, float(hit.u), float(hit.v), scene);
-                                            aovs->albedo[pixIdx*3+0] = resolved.baseColor[0];
-                                            aovs->albedo[pixIdx*3+1] = resolved.baseColor[1];
-                                            aovs->albedo[pixIdx*3+2] = resolved.baseColor[2];
-                                        }
-                                    }
+                                    _WriteFirstHitAOVs(aovs, pixIdx, *hit.tri,
+                                                       float(hit.u), float(hit.v),
+                                                       hitPos, rayDir, scene);
                                 }
                             } else {
                                 // Primary ray miss
@@ -1220,15 +1186,6 @@ void SpectralIntegrator::RenderFrame(
                 write3(aovs->diffuseIndirect, accDiffIndX[i], accDiffIndY[i], accDiffIndZ[i]);
                 write3(aovs->specularIndirect,accSpecIndX[i], accSpecIndY[i], accSpecIndZ[i]);
                 write3(aovs->transmission,    accTransX[i],   accTransY[i],   accTransZ[i]);
-            }
-            // Shadow catcher AOV -- RGB = accumulated coloured shadow, A = shadow fraction.
-            // RGB may exceed 1.0 with HDR lights; only non-negativity is enforced.
-            // Alpha is clamped to 0..1 to match the beauty alpha.
-            if (aovs && aovs->shadowCatcher) {
-                aovs->shadowCatcher[i*4+0] = std::max(0.f, accShadowCatcher[i*4+0] * invN);
-                aovs->shadowCatcher[i*4+1] = std::max(0.f, accShadowCatcher[i*4+1] * invN);
-                aovs->shadowCatcher[i*4+2] = std::max(0.f, accShadowCatcher[i*4+2] * invN);
-                aovs->shadowCatcher[i*4+3] = std::min(1.f, std::max(0.f, accShadowCatcher[i*4+3] * invN));
             }
         }
 
@@ -2701,8 +2658,7 @@ void SpectralIntegrator::RenderFrameGPU(
     const SpectralVolume* const* volumes,
     int                   numVolumes,
     StripCallback         stripCallback,
-    int                   numStrips,
-    float*                shadowCatcherAOV)
+    int                   numStrips)
 {
     // Phase 13: GPU handles multi-volume natively (up to 8)
     if (numVolumes > SPECTRAL_MAX_GPU_VOLUMES) {
@@ -2711,42 +2667,30 @@ void SpectralIntegrator::RenderFrameGPU(
         numVolumes = SPECTRAL_MAX_GPU_VOLUMES;
     }
 
-    // CPU fallback helper -- forwards through an AOVBuffers struct if the
-    // caller wanted the shadow catcher AOV. Beauty-only callers stay on the
-    // minimal CPU fallback path.
-    auto cpuFallback = [&]() {
-        if (shadowCatcherAOV) {
-            AOVBuffers aovs;
-            aovs.shadowCatcher = shadowCatcherAOV;
-            RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces,
-                        nullptr, nullptr, &aovs, nullptr, nullptr, 0.5f, colorSpace,
-                        volumes, numVolumes);
-        } else {
-            RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces,
-                        nullptr, nullptr, nullptr, nullptr, nullptr, 0.5f, colorSpace,
-                        volumes, numVolumes);
-        }
-    };
-
     SpectralGPU* gpu = _GetGPU();
     if (!gpu) {
         fprintf(stderr, "SpectralIntegrator: GPU unavailable, using CPU\n");
-        cpuFallback();
+        RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces,
+                    nullptr, nullptr, nullptr, nullptr, nullptr, 0.5f, colorSpace,
+                    volumes, numVolumes);
         return;
     }
 
     if (!gpu->BuildAccel(scene)) {
         fprintf(stderr, "SpectralIntegrator: GPU accel build failed, using CPU\n");
-        cpuFallback();
+        RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces,
+                    nullptr, nullptr, nullptr, nullptr, nullptr, 0.5f, colorSpace,
+                    volumes, numVolumes);
         return;
     }
 
     if (!gpu->Render(camera, camera.imageWidth, camera.imageHeight,
                      pixels, depthOut, spp, maxBounces, colorSpace,
-                     volumes, numVolumes, stripCallback, numStrips,
-                     shadowCatcherAOV)) {
+                     volumes, numVolumes, stripCallback, numStrips)) {
         fprintf(stderr, "SpectralIntegrator: GPU render failed, using CPU\n");
-        cpuFallback();
+        RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces,
+                    nullptr, nullptr, nullptr, nullptr, nullptr, 0.5f, colorSpace,
+                    volumes, numVolumes);
         return;
     }
 

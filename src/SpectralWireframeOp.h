@@ -64,6 +64,9 @@ private:
     float _topoUpVector[3] = {0.f, 1.f, 0.f};
     float _topoContourInterval = 0.5f;
     int   _topoMajorEvery = 5;
+    // Antialiasing
+    int   _aaMode = 1;       // 0=off, 1=edge, 2=2x2, 3=4x4
+    float _aaWidth = 1.5f;   // smoothstep band in pixels (mode >= 1)
 
     void _SetShaderProperties(usg::ShaderDesc& desc, const MaterialContext& rtx);
 
@@ -96,6 +99,9 @@ public:
         float  topoUpVector[3] = {0.f, 1.f, 0.f};
         float  topoContourInterval = 0.5f;
         int    topoMajorEvery = 5;
+        // Antialiasing
+        int    aaMode = 1;
+        float  aaWidth = 1.5f;
     };
     static std::unordered_map<std::string, WireframeParams>& GetRegistry();
     void RegisterParams();

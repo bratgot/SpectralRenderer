@@ -18,6 +18,10 @@ static const char* const kTopoDirectionNames[] = {
     "world Y (up)", "custom direction", "normal curvature", "barycentric", nullptr
 };
 
+static const char* const kAAModeNames[] = {
+    "off (hard edges)", "smooth (1x)", "soft (1.5x)", "softest (2.5x)", nullptr
+};
+
 const char* const SpectralWireframeOp::CLASS = "SpectralWireframe";
 
 static Op* build(Node* node) { return new SpectralWireframeOp(node); }
@@ -57,39 +61,38 @@ void SpectralWireframeOp::knobs(Knob_Callback f)
                "topographic -- contour lines from surface elevation/curvature");
 
     // ===============================================================
-    BeginGroup(f, "wireframe_common_grp", "Line");
-    {
-        Color_knob(f, _wireColor, "wire_color", "color");
-        Tooltip(f, "Primary line colour.\n"
-                   "White for wireframe-only renders.\n"
-                   "Black or dark blue over lit surfaces.");
-        Float_knob(f, &_wireThickness, "wire_thickness", "thickness");
-        SetRange(f, 0.1f, 10.0f);
-        Tooltip(f, "Base line width in pixels.\n"
-                   "1 = hairline, 2 = medium, 3+ = bold.\n"
-                   "Architectural/pencil styles vary this per-line.");
-        Float_knob(f, &_wireOpacity, "wire_opacity", "opacity");
-        SetRange(f, 0.0f, 1.0f);
-        ClearFlags(f, Knob::STARTLINE);
-        Float_knob(f, &_gridDensity, "grid_density", "grid density");
-        SetRange(f, 1.0f, 64.0f);
-        Tooltip(f, "Grid lines per UV unit.\n"
-                   "1 = sparse, 10 = default, 32+ = dense.\n"
-                   "On subdivided meshes this shows quad edges.");
-        Divider(f);
-        Bool_knob(f, &_wireDashed, "wire_dashed", "dashed");
-        Tooltip(f, "Force dashed lines (solid/hidden-line styles).\n"
-                   "Guide style is always dashed.");
-        Float_knob(f, &_wireDashLength, "wire_dash_length", "dash");
-        SetRange(f, 1.0f, 32.0f);
-        ClearFlags(f, Knob::STARTLINE);
-        Tooltip(f, "Dash length in pixels.");
-        Float_knob(f, &_wireGapLength, "wire_gap_length", "gap");
-        SetRange(f, 1.0f, 32.0f);
-        ClearFlags(f, Knob::STARTLINE);
-        Tooltip(f, "Gap length in pixels.");
-    }
-    EndGroup(f);
+    // Line controls — top-level (unwrapped from the twirly group so
+    // colour/thickness/grid are visible without expanding).
+    Divider(f, "Line");
+    Color_knob(f, _wireColor, "wire_color", "color");
+    Tooltip(f, "Primary line colour.\n"
+               "White for wireframe-only renders.\n"
+               "Black or dark blue over lit surfaces.");
+    Float_knob(f, &_wireThickness, "wire_thickness", "thickness");
+    SetRange(f, 0.1f, 10.0f);
+    Tooltip(f, "Base line width in pixels.\n"
+               "1 = hairline, 2 = medium, 3+ = bold.\n"
+               "Architectural/pencil styles vary this per-line.");
+    Float_knob(f, &_wireOpacity, "wire_opacity", "opacity");
+    SetRange(f, 0.0f, 1.0f);
+    ClearFlags(f, Knob::STARTLINE);
+    Float_knob(f, &_gridDensity, "grid_density", "grid density");
+    SetRange(f, 1.0f, 64.0f);
+    Tooltip(f, "Grid lines per UV unit.\n"
+               "1 = sparse, 10 = default, 32+ = dense.\n"
+               "On subdivided meshes this shows quad edges.");
+    Divider(f);
+    Bool_knob(f, &_wireDashed, "wire_dashed", "dashed");
+    Tooltip(f, "Force dashed lines (solid/hidden-line styles).\n"
+               "Guide style is always dashed.");
+    Float_knob(f, &_wireDashLength, "wire_dash_length", "dash");
+    SetRange(f, 1.0f, 32.0f);
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "Dash length in pixels.");
+    Float_knob(f, &_wireGapLength, "wire_gap_length", "gap");
+    SetRange(f, 1.0f, 32.0f);
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "Gap length in pixels.");
 
     // ===============================================================
     BeginGroup(f, "wireframe_arch_grp", "Architectural");
@@ -205,6 +208,33 @@ void SpectralWireframeOp::knobs(Knob_Callback f)
                    "5 = every 5th line is thick (like index contours).");
     }
     EndGroup(f);
+
+    // ===============================================================
+    BeginGroup(f, "wireframe_aa_grp", "Antialiasing");
+    {
+        Text_knob(f,
+            "<font color='#666' size='-1'>"
+            "The overlay is a single post-process pass -- render samples<br>"
+            "don't antialias it. These knobs do, at the cost of a wider<br>"
+            "edge band (cheap) or per-pixel subsamples (more CPU)."
+            "</font>"
+        );
+        Divider(f);
+        Enumeration_knob(f, &_aaMode, kAAModeNames, "aa_mode", "mode");
+        Tooltip(f, "off -- hard-edged lines (original behaviour).\n"
+                   "smooth (1x) -- smoothstep falloff at the edge width below.\n"
+                   "soft (1.5x) -- 1.5x the edge width. More flicker resistance.\n"
+                   "softest (2.5x) -- 2.5x the edge width. Softest lines, best\n"
+                   "  for heavy motion. Pixel-level supersample is on the\n"
+                   "  roadmap but edge smoothing handles most flicker alone.");
+        Float_knob(f, &_aaWidth, "aa_width", "edge width");
+        SetRange(f, 0.5f, 4.0f);
+        Tooltip(f, "Smoothstep band width in pixels (modes >= 'edge smoothing').\n"
+                   "1.0 = tight (sharper but more flicker-prone)\n"
+                   "1.5 = default (balanced)\n"
+                   "2.5-3.0 = soft (heaviest AA, softest lines)");
+    }
+    EndGroup(f);
 }
 
 int SpectralWireframeOp::knob_changed(Knob* k)
@@ -256,6 +286,9 @@ void SpectralWireframeOp::RegisterParams()
     p.topoUpVector[2]      = _topoUpVector[2];
     p.topoContourInterval  = _topoContourInterval;
     p.topoMajorEvery       = _topoMajorEvery;
+    // Antialiasing
+    p.aaMode               = _aaMode;
+    p.aaWidth              = _aaWidth;
     GetRegistry()[node_name()] = p;
 }
 
