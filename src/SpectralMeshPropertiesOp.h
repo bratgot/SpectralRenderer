@@ -32,6 +32,7 @@ public:
     };
 
     SpectralMeshPropertiesOp(Node* node);
+    ~SpectralMeshPropertiesOp() override;
 
     int minimum_inputs() const override { return 1; }
     int maximum_inputs() const override { return 1; }
@@ -61,12 +62,6 @@ public:
     void RegisterParams();
 
 private:
-    // Master enable -- lets the user turn the node off without relying on
-    // Nuke's D-key disable mechanism, which isn't always reliable for
-    // GeomOps (Nuke may skip _validate on disabled nodes, leaving the
-    // registry out of sync).
-    bool  _enable = true;
-
     // Subdivision
     int   _subdivLevel = 0;
     int   _subdivScheme = 0;

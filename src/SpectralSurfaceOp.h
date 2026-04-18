@@ -26,6 +26,7 @@ class HDSPECTRAL_API SpectralSurfaceOp : public ShaderOp
 {
 public:
     explicit SpectralSurfaceOp(Node* node);
+    ~SpectralSurfaceOp() override;
 
     int minimum_inputs() const override { return 2; }
     int maximum_inputs() const override { return 2; }

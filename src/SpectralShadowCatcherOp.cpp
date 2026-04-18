@@ -19,6 +19,16 @@ SpectralShadowCatcherOp::SpectralShadowCatcherOp(Node* node)
 {
 }
 
+// Erase our registry entry on Op destruction. See SpectralSurfaceOp.cpp
+// for rationale; rename still leaks under the old name.
+SpectralShadowCatcherOp::~SpectralShadowCatcherOp()
+{
+    auto& reg = GetRegistry();
+    auto it = reg.find(node_name());
+    if (it != reg.end())
+        reg.erase(it);
+}
+
 const char* SpectralShadowCatcherOp::node_help() const
 {
     return

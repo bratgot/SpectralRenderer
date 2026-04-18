@@ -4,13 +4,6 @@
 
 #include "SpectralMeshPropertiesOp.h"
 #include <DDImage/Knobs.h>
-#include <cstdio>
-
-// Lightweight log macro matching the rest of the codebase -- Op .cpp files
-// don't always have SLOG in scope, so define a local fallback.
-#ifndef SLOG
-#define SLOG(...) std::fprintf(stderr, __VA_ARGS__)
-#endif
 
 using namespace DD::Image;
 
@@ -33,6 +26,16 @@ const GeomOp::Description SpectralMeshPropertiesOp::description("SpectralMeshPro
 SpectralMeshPropertiesOp::SpectralMeshPropertiesOp(Node* node)
     : GeomOp(node, BuildEngine<Engine>())
 {
+}
+
+// Erase our registry entry on Op destruction. See SpectralSurfaceOp.cpp
+// for rationale; rename still leaks under the old name.
+SpectralMeshPropertiesOp::~SpectralMeshPropertiesOp()
+{
+    auto& reg = GetRegistry();
+    auto it = reg.find(node_name());
+    if (it != reg.end())
+        reg.erase(it);
 }
 
 const char* SpectralMeshPropertiesOp::node_help() const
@@ -61,18 +64,8 @@ void SpectralMeshPropertiesOp::knobs(Knob_Callback f)
     Text_knob(f,
         "<b><font size='+1'>SpectralMeshProperties</font></b><br>"
         "<font color='#999'>Per-mesh render overrides for SpectralRenderer.<br>"
-        "Connect between geometry and GeoScene.<br>"
-        "All settings apply at render time only -- viewport geometry is "
-        "passed through unchanged.</font>"
+        "Connect between geometry and GeoScene.</font>"
     );
-    Divider(f);
-
-    // Master enable. Toggling this is the recommended way to turn the
-    // node on/off -- more reliable than Nuke's D-key disable for GeomOps.
-    Bool_knob(f, &_enable, "enable", "enable");
-    Tooltip(f, "Master switch. Turn off to make this node a pure pass-through.\n"
-               "Equivalent in effect to disabling the node (D key), but more\n"
-               "reliable for script reloads and cold renders.");
     Divider(f);
 
     // === Subdivision ===
@@ -87,6 +80,7 @@ void SpectralMeshPropertiesOp::knobs(Knob_Callback f)
         Divider(f);
         Int_knob(f, &_subdivLevel, "subdiv_level", "level");
         SetRange(f, 0, 6);
+        KnobModifiesAttribValues(f);
         Tooltip(f, "Subdivision iterations at render time.\n"
                    "0 = use SpectralRender node's global setting\n"
                    "1 = light (4x faces)\n"
@@ -95,6 +89,7 @@ void SpectralMeshPropertiesOp::knobs(Knob_Callback f)
                    "4+ = very high -- close-up detail\n\n"
                    "Each level quadruples the face count.");
         Enumeration_knob(f, &_subdivScheme, kSubdivSchemeNames, "subdiv_scheme", "scheme");
+        KnobModifiesAttribValues(f);
         Tooltip(f, "Subdivision algorithm:\n\n"
                    "auto -- use whatever the mesh specifies\n"
                    "catmullClark -- quads, smooth corners (most common)\n"
@@ -108,12 +103,14 @@ void SpectralMeshPropertiesOp::knobs(Knob_Callback f)
     BeginGroup(f, "mesh_normals_grp", "Normals");
     {
         Enumeration_knob(f, &_normalMode, kNormalModeNames, "normal_mode", "mode");
+        KnobModifiesAttribValues(f);
         Tooltip(f, "How normals are computed for shading:\n\n"
                    "auto -- use mesh normals if present, else smooth\n"
                    "smooth -- interpolated vertex normals (soft edges)\n"
                    "faceted -- flat per-face normals (hard edges)\n"
                    "vertex normals -- force use of mesh vertex normals");
         Bool_knob(f, &_flipNormals, "flip_normals", "flip normals");
+        KnobModifiesAttribValues(f);
         Tooltip(f, "Reverse normal direction.\n"
                    "Fixes inside-out geometry from bad winding order.");
     }
@@ -130,9 +127,12 @@ void SpectralMeshPropertiesOp::knobs(Knob_Callback f)
         );
         Divider(f);
         Bool_knob(f, &_useDisplayColor, "use_display_color", "override display color");
+        KnobModifiesAttribValues(f);
         Color_knob(f, _displayColor, "display_color", "color");
+        KnobModifiesAttribValues(f);
         Float_knob(f, &_displayOpacity, "display_opacity", "opacity");
         SetRange(f, 0.0f, 1.0f);
+        KnobModifiesAttribValues(f);
     }
     EndGroup(f);
 
@@ -140,15 +140,20 @@ void SpectralMeshPropertiesOp::knobs(Knob_Callback f)
     BeginGroup(f, "mesh_usd_grp", "USD Attributes");
     {
         Bool_knob(f, &_doubleSided, "double_sided", "double-sided");
+        KnobModifiesAttribValues(f);
         Tooltip(f, "Render both sides of the mesh.\n"
                    "Off = back faces culled (faster).");
         Enumeration_knob(f, &_orientation, kOrientationNames, "orientation", "orientation");
         ClearFlags(f, Knob::STARTLINE);
+        KnobModifiesAttribValues(f);
         Divider(f);
         Enumeration_knob(f, &_purpose, kPurposeNames, "purpose", "purpose");
+        KnobModifiesAttribValues(f);
         Bool_knob(f, &_visible, "visible", "visible");
         ClearFlags(f, Knob::STARTLINE);
+        KnobModifiesAttribValues(f);
         Bool_knob(f, &_castsShadows, "casts_shadows", "casts shadows");
+        KnobModifiesAttribValues(f);
     }
     EndGroup(f);
 }
@@ -193,22 +198,11 @@ SpectralMeshPropertiesOp::GetRegistry()
 
 void SpectralMeshPropertiesOp::RegisterParams()
 {
-    // Two ways this node can be "off":
-    //   1. User toggled the master enable knob off
-    //   2. User hit D on the node (Nuke disable)
-    // Either way, remove any stale entry so downstream SpectralRenderIop
-    // sees no overrides. Re-enabling re-adds via the next knob_changed /
-    // _validate cycle.
-    const bool disabled = node_disabled();
-    if (!_enable || disabled) {
-        auto& reg = GetRegistry();
-        auto it = reg.find(node_name());
-        if (it != reg.end()) {
-            SLOG("SpectralMeshProperties '%s': erasing from registry "
-                 "(enable=%d node_disabled=%d)\n",
-                 node_name(), (int)_enable, (int)disabled);
-            reg.erase(it);
-        }
+    // If the node is disabled in Nuke, remove any stale entry from the
+    // registry so downstream SpectralRenderIop sees no overrides for this
+    // node. Re-enabling will re-add via the next _validate / knob_changed.
+    if (node_disabled()) {
+        GetRegistry().erase(node_name());
         return;
     }
 

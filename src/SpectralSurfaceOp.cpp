@@ -51,6 +51,25 @@ SpectralSurfaceOp::SpectralSurfaceOp(Node* node)
 {
 }
 
+// Remove our registry entry when the Op is destroyed. This fires when
+// the node is deleted, the script is closed, or the Op is re-created
+// (e.g. Nuke rebuilding the DAG after a structural edit). Without this
+// the map grows for the life of the process and the last-known state
+// of deleted nodes lingers as phantom overrides on any mesh that
+// matches by prim-path fallback.
+//
+// Rename: Nuke does not destroy the Op on a simple rename, so the old
+// entry is NOT erased here. RegisterParams will insert a second entry
+// under the new name and the old one persists until deletion. Known
+// limitation -- tracked in ROADMAP tech debt.
+SpectralSurfaceOp::~SpectralSurfaceOp()
+{
+    auto& reg = GetRegistry();
+    auto it = reg.find(node_name());
+    if (it != reg.end())
+        reg.erase(it);
+}
+
 const char* SpectralSurfaceOp::node_help() const
 {
     return

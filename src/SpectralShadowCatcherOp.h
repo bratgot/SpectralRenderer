@@ -13,6 +13,7 @@ class HDSPECTRAL_API SpectralShadowCatcherOp : public ShaderOp
 {
 public:
     explicit SpectralShadowCatcherOp(Node* node);
+    ~SpectralShadowCatcherOp() override;
 
     int minimum_inputs() const override { return 0; }
     int maximum_inputs() const override { return 0; }
