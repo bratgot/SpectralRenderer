@@ -149,7 +149,7 @@ void SpectralMeshPropertiesOp::knobs(Knob_Callback f)
         Divider(f);
         Enumeration_knob(f, &_purpose, kPurposeNames, "purpose", "purpose");
         KnobModifiesAttribValues(f);
-        Bool_knob(f, &_visible, "visible", "visible");
+        Bool_knob(f, &_visible, "spec_visible", "visible");
         ClearFlags(f, Knob::STARTLINE);
         KnobModifiesAttribValues(f);
         Bool_knob(f, &_castsShadows, "casts_shadows", "casts shadows");
