@@ -377,7 +377,14 @@ void SpectralIntegrator::RenderFrame(
                                                 hitOpacity *= oTex->_pixels[oIdx];
                                         }
                                     }
-                                    if (hitOpacity < 0.01f) continue;
+                                    if (hitOpacity < 0.01f) {
+                                        static std::atomic<int> skipLog{0};
+                                        if (skipLog++ < 5) {
+                                            fprintf(stderr, "COMPAT-SKIP: mat.opacity=%.3f texId=%d blend=%.3f hitUV=(%.2f,%.2f)\n",
+                                                    mat.opacity, mat.baseColorTexId, mat.textureBlend, hitUV[0], hitUV[1]);
+                                        }
+                                        continue;
+                                    }
 
                                     // Normal
                                     GfVec3f N = hit.tri->n0 * bw + hit.tri->n1 * float(hit.u) + hit.tri->n2 * float(hit.v);
@@ -426,14 +433,79 @@ void SpectralIntegrator::RenderFrame(
                                         // No lights = constant shader
                                         rgb = baseCol;
                                     } else {
+                                        // Compat shader handles three light types differently,
+                                        // matching Nuke's ScanlineRender conventions:
+                                        //  - Distant (sun): directional, no distance falloff, L = -direction
+                                        //  - Dome (sky): hemispherical ambient, constant contribution
+                                        //  - Sphere/Point: positional with 1/r^2 falloff (unless "distant sphere" soft-shadow)
+                                        // Earlier this did 1/r^2 on every light unconditionally, which hit
+                                        // the typically-zero .position of Distant and Dome lights with
+                                        // astronomical attenuation. SpectralEnvLight's sun+sky produced
+                                        // ~1e-6 pixel values in compat mode as a result.
                                         for (const auto& light : lights) {
-                                            GfVec3f L = light.position - hitPos;
-                                            float dist = L.GetLength();
-                                            if (dist < 1e-6f) continue;
-                                            L /= dist;
-                                            float NdotL = std::max(0.f, N[0]*L[0] + N[1]*L[1] + N[2]*L[2]);
-                                            float atten = 1.f / (dist * dist);
                                             float intensity = light.EffectiveIntensity();
+                                            GfVec3f L;
+                                            float atten = 1.f;
+
+                                            float shadowMax = std::numeric_limits<float>::max();
+                                            if (light.type == SpectralLight::Type::Distant) {
+                                                // Sun: L points FROM surface TOWARD the light, which is
+                                                // the negative of the light's emission direction.
+                                                L = -light.direction;
+                                                float Llen = L.GetLength();
+                                                if (Llen < 1e-6f) continue;
+                                                L /= Llen;
+                                                atten = 1.f;
+                                            } else if (light.type == SpectralLight::Type::Dome) {
+                                                // Hemispherical ambient. N dot L doesn't make sense;
+                                                // model as constant wrap-around contribution.
+                                                // 0.5 is the "upper hemisphere fraction" approximation.
+                                                // Double-sided: abs(N.y) so down-facing back faces still
+                                                // receive some sky ambient instead of clamping to zero.
+                                                float wrap = 0.5f + 0.5f * std::abs(N[1]);
+                                                rgb[0] += baseCol[0] * light.color[0] * intensity * wrap * float(1.0 / M_PI);
+                                                rgb[1] += baseCol[1] * light.color[1] * intensity * wrap * float(1.0 / M_PI);
+                                                rgb[2] += baseCol[2] * light.color[2] * intensity * wrap * float(1.0 / M_PI);
+                                                continue;  // no shadow-ray test for sky ambient
+                                            } else {
+                                                // Sphere / Point / Spot: positional with 1/r^2 falloff.
+                                                // (Sphere-as-sun at >100 unit distance: treat as distant for falloff.)
+                                                GfVec3f toLight = light.position - hitPos;
+                                                float dist = toLight.GetLength();
+                                                if (dist < 1e-6f) continue;
+                                                L = toLight / dist;
+                                                if (light.type == SpectralLight::Type::Sphere && dist > 100.f) {
+                                                    atten = 1.f;
+                                                } else {
+                                                    atten = 1.f / (dist * dist);
+                                                }
+                                                shadowMax = dist - 0.002f;
+                                            }
+
+                                            // Double-sided shading: compat mode matches ScanlineRender's
+                                            // default of showing both faces of a polygon, regardless of
+                                            // winding. abs(N . L) treats the surface as two-sided: a card
+                                            // with its default -Z-facing normal is still lit by a sun
+                                            // overhead instead of going black.
+                                            float NdotL = std::abs(N[0]*L[0] + N[1]*L[1] + N[2]*L[2]);
+                                            if (NdotL < 1e-4f) continue;
+
+                                            // Shadow test: single occlusion ray per light. Offset along
+                                            // the face normal (flipped to match the light-facing side)
+                                            // so we don't self-intersect on the originating triangle.
+                                            GfVec3f Ns = (N[0]*L[0] + N[1]*L[1] + N[2]*L[2] >= 0.f) ? N : -N;
+                                            GfRay   shadowRay(GfVec3d(hitPos) + GfVec3d(Ns) * 0.001,
+                                                              GfVec3d(L));
+                                            SpectralBVH::Hit sHit = bvh.Intersect(shadowRay, rayTime);
+                                            if (sHit.valid() && sHit.t < shadowMax) {
+                                                // castsShadows=false on the blocker: treat as unoccluded.
+                                                int blockerMatId = sHit.tri ? sHit.tri->materialId : -1;
+                                                bool noCast = (s_noShadowCastMatIds &&
+                                                               blockerMatId >= 0 &&
+                                                               s_noShadowCastMatIds->count(blockerMatId) > 0);
+                                                if (!noCast) continue;  // in shadow, skip this light
+                                            }
+
                                             float contrib = NdotL * atten * intensity * float(1.0 / M_PI);
                                             rgb[0] += baseCol[0] * light.color[0] * contrib;
                                             rgb[1] += baseCol[1] * light.color[1] * contrib;
