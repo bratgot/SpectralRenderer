@@ -1,6 +1,6 @@
 ^C:\DEV\SPECTRALRENDERER\HDSPECTRAL_PHASE1\HDSPECTRAL\BUILD\CMAKEFILES\F0674633EA0A78D0AC6B5A15F13FCDA3\SPECTRALNANODENSIFY.OBJ.RULE
 setlocal
-"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" -c -O3 --use_fast_math --std c++17 -I "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/include" -I C:/vcpkg/installed/x64-windows/include --machine 64 -Xcompiler "/MD /O2" -o C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build/SpectralNanoDensify.obj C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/src/SpectralNanoDensify.cu
+"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" -c -O3 --use_fast_math --std=c++17 -I "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/include" -I C:/vcpkg/installed/x64-windows/include --machine 64 -Xcompiler "/MD /O2" -o C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/build/SpectralNanoDensify.obj C:/dev/SpectralRenderer/HdSpectral_Phase1/HdSpectral/src/SpectralNanoDensify.cu
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone

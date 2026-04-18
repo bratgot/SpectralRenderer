@@ -44,7 +44,7 @@ if(EXISTS "${OPTIX_ROOT}/include/optix.h" AND EXISTS "${CUDA_TOOLKIT_ROOT}/bin/n
     set(DENSIFY_OBJ "${CMAKE_CURRENT_BINARY_DIR}/SpectralNanoDensify.obj")
     add_custom_command(OUTPUT "${DENSIFY_OBJ}"
         COMMAND "${CUDA_TOOLKIT_ROOT}/bin/nvcc.exe"
-            -c -O3 --use_fast_math --std c++17
+            -c -O3 --use_fast_math --std=c++17
             -I "${CUDA_TOOLKIT_ROOT}/include"
             -I "${VCPKG_INSTALLED}/include"
             --machine 64 -Xcompiler "/MD /O2"
@@ -311,14 +311,24 @@ endif()
 add_library(SpectralRender SHARED
     src/SpectralRenderIop.cpp src/SpectralSurfaceOp.cpp src/SpectralVDBRead.cpp src/SpectralVolumeMaterial.cpp
     src/SpectralEnvLight.cpp src/SpectralStudioLight.cpp src/SpectralVolMerge.cpp
+    src/SpectralWireframeOp.cpp src/SpectralShadowCatcherOp.cpp
+    src/SpectralMeshPropertiesOp.cpp
 )
 target_include_directories(SpectralRender PRIVATE ${SPECTRAL_INCLUDES})
 target_compile_definitions(SpectralRender PRIVATE ${SPECTRAL_DEFINES})
 target_compile_options(SpectralRender PRIVATE ${SPECTRAL_OPTIONS})
+find_library(LIB_GLEW glew32 PATHS "${NUKE_LIB_DIR}" NO_DEFAULT_PATH)
+if(NOT LIB_GLEW)
+    find_library(LIB_GLEW glew32 PATHS "${VCPKG_INSTALLED}/lib" NO_DEFAULT_PATH)
+endif()
+if(NOT LIB_GLEW)
+    set(LIB_GLEW "glew32")
+endif()
+
 target_link_libraries(SpectralRender PRIVATE
     SpectralCore "${LIB_DDIMAGE}" "${LIB_FDKBASE}" "${LIB_TBB}" "${LIB_NDK}"
     "${LIB_USDABS}" "${LIB_USDENGINE}" "C:/dev/SpectralRenderer/python311.lib" ${USD_LIBS}
-    opengl32 "${NUKE_ROOT}/glew32.lib"
+    opengl32 "${LIB_GLEW}"
 )
 
 set_target_properties(SpectralRender PROPERTIES

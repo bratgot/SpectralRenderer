@@ -337,6 +337,9 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClCompile Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralEnvLight.cpp" />
     <ClCompile Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralStudioLight.cpp" />
     <ClCompile Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralVolMerge.cpp" />
+    <ClCompile Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralWireframeOp.cpp" />
+    <ClCompile Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralShadowCatcherOp.cpp" />
+    <ClCompile Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralMeshPropertiesOp.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\ZERO_CHECK.vcxproj">

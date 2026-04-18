@@ -145,6 +145,10 @@ public:
         float* diffuseIndirect = nullptr;
         float* specularIndirect = nullptr;
         float* transmission    = nullptr;
+        // Shadow catcher output: 4 floats per pixel (R=G=B=shadow, A=shadow).
+        // Monochrome RGB so the pass reads fine in the viewer; alpha matches
+        // for use as a premultiplied mask in comp.
+        float* shadowCatcher   = nullptr;
     };
 
     static void RenderFrame(
@@ -178,7 +182,8 @@ public:
         const SpectralVolume* const* volumes = nullptr,
         int numVolumes = 0,
         StripCallback stripCallback = nullptr,
-        int numStrips = 1);
+        int numStrips = 1,
+        float* shadowCatcherAOV = nullptr);
 
     static bool IsGPUAvailable();
     static void DenoiseGPU(unsigned int width, unsigned int height, float* pixels);

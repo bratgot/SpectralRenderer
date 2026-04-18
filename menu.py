@@ -1,33 +1,43 @@
-# SpectralRenderer — Nuke menu registration
-# Place alongside SpectralRender.dll and icons in your NUKE_PATH
+# SpectralRenderer -- menu.py
+# Adds all SpectralRenderer nodes to the Nuke toolbar.
 
 import nuke
-import os
 
-# Ensure icon directory is on plugin path
-_dir = os.path.dirname(__file__)
-if _dir and _dir not in nuke.pluginPath():
-    nuke.pluginAddPath(_dir)
+if nuke.NUKE_VERSION_MAJOR >= 17:
 
-toolbar = nuke.menu("Nodes")
+    toolbar = nuke.toolbar("Nodes")
+    m = toolbar.addMenu("SpectralRenderer", icon="SpectralRender.png")
 
-# Spectral submenu under 3D
-m = toolbar.addMenu("3D/Spectral", icon="SpectralRender.png")
-m.addCommand("SpectralRender",         "nuke.createNode('SpectralRender')",         icon="SpectralRender.png")
-m.addCommand("SpectralSurface",        "nuke.createNode('SpectralSurface')",        icon="SpectralSurface.png")
-m.addCommand("SpectralVolumeMaterial", "nuke.createNode('SpectralVolumeMaterial')", icon="SpectralVolumeMaterial.png")
-m.addCommand("-", "", "")  # separator
-m.addCommand("SpectralVDBRead", "nuke.createNode('SpectralVDBRead')", icon="SpectralVDBRead.png")
-m.addCommand("-", "", "")  # separator
-m.addCommand("SpectralEnvLight",    "nuke.createNode('SpectralEnvLight')",    icon="SpectralEnvLight.png")
-m.addCommand("SpectralStudioLight", "nuke.createNode('SpectralStudioLight')", icon="SpectralStudioLight.png")
-m.addCommand("SpectralVolMerge",    "nuke.createNode('SpectralVolMerge')",    icon="SpectralVolMerge.png")
+    # --- Rendering ---
+    m.addCommand("SpectralRender", "nuke.createNode('SpectralRender')", icon="SpectralRender.png")
 
-# Top-level Tab access
-toolbar.addCommand("Spectral/SpectralRender",         "nuke.createNode('SpectralRender')")
-toolbar.addCommand("Spectral/SpectralSurface",        "nuke.createNode('SpectralSurface')")
-toolbar.addCommand("Spectral/SpectralVolumeMaterial", "nuke.createNode('SpectralVolumeMaterial')")
-toolbar.addCommand("Spectral/SpectralVDBRead",        "nuke.createNode('SpectralVDBRead')")
-toolbar.addCommand("Spectral/SpectralEnvLight",       "nuke.createNode('SpectralEnvLight')")
-toolbar.addCommand("Spectral/SpectralStudioLight",    "nuke.createNode('SpectralStudioLight')")
-toolbar.addCommand("Spectral/SpectralVolMerge",       "nuke.createNode('SpectralVolMerge')")
+    m.addSeparator()
+
+    # --- Materials ---
+    m.addCommand("Materials/SpectralSurface", "nuke.createNode('SpectralSurface')", icon="SpectralSurface.png")
+    m.addCommand("Materials/SpectralWireframe", "nuke.createNode('SpectralWireframe')", icon="SpectralWireframe.png")
+    m.addCommand("Materials/SpectralShadowCatcher", "nuke.createNode('SpectralShadowCatcher')", icon="SpectralShadowCatcher.png")
+    m.addCommand("Materials/SpectralVolumeMaterial", "nuke.createNode('SpectralVolumeMaterial')", icon="SpectralVolumeMaterial.png")
+
+    m.addSeparator()
+
+    # --- Geometry ---
+    m.addCommand("Geometry/SpectralMeshProperties", "nuke.createNode('SpectralMeshProperties')")
+
+    m.addSeparator()
+
+    # --- Scene ---
+    m.addCommand("Scene/SpectralVDBRead", "nuke.createNode('SpectralVDBRead')", icon="SpectralVDBRead.png")
+    m.addCommand("Scene/SpectralVolMerge", "nuke.createNode('SpectralVolMerge')", icon="SpectralVolMerge.png")
+
+    m.addSeparator()
+
+    # --- Lighting ---
+    m.addCommand("Lighting/SpectralEnvLight", "nuke.createNode('SpectralEnvLight')", icon="SpectralEnvLight.png")
+    m.addCommand("Lighting/SpectralStudioLight", "nuke.createNode('SpectralStudioLight')", icon="SpectralStudioLight.png")
+
+    # Tile colouring by device_mode (CPU / GPU / AUTO) -- registers callbacks.
+    try:
+        import spectral_device_tint  # noqa: F401
+    except Exception as e:
+        nuke.tprint("SpectralRenderer: device tint failed to load: %s" % e)

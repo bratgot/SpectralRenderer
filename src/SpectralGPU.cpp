@@ -166,6 +166,7 @@ void SpectralGPU::_FreeBuffers()
 {
     if (_d_framebuffer)  { cudaFree(reinterpret_cast<void*>(_d_framebuffer));  _d_framebuffer = 0; }
     if (_d_depthbuffer)  { cudaFree(reinterpret_cast<void*>(_d_depthbuffer));  _d_depthbuffer = 0; }
+    if (_d_shadowCatcherAOV) { cudaFree(reinterpret_cast<void*>(_d_shadowCatcherAOV)); _d_shadowCatcherAOV = 0; }
     if (_d_normals)      { cudaFree(reinterpret_cast<void*>(_d_normals));      _d_normals = 0; }
     if (_d_materialIds)  { cudaFree(reinterpret_cast<void*>(_d_materialIds));  _d_materialIds = 0; }
     if (_d_materials)    { cudaFree(reinterpret_cast<void*>(_d_materials));    _d_materials = 0; }
@@ -873,7 +874,8 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
                           int colorSpace, const SpectralVolume* const* volumes,
                           int numVolumes,
                           StripCallback stripCallback,
-                          int numStrips)
+                          int numStrips,
+                          float* shadowCatcherAOV)
 {
     if (!_pipeline || !_gasHandle) return false;
     if (width == 0 || height == 0) return false;
@@ -882,8 +884,10 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     if (width != _allocW || height != _allocH) {
         if (_d_framebuffer) cudaFree(reinterpret_cast<void*>(_d_framebuffer));
         if (_d_depthbuffer) cudaFree(reinterpret_cast<void*>(_d_depthbuffer));
+        if (_d_shadowCatcherAOV) cudaFree(reinterpret_cast<void*>(_d_shadowCatcherAOV));
         _d_framebuffer = 0;
         _d_depthbuffer = 0;
+        _d_shadowCatcherAOV = 0;
 
         size_t fbSize = size_t(width) * height * sizeof(float4);
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_framebuffer), fbSize));
@@ -893,6 +897,17 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
 
         _allocW = width;
         _allocH = height;
+    }
+
+    // Lazily allocate shadow catcher AOV only when the caller wants it.
+    if (shadowCatcherAOV && !_d_shadowCatcherAOV) {
+        size_t scSize = size_t(width) * height * sizeof(float4);
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_shadowCatcherAOV), scSize));
+    }
+    // Zero the AOV before the launch so the kernel's accumulation starts fresh.
+    if (shadowCatcherAOV && _d_shadowCatcherAOV) {
+        CUDA_CHECK(cudaMemset(reinterpret_cast<void*>(_d_shadowCatcherAOV), 0,
+                              size_t(width) * height * sizeof(float4)));
     }
 
     // Copy camera matrices to GPU — same ray generation as CPU _MakeRay
@@ -947,6 +962,10 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
         if (id >= 0 && id < 32) scMask |= (1u << id);
     }
     launchParams.shadowCatcherMask = scMask;
+    // Only set the AOV device pointer when the caller asked for the pass.
+    launchParams.shadowCatcherAOV = (shadowCatcherAOV && _d_shadowCatcherAOV)
+        ? reinterpret_cast<float4*>(_d_shadowCatcherAOV)
+        : nullptr;
 
     // UV projection lookup buffers
     if (_d_uvTriIndex) { cudaFree(reinterpret_cast<void*>(_d_uvTriIndex)); _d_uvTriIndex = 0; }
@@ -1423,6 +1442,24 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     }
 
     auto tDownloadEnd = std::chrono::high_resolution_clock::now();
+
+    // Copy + normalise the shadow catcher AOV, if requested.
+    if (shadowCatcherAOV && _d_shadowCatcherAOV) {
+        size_t px = size_t(width) * height;
+        CUDA_CHECK(cudaMemcpy(shadowCatcherAOV,
+                              reinterpret_cast<void*>(_d_shadowCatcherAOV),
+                              px * sizeof(float4),
+                              cudaMemcpyDeviceToHost));
+        // Per-sample accumulation on-device; divide by spp here, matching the
+        // CPU path's 1/accCount normalisation.
+        float invS = (spp > 0) ? 1.f / float(spp) : 1.f;
+        for (size_t i = 0; i < px * 4; ++i) {
+            float v = shadowCatcherAOV[i] * invS;
+            if (v < 0.f) v = 0.f;
+            else if (v > 1.f) v = 1.f;
+            shadowCatcherAOV[i] = v;
+        }
+    }
     {
         auto msUpload   = std::chrono::duration_cast<std::chrono::milliseconds>(tVolUploadEnd - tVolUploadStart).count();
         auto msLaunch   = std::chrono::duration_cast<std::chrono::milliseconds>(tLaunchEnd - tLaunchStart).count();

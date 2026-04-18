@@ -5,3 +5,6 @@ C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralVolumeMaterial.
 C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralEnvLight.cpp;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralRender.dir\Release\SpectralEnvLight.obj
 C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralStudioLight.cpp;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralRender.dir\Release\SpectralStudioLight.obj
 C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralVolMerge.cpp;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralRender.dir\Release\SpectralVolMerge.obj
+C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralWireframeOp.cpp;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralRender.dir\Release\SpectralWireframeOp.obj
+C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralShadowCatcherOp.cpp;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralRender.dir\Release\SpectralShadowCatcherOp.obj
+C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\src\SpectralMeshPropertiesOp.cpp;C:\dev\SpectralRenderer\HdSpectral_Phase1\HdSpectral\build\SpectralRender.dir\Release\SpectralMeshPropertiesOp.obj

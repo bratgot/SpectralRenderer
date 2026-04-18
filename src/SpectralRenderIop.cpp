@@ -1,5 +1,8 @@
 #include "SpectralRenderIop.h"
 #include "SpectralSurfaceOp.h"
+#include "SpectralWireframeOp.h"
+#include "SpectralShadowCatcherOp.h"
+#include "SpectralMeshPropertiesOp.h"
 #include <chrono>
 #include <cstdlib>
 
@@ -223,9 +226,11 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                "reflectance and back. This round-trip can introduce a subtle colour\n"
                "tint that makes white textures appear slightly warm or cool.\n\n"
                "When enabled, a correction factor is applied so that a white texture\n"
-               "under white light produces pure white output \xe2\x80\x94 matching ScanlineRender.\n\n"
-               "Leave on for compositing work. Disable for physically-accurate\n"
-               "spectral colour science (e.g. dispersion, thin-film interference).");
+               "under white light produces pure white output.\n\n"
+               "NOTE: Only applies when 'ScanlineRender compatible' is OFF.\n"
+               "In compatible mode, rendering bypasses the spectral pipeline\n"
+               "entirely so there is no colour shift to correct.\n\n"
+               "Leave on for spectral rendering. Has no effect in compatible mode.");
     Text_knob(f,
         "<font color='#666' size='-1'>"
         "Matches ScanlineRender output for geometry cards, textured planes,<br>"
@@ -495,51 +500,6 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         Tooltip(f, "Distance from camera to the focal plane<br>"
                    "in world units. Objects at this distance<br>"
                    "will be sharp; nearer and farther objects blur.");
-        Divider(f, "Wireframe overlay");
-        Bool_knob(f, &_wireframeEnable, "wireframe_enable", "wireframe");
-        Tooltip(f, "Overlay wireframe edges on the rendered output.\n\n"
-                   "Uses barycentric coordinates to detect proximity to triangle\n"
-                   "edges in screen space. Works with both GPU and CPU renders.\n\n"
-                   "Supports dashed lines, architectural drafting styles, and\n"
-                   "selective edge display for clean technical renders.");
-        static const char* const wireStyleNames[] = {
-            "solid", "guide", "architectural", "hidden-line", nullptr
-        };
-        Enumeration_knob(f, &_wireStyle, wireStyleNames, "wire_style", "style");
-        ClearFlags(f, Knob::STARTLINE);
-        Tooltip(f, "Wireframe line style:\n\n"
-                   "solid \xe2\x80\x94 continuous lines\n"
-                   "guide \xe2\x80\x94 thin dashed guidelines (construction lines)\n"
-                   "architectural \xe2\x80\x94 thick lines with drafting-weight variation\n"
-                   "hidden-line \xe2\x80\x94 visible edges solid, backfacing edges dashed");
-        Color_knob(f, _wireColor, "wire_color", "color");
-        Tooltip(f, "Wireframe line colour. Default black.");
-        Float_knob(f, &_wireThickness, "wire_thickness", "thickness");
-        SetRange(f, 0.1, 10.0);
-        Tooltip(f, "Line width in pixels. 1.0 = thin hairline, 3+ = bold strokes.");
-        Float_knob(f, &_wireOpacity, "wire_opacity", "opacity");
-        SetRange(f, 0.0, 1.0);
-        Tooltip(f, "Wireframe line opacity. 0 = invisible, 1 = fully opaque.");
-        Bool_knob(f, &_wireDashed, "wire_dashed", "dashed");
-        Tooltip(f, "Draw dashed lines instead of solid. Uses the dash/gap lengths below.");
-        Float_knob(f, &_wireDashLength, "wire_dash_length", "dash"); SetRange(f, 1.0, 32.0);
-        ClearFlags(f, Knob::STARTLINE);
-        Float_knob(f, &_wireGapLength, "wire_gap_length", "gap"); SetRange(f, 1.0, 32.0);
-        ClearFlags(f, Knob::STARTLINE);
-        Int_knob(f, &_wireNth, "wire_nth", "every Nth edge"); SetRange(f, 1, 32);
-        Tooltip(f, "Show every Nth triangle edge. 1 = all edges,<br>"
-                   "2 = every other, 4 = sparse grid. Useful for<br>"
-                   "dense meshes to avoid visual clutter.");
-        Divider(f, "Shadow catcher");
-        String_knob(f, &_shadowCatcherNames, "shadow_catcher_names", "materials");
-        Tooltip(f, "Comma-separated material names to treat as shadow catchers.\n\n"
-                   "Shadow catchers are invisible surfaces that only receive shadows.\n"
-                   "They output alpha = shadow darkness, RGB = black.\n"
-                   "Use for compositing CG objects over a live-action plate.\n\n"
-                   "Materials are also detected automatically if their name\n"
-                   "contains 'shadowcatch' or 'shadow_catch', or if the shader\n"
-                   "ID is 'ShadowCatcher' or 'NukeShadowCatcher'.\n\n"
-                   "Example: 'ground_plane, floor'");
     }
     EndGroup(f);
 
@@ -1256,6 +1216,13 @@ void SpectralRenderIop::knobs(Knob_Callback f)
     Tooltip(f, "Self-illumination (glowing materials, fire, neon).\n"
                "Add to adjust glow intensity in comp.");
 
+    Bool_knob(f, &_aovShadowCatcher, "aov_shadowcatcher", "shadow catcher");
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "Per-pixel shadow factor from SpectralShadowCatcher surfaces,\n"
+               "written to shadowcatcherAOV.{red,green,blue,alpha}.\n"
+               "R=G=B=A so the pass can be used either as RGB visualisation\n"
+               "or alpha mask in comp.");
+
     BeginClosedGroup(f, "aov_lpe", "LPE decomposition (advanced)");
     {
         Text_knob(f,
@@ -1429,9 +1396,10 @@ int SpectralRenderIop::knob_changed(Knob* k)
         _progressiveSppDone = 0;
     }
 
-    // Update DAG node label with CPU/GPU indicator
+    // Update DAG node tile colour based on device mode.
+    // (The CPU/GPU/AUTO text label was dropped at user request — the
+    // device is still visible via tile colour alone.)
     if (k->is("device_mode") || k->is("showPanel")) {
-        // DAG node appearance — colored tile + label showing active device
         int idx = std::max(0, std::min(_deviceMode, 2));
 
         // Tile color: CPU=blue tint, GPU=green tint, Auto=amber tint
@@ -1441,13 +1409,8 @@ int SpectralRenderIop::knob_changed(Knob* k)
                           "if n: n['tile_color'].setValue(" + std::to_string(tileColors[idx]) + ")";
         script_command(cmd.c_str(), true, false);
 
-        // Label with colored device name
-        const char* labels[] = {
-            "<center><font color='#4499dd' size='2'><b>CPU</b></font></center>",
-            "<center><font color='#44dd88' size='2'><b>GPU</b></font></center>",
-            "<center><font color='#ddaa44' size='2'><b>AUTO</b></font></center>"
-        };
-        if (Knob* lk = knob("label")) lk->set_text(labels[idx]);
+        // Clear any label that a previous version of the node may have set.
+        if (Knob* lk = knob("label")) lk->set_text("");
         if (k->is("device_mode")) return 1;
     }
 
@@ -1940,6 +1903,14 @@ void SpectralRenderIop::_validate(bool forReal)
         _chanTransmitR = getChannel("transmission.red"); _chanTransmitG = getChannel("transmission.green"); _chanTransmitB = getChannel("transmission.blue");
         channels += _chanTransmitR; channels += _chanTransmitG; channels += _chanTransmitB;
     }
+    if (_aovShadowCatcher) {
+        _chanShadowCatcherR = getChannel("shadowcatcherAOV.red");
+        _chanShadowCatcherG = getChannel("shadowcatcherAOV.green");
+        _chanShadowCatcherB = getChannel("shadowcatcherAOV.blue");
+        _chanShadowCatcherA = getChannel("shadowcatcherAOV.alpha");
+        channels += _chanShadowCatcherR; channels += _chanShadowCatcherG;
+        channels += _chanShadowCatcherB; channels += _chanShadowCatcherA;
+    }
     // Cryptomatte: Nuke gizmo expects crypto_object00 RGBA
     _chanCryptoR = getChannel("crypto_object00.red");
     _chanCryptoG = getChannel("crypto_object00.green");
@@ -2187,6 +2158,25 @@ void SpectralRenderIop::engine(
     write3Channel(_chanDiffIndirectR, _chanDiffIndirectG, _chanDiffIndirectB, _diffuseIndirectBuffer, 3);
     write3Channel(_chanSpecIndirectR, _chanSpecIndirectG, _chanSpecIndirectB, _specularIndirectBuffer, 3);
     write3Channel(_chanTransmitR, _chanTransmitG, _chanTransmitB, _transmissionBuffer, 3);
+
+    // Shadow catcher AOV: shadowcatcherAOV.{red,green,blue,alpha}
+    // Buffer layout is 4 floats per pixel (R,G,B,A) with R=G=B=A=shadow.
+    if (!_shadowCatcherBuffer.empty()) {
+        auto writeSCChannel = [&](Channel ch, int comp) {
+            if (!(channels & ch)) return;
+            float* out = row.writable(ch);
+            for (int px = x; px < r; ++px) {
+                int proxyX = isProxy ? (px * W / fullW) : px;
+                if (proxyX >= 0 && proxyX < W && bufY >= 0 && bufY < H)
+                    out[px] = _shadowCatcherBuffer[static_cast<size_t>(bufY) * W * 4 + proxyX * 4 + comp];
+                else out[px] = 0.f;
+            }
+        };
+        writeSCChannel(_chanShadowCatcherR, 0);
+        writeSCChannel(_chanShadowCatcherG, 1);
+        writeSCChannel(_chanShadowCatcherB, 2);
+        writeSCChannel(_chanShadowCatcherA, 3);
+    }
 
     // Cryptomatte: crypto_object00 RGBA
     if (!_cryptoObjectBuffer.empty()) {
@@ -2708,28 +2698,41 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                 }
                 // Auto-smooth normals when scanlineCompat
                 if (_scanlineCompat && !meshData.triangles.empty()) {
-                    struct Vec3Hash {
-                        size_t operator()(const pxr::GfVec3f& v) const {
+                    // Position-quantized key — see the main mesh path for rationale.
+                    // Quantization tolerance: 1e-5 world units.
+                    auto quantize = [](float f) -> int64_t {
+                        return static_cast<int64_t>(std::llround(double(f) * 1.0e5));
+                    };
+                    struct QKey {
+                        int64_t x, y, z;
+                        bool operator==(const QKey& o) const {
+                            return x == o.x && y == o.y && z == o.z;
+                        }
+                    };
+                    struct QKeyHash {
+                        size_t operator()(const QKey& k) const {
                             size_t h = 0;
-                            h ^= std::hash<float>{}(v[0]) + 0x9e3779b9 + (h<<6) + (h>>2);
-                            h ^= std::hash<float>{}(v[1]) + 0x9e3779b9 + (h<<6) + (h>>2);
-                            h ^= std::hash<float>{}(v[2]) + 0x9e3779b9 + (h<<6) + (h>>2);
+                            h ^= std::hash<int64_t>{}(k.x) + 0x9e3779b9 + (h<<6) + (h>>2);
+                            h ^= std::hash<int64_t>{}(k.y) + 0x9e3779b9 + (h<<6) + (h>>2);
+                            h ^= std::hash<int64_t>{}(k.z) + 0x9e3779b9 + (h<<6) + (h>>2);
                             return h;
                         }
                     };
-                    struct Vec3Eq {
-                        bool operator()(const pxr::GfVec3f& a, const pxr::GfVec3f& b) const {
-                            return a[0]==b[0] && a[1]==b[1] && a[2]==b[2];
-                        }
+                    auto makeKey = [&](const pxr::GfVec3f& v) -> QKey {
+                        return { quantize(v[0]), quantize(v[1]), quantize(v[2]) };
                     };
-                    std::unordered_map<pxr::GfVec3f, pxr::GfVec3f, Vec3Hash, Vec3Eq> vn;
+                    std::unordered_map<QKey, pxr::GfVec3f, QKeyHash> vn;
                     for (const auto& tri : meshData.triangles) {
-                        vn[tri.v0] += tri.faceNormal; vn[tri.v1] += tri.faceNormal; vn[tri.v2] += tri.faceNormal;
+                        vn[makeKey(tri.v0)] += tri.faceNormal;
+                        vn[makeKey(tri.v1)] += tri.faceNormal;
+                        vn[makeKey(tri.v2)] += tri.faceNormal;
                     }
                     for (auto& kv : vn) { float l = kv.second.GetLength(); if (l>1e-8f) kv.second /= l; }
                     for (auto& tri : meshData.triangles) {
                         if (tri.n0 == tri.n1 && tri.n1 == tri.n2) {
-                            auto i0=vn.find(tri.v0), i1=vn.find(tri.v1), i2=vn.find(tri.v2);
+                            auto i0=vn.find(makeKey(tri.v0));
+                            auto i1=vn.find(makeKey(tri.v1));
+                            auto i2=vn.find(makeKey(tri.v2));
                             if (i0!=vn.end()) tri.n0=i0->second;
                             if (i1!=vn.end()) tri.n1=i1->second;
                             if (i2!=vn.end()) tri.n2=i2->second;
@@ -2800,6 +2803,58 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
         mesh.GetPointsAttr().Get(&points, timeOpen);
         if (points.empty()) continue;
         VtVec3fArray pointsRef;  // undisplaced positions for pRef AOV
+
+        // Per-mesh property overrides from SpectralMeshProperties.
+        // These are populated once at mesh scope (outside any material
+        // binding), then applied in the subdiv block below AND to the
+        // material after it's been resolved by either the USD or the
+        // Nuke-native code path.
+        int     meshSubdivOverride       = 0;
+        int     meshSchemeOverride       = -1;
+        bool    meshFlipNormals          = false;
+        int     meshNormalMode           = 0;    // 0=auto 1=smooth 2=faceted 3=vertex
+        bool    meshPropsUseDisplayColor = false;
+        GfVec3f meshPropsDisplayColor    (0.8f, 0.8f, 0.8f);
+        float   meshPropsDisplayOpacity  = 1.0f;
+        bool    meshPropsVisible         = true;
+        bool    meshPropsHasEntry        = false;
+
+        // TODO: replace substring / size==1 matching with prim-path
+        // registration done inside SpectralMeshProperties::processScenegraph.
+        // Current matching is brittle: with >1 modifier node nothing matches.
+        {
+            std::string meshPath = prim.GetPath().GetString();
+            const auto& meshReg = SpectralMeshPropertiesOp::GetRegistry();
+            for (const auto& entry : meshReg) {
+                if (meshPath.find(entry.first) != std::string::npos
+                    || meshReg.size() == 1) {
+                    meshSubdivOverride = entry.second.subdivLevel;
+                    if (entry.second.subdivScheme > 0)
+                        meshSchemeOverride = entry.second.subdivScheme;
+                    meshFlipNormals          = entry.second.flipNormals;
+                    meshNormalMode           = entry.second.normalMode;
+                    meshPropsUseDisplayColor = entry.second.useDisplayColor;
+                    meshPropsDisplayColor    = GfVec3f(
+                        entry.second.displayColor[0],
+                        entry.second.displayColor[1],
+                        entry.second.displayColor[2]);
+                    meshPropsDisplayOpacity  = entry.second.displayOpacity;
+                    meshPropsVisible         = entry.second.visible;
+                    meshPropsHasEntry        = true;
+                    SLOG("SpectralRender: mesh props for '%s' via node '%s' "
+                         "(level=%d scheme=%d flipN=%d normMode=%d)\n",
+                         meshPath.c_str(), entry.first.c_str(),
+                         meshSubdivOverride, meshSchemeOverride,
+                         (int)meshFlipNormals, meshNormalMode);
+                    break;
+                }
+            }
+            if (!meshPropsHasEntry && !meshReg.empty()) {
+                SLOG("SpectralRender: mesh '%s' - no matching "
+                     "SpectralMeshProperties entry (registry size=%zu)\n",
+                     meshPath.c_str(), meshReg.size());
+            }
+        }
 
         // Read points at shutter close for motion blur
         VtVec3fArray pointsClose;
@@ -3859,6 +3914,83 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                         }
                     }
 
+                    // Check for SpectralWireframe node assigned to this material
+                    {
+                        std::string shaderPath = surfaceShader.GetPath().GetString();
+                        const auto& wireReg = SpectralWireframeOp::GetRegistry();
+                        for (const auto& entry : wireReg) {
+                            if (shaderPath.find(entry.first) != std::string::npos) {
+                                _wireframeEnable = true;
+                                _wireThickness = entry.second.thickness;
+                                _wireOpacity = entry.second.opacity;
+                                _wireColor[0] = entry.second.color[0];
+                                _wireColor[1] = entry.second.color[1];
+                                _wireColor[2] = entry.second.color[2];
+                                _wireDashed = entry.second.dashed;
+                                _wireDashLength = entry.second.dashLength;
+                                _wireGapLength = entry.second.gapLength;
+                                _wireNth = std::max(1, int(entry.second.gridDensity));
+                                _wireStyle = entry.second.style;
+                                // Architectural
+                                _archSilhouetteWeight = entry.second.archSilhouetteWeight;
+                                _archMediumWeight = entry.second.archMediumWeight;
+                                _archThinWeight = entry.second.archThinWeight;
+                                _archSilhouetteColor[0] = entry.second.archSilhouetteColor[0];
+                                _archSilhouetteColor[1] = entry.second.archSilhouetteColor[1];
+                                _archSilhouetteColor[2] = entry.second.archSilhouetteColor[2];
+                                _archThinOpacity = entry.second.archThinOpacity;
+                                // Pencil
+                                _pencilWobble = entry.second.pencilWobble;
+                                _pencilPressure = entry.second.pencilPressure;
+                                _pencilCrossHatch = entry.second.pencilCrossHatch;
+                                _pencilHatchDensity = entry.second.pencilHatchDensity;
+                                _pencilHatchAngle = entry.second.pencilHatchAngle;
+                                // Topo
+                                _topoDirection = entry.second.topoDirection;
+                                _topoUpVector[0] = entry.second.topoUpVector[0];
+                                _topoUpVector[1] = entry.second.topoUpVector[1];
+                                _topoUpVector[2] = entry.second.topoUpVector[2];
+                                _topoContourInterval = entry.second.topoContourInterval;
+                                _topoMajorEvery = entry.second.topoMajorEvery;
+                                mat.opacity = 0.02f;
+                                SLOG("SpectralRender: wireframe from SpectralWireframe '%s'\n",
+                                        entry.first.c_str());
+                                break;
+                            }
+                        }
+                    }
+
+                    // Check for SpectralShadowCatcher node assigned to this material
+                    {
+                        std::string shaderPath = surfaceShader.GetPath().GetString();
+                        const auto& scReg = SpectralShadowCatcherOp::GetRegistry();
+                        for (const auto& entry : scReg) {
+                            if (shaderPath.find(entry.first) != std::string::npos) {
+                                _shadowCatcherMatIds.insert(-1);
+                                mat.isShadowCatcher = true;
+                                mat.baseColor = GfVec3f(1.f);
+                                mat.roughness = 1.f;
+                                mat.metallic = 0.f;
+                                SLOG("SpectralRender: shadow catcher from SpectralShadowCatcher '%s'\n",
+                                        entry.first.c_str());
+                                break;
+                            }
+                        }
+                    }
+
+                    // -- Apply mesh-level overrides (collected at mesh scope) --
+                    // The lookup itself was moved out to mesh scope so it
+                    // runs regardless of whether material binding succeeds.
+                    // Here we just apply the display/visibility overrides to
+                    // the USD-resolved material before it gets committed.
+                    if (meshPropsHasEntry) {
+                        if (meshPropsUseDisplayColor) {
+                            mat.baseColor = meshPropsDisplayColor;
+                        }
+                        mat.opacity *= meshPropsDisplayOpacity;
+                        if (!meshPropsVisible) mat.opacity = 0.f;
+                    }
+
                     matId = _scene->AddMaterial(mat);
 
                     // Remap Project3D projection matrix from temp key to actual matId
@@ -3996,6 +4128,15 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                             }
                         }
 
+                        // Apply mesh-level overrides (same logic as USD path).
+                        if (meshPropsHasEntry) {
+                            if (meshPropsUseDisplayColor) {
+                                mat.baseColor = meshPropsDisplayColor;
+                            }
+                            mat.opacity *= meshPropsDisplayOpacity;
+                            if (!meshPropsVisible) mat.opacity = 0.f;
+                        }
+
                         matId = _scene->AddMaterial(mat);
                         SLOG("SpectralRender: native material '%s' from '%s' — "
                              "color=(%.2f,%.2f,%.2f) metal=%.2f rough=%.2f opacity=%.2f\n",
@@ -4022,6 +4163,34 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
 
             SpectralSubdiv::Scheme scheme = SpectralSubdiv::SchemeFromToken(schemeStr);
 
+            // Mesh properties scheme override
+            if (meshSchemeOverride >= 0) {
+                static const SpectralSubdiv::Scheme overrideSchemes[] = {
+                    SpectralSubdiv::Scheme::None,       // 0 = auto (unused, meshSchemeOverride > 0 here)
+                    SpectralSubdiv::Scheme::CatmullClark,
+                    SpectralSubdiv::Scheme::Loop,
+                    SpectralSubdiv::Scheme::Bilinear,
+                    SpectralSubdiv::Scheme::None         // 4 = none
+                };
+                if (meshSchemeOverride < 5)
+                    scheme = overrideSchemes[meshSchemeOverride];
+            }
+
+            // If the user set a level override via SpectralMeshProperties
+            // but scheme is still None (because neither the source mesh's
+            // subdivisionScheme nor the user's scheme knob specified one),
+            // force CatmullClark so the level override actually takes effect.
+            // Without this, setting level=4 with scheme=auto silently does
+            // nothing when the source mesh has no subdivisionScheme.
+            if (meshSubdivOverride > 0
+                && scheme == SpectralSubdiv::Scheme::None
+                && meshSchemeOverride < 0) {
+                scheme = SpectralSubdiv::Scheme::CatmullClark;
+                SLOG("SpectralRender: mesh '%s' - level override %d forces "
+                     "CatmullClark (source mesh had no subdivisionScheme)\n",
+                        prim.GetPath().GetText(), meshSubdivOverride);
+            }
+
             // Auto-subdivide when displacement is present but no scheme set
             const SpectralMaterial& meshMat = _scene->GetMaterial(matId);
             if (scheme == SpectralSubdiv::Scheme::None
@@ -4038,7 +4207,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                 subIn.faceVertexCounts  = faceVertexCounts;
                 subIn.faceVertexIndices = faceVertexIndices;
                 subIn.scheme            = scheme;
-                subIn.level             = 2;
+                subIn.level             = (meshSubdivOverride > 0) ? meshSubdivOverride : 2;
 
                 // Read crease edges from USD
                 {
@@ -4153,8 +4322,16 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                     for (size_t i = 0; i < subOut.triangleIndices.size(); ++i)
                         faceVertexIndices[i] = subOut.triangleIndices[i];
 
-                    SLOG("SpectralRender: mesh %s subdivided (%s level 2)\n",
-                            prim.GetPath().GetText(), schemeStr.c_str());
+                    // Map the Scheme enum back to a readable name for logging.
+                    const char* appliedScheme = "unknown";
+                    switch (scheme) {
+                        case SpectralSubdiv::Scheme::CatmullClark: appliedScheme = "catmullClark"; break;
+                        case SpectralSubdiv::Scheme::Loop:         appliedScheme = "loop";         break;
+                        case SpectralSubdiv::Scheme::Bilinear:     appliedScheme = "bilinear";     break;
+                        case SpectralSubdiv::Scheme::None:         appliedScheme = "none";         break;
+                    }
+                    SLOG("SpectralRender: mesh %s subdivided (%s level %d)\n",
+                            prim.GetPath().GetText(), appliedScheme, subIn.level);
 
                     // Use refined UVs from subdivision
                     if (!subOut.uvs.empty() && !subOut.uvIndices.empty()) {
@@ -4437,6 +4614,12 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                     tri.n0 = tri.n1 = tri.n2 = tri.faceNormal;
                 }
 
+                // SpectralMeshProperties normal-mode override: faceted
+                // forces flat shading regardless of authored normals.
+                if (meshPropsHasEntry && meshNormalMode == 2) {
+                    tri.n0 = tri.n1 = tri.n2 = tri.faceNormal;
+                }
+
                 // Assign UVs
                 tri.uv0 = tri.uv1 = tri.uv2 = GfVec2f(0.f);
                 if (!uvs.empty()) {
@@ -4492,29 +4675,59 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
             }
 
             // Auto-smooth normals: average face normals per shared vertex
-            if (_scanlineCompat) {
-                // Build vertex → face normal accumulator using position hash
-                struct Vec3Hash {
-                    size_t operator()(const pxr::GfVec3f& v) const {
+            // Gate:
+            //   - Default: run when _scanlineCompat is on (original behavior)
+            //   - SpectralMeshProperties normalMode=smooth (1): always run
+            //   - SpectralMeshProperties normalMode=faceted (2): always skip
+            //   - SpectralMeshProperties normalMode=vertex (3): always skip
+            bool shouldSmooth = _scanlineCompat;
+            if (meshPropsHasEntry) {
+                if (meshNormalMode == 1) shouldSmooth = true;
+                if (meshNormalMode == 2) shouldSmooth = false;
+                if (meshNormalMode == 3) shouldSmooth = false;
+            }
+            if (shouldSmooth) {
+                // Build vertex -> face normal accumulator using a
+                // position-quantized hash. Using exact float equality
+                // fails for meshes with "separate vertices" topology
+                // (e.g. Nuke's GeoSphere in that mode) where adjacent
+                // faces don't share indices; the supposedly-same
+                // position can differ by a few ULPs due to different
+                // transform paths, and the accumulator treats them as
+                // distinct vertices -> smoothing never actually merges
+                // across the seam, so the mesh stays faceted.
+                //
+                // Quantization tolerance: 1e-5 world units. Much smaller
+                // than any visible feature in any reasonable scene scale,
+                // comfortably larger than typical float drift.
+                auto quantize = [](float f) -> int64_t {
+                    return static_cast<int64_t>(std::llround(double(f) * 1.0e5));
+                };
+                struct QKey {
+                    int64_t x, y, z;
+                    bool operator==(const QKey& o) const {
+                        return x == o.x && y == o.y && z == o.z;
+                    }
+                };
+                struct QKeyHash {
+                    size_t operator()(const QKey& k) const {
                         size_t h = 0;
-                        h ^= std::hash<float>{}(v[0]) + 0x9e3779b9 + (h<<6) + (h>>2);
-                        h ^= std::hash<float>{}(v[1]) + 0x9e3779b9 + (h<<6) + (h>>2);
-                        h ^= std::hash<float>{}(v[2]) + 0x9e3779b9 + (h<<6) + (h>>2);
+                        h ^= std::hash<int64_t>{}(k.x) + 0x9e3779b9 + (h<<6) + (h>>2);
+                        h ^= std::hash<int64_t>{}(k.y) + 0x9e3779b9 + (h<<6) + (h>>2);
+                        h ^= std::hash<int64_t>{}(k.z) + 0x9e3779b9 + (h<<6) + (h>>2);
                         return h;
                     }
                 };
-                struct Vec3Eq {
-                    bool operator()(const pxr::GfVec3f& a, const pxr::GfVec3f& b) const {
-                        return a[0]==b[0] && a[1]==b[1] && a[2]==b[2];
-                    }
+                auto makeKey = [&](const pxr::GfVec3f& v) -> QKey {
+                    return { quantize(v[0]), quantize(v[1]), quantize(v[2]) };
                 };
-                std::unordered_map<pxr::GfVec3f, pxr::GfVec3f, Vec3Hash, Vec3Eq> vertNormals;
+                std::unordered_map<QKey, pxr::GfVec3f, QKeyHash> vertNormals;
 
                 // Accumulate face normals
                 for (const auto& tri : data.triangles) {
-                    vertNormals[tri.v0] += tri.faceNormal;
-                    vertNormals[tri.v1] += tri.faceNormal;
-                    vertNormals[tri.v2] += tri.faceNormal;
+                    vertNormals[makeKey(tri.v0)] += tri.faceNormal;
+                    vertNormals[makeKey(tri.v1)] += tri.faceNormal;
+                    vertNormals[makeKey(tri.v2)] += tri.faceNormal;
                 }
 
                 // Normalize accumulated normals
@@ -4527,13 +4740,26 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
                 for (auto& tri : data.triangles) {
                     // Check if all 3 normals are identical (face normal fallback)
                     if (tri.n0 == tri.n1 && tri.n1 == tri.n2) {
-                        auto it0 = vertNormals.find(tri.v0);
-                        auto it1 = vertNormals.find(tri.v1);
-                        auto it2 = vertNormals.find(tri.v2);
+                        auto it0 = vertNormals.find(makeKey(tri.v0));
+                        auto it1 = vertNormals.find(makeKey(tri.v1));
+                        auto it2 = vertNormals.find(makeKey(tri.v2));
                         if (it0 != vertNormals.end()) tri.n0 = it0->second;
                         if (it1 != vertNormals.end()) tri.n1 = it1->second;
                         if (it2 != vertNormals.end()) tri.n2 = it2->second;
                     }
+                }
+            }
+
+            // SpectralMeshProperties flip-normals: negate everything
+            // (shading normals AND face normal) so backface-culling and
+            // geometric orientation stay consistent. Runs last so it
+            // applies to whichever normals the previous steps produced.
+            if (meshPropsHasEntry && meshFlipNormals) {
+                for (auto& tri : data.triangles) {
+                    tri.n0 = -tri.n0;
+                    tri.n1 = -tri.n1;
+                    tri.n2 = -tri.n2;
+                    tri.faceNormal = -tri.faceNormal;
                 }
             }
 
@@ -4849,6 +5075,14 @@ void SpectralRenderIop::append(Hash& hash)
 {
     hash.append(outputContext().frame());
     hash.append(_vdbFrameOffset);
+    // Knobs that change the rendered output but aren't on any input chain,
+    // so they need to be hashed explicitly. Without these, toggling the
+    // knob dirties the viewport preview but not the rendered frame, so
+    // the user has to scrub time to force a re-render.
+    hash.append(_scanlineCompat ? 1 : 0);
+    hash.append(_useBuiltinLight ? 1 : 0);
+    hash.append(_deviceMode);
+    hash.append(_aovShadowCatcher ? 1 : 0);
     if (_vdbFile) hash.append(_vdbFile);
     hash.append((int)_volumes.size());
     // Hash wireframe + shadow catcher params
@@ -4858,8 +5092,65 @@ void SpectralRenderIop::append(Hash& hash)
     hash.append(_wireStyle);
     hash.append(_wireNth);
     hash.append(_wireDashed ? 1 : 0);
+    hash.append(_archSilhouetteWeight);
+    hash.append(_archMediumWeight);
+    hash.append(_archThinWeight);
+    hash.append(_archThinOpacity);
+    hash.append(_pencilWobble);
+    hash.append(_pencilPressure);
+    hash.append(_pencilCrossHatch ? 1 : 0);
+    hash.append(_pencilHatchDensity);
+    hash.append(_pencilHatchAngle);
+    hash.append(_topoDirection);
+    hash.append(_topoUpVector[0]);
+    hash.append(_topoUpVector[1]);
+    hash.append(_topoUpVector[2]);
+    hash.append(_topoContourInterval);
+    hash.append(_topoMajorEvery);
     hash.append(_edgeSamples);
     if (_shadowCatcherNames) hash.append(_shadowCatcherNames);
+    // Hash wireframe registry
+    {
+        const auto& wireReg = SpectralWireframeOp::GetRegistry();
+        hash.append((int)wireReg.size());
+        for (const auto& kv : wireReg) {
+            hash.append(kv.first.c_str());
+            hash.append(kv.second.thickness);
+            hash.append(kv.second.opacity);
+            hash.append(kv.second.style);
+            hash.append(kv.second.nth);
+        }
+    }
+    // Hash shadow catcher registry
+    {
+        const auto& scReg = SpectralShadowCatcherOp::GetRegistry();
+        hash.append((int)scReg.size());
+        for (const auto& kv : scReg) {
+            hash.append(kv.first.c_str());
+            hash.append(kv.second.shadowIntensity);
+        }
+    }
+    // Hash mesh-properties registry. Size changes (e.g. a node being
+    // disabled and removing its entry) plus the per-entry knob values
+    // both need to land in the hash so toggling disable or tweaking the
+    // node re-renders immediately on the current frame.
+    {
+        const auto& mpReg = SpectralMeshPropertiesOp::GetRegistry();
+        hash.append((int)mpReg.size());
+        for (const auto& kv : mpReg) {
+            hash.append(kv.first.c_str());
+            hash.append(kv.second.subdivLevel);
+            hash.append(kv.second.subdivScheme);
+            hash.append(kv.second.normalMode);
+            hash.append(kv.second.flipNormals ? 1 : 0);
+            hash.append(kv.second.useDisplayColor ? 1 : 0);
+            hash.append(kv.second.displayColor[0]);
+            hash.append(kv.second.displayColor[1]);
+            hash.append(kv.second.displayColor[2]);
+            hash.append(kv.second.displayOpacity);
+            hash.append(kv.second.visible ? 1 : 0);
+        }
+    }
     // Hash camera input (input 0) — re-render when camera moves or changes
     Op* cam = (inputs() > 0) ? input(0) : nullptr;
     if (cam) {
@@ -6121,13 +6412,11 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
             glUniform3f(glGetUniformLocation(_glGeoProg, "uLightCol"), gLightR, gLightG, gLightB);
             glUniform3f(glGetUniformLocation(_glGeoProg, "uAmbient"), gAmbR, gAmbG, gAmbB);
 
-            // Constant mode: scanlineCompat + no lights = flat colour in viewport
-            {
-                bool noLights = (gLightR < 0.001f && gLightG < 0.001f && gLightB < 0.001f &&
-                                 gAmbR < 0.001f && gAmbG < 0.001f && gAmbB < 0.001f);
-                glUniform1i(glGetUniformLocation(_glGeoProg, "uConstantMode"),
-                            (_scanlineCompat && noLights) ? 1 : 0);
-            }
+            // Constant mode: scanlineCompat = flat material colour in viewport,
+            // regardless of whether lights happen to be in the scene. Matches
+            // the CPU/GPU render-time constant path.
+            glUniform1i(glGetUniformLocation(_glGeoProg, "uConstantMode"),
+                        _scanlineCompat ? 1 : 0);
 
             // ─── Shadow map pass: render geometry from light POV ───
             float lightVP[16] = {};
@@ -6237,12 +6526,8 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
             glUniform3f(glGetUniformLocation(_glGeoProg, "uLightDir"), gLightDirX, gLightDirY, gLightDirZ);
             glUniform3f(glGetUniformLocation(_glGeoProg, "uLightCol"), gLightR, gLightG, gLightB);
             glUniform3f(glGetUniformLocation(_glGeoProg, "uAmbient"), gAmbR, gAmbG, gAmbB);
-            {
-                bool noLights = (gLightR < 0.001f && gLightG < 0.001f && gLightB < 0.001f &&
-                                 gAmbR < 0.001f && gAmbG < 0.001f && gAmbB < 0.001f);
-                glUniform1i(glGetUniformLocation(_glGeoProg, "uConstantMode"),
-                            (_scanlineCompat && noLights) ? 1 : 0);
-            }
+            glUniform1i(glGetUniformLocation(_glGeoProg, "uConstantMode"),
+                        _scanlineCompat ? 1 : 0);
             glUniform1f(glGetUniformLocation(_glGeoProg, "uHasShadowMap"), hasShadowMap ? 1.f : 0.f);
             glUniform1f(glGetUniformLocation(_glGeoProg, "uShadowTexelSize"), 1.f / float(kShadowMapSize));
             glUniform1f(glGetUniformLocation(_glGeoProg, "uShadowSoftness"), vpShadowSoft);
@@ -7482,7 +7767,11 @@ void SpectralRenderIop::_BuildLightRig()
     }
 
     // ---- Fallback: use SpectralRender's own lighting knobs if no light nodes connected ----
-    if (_useBuiltinLight && _allEnvLights.empty() && _allStudioLights.empty()) {
+    // Skipped when scanlineCompat is on: in that mode the intent is for the
+    // scene to have zero lights, which triggers the constant-shader path on
+    // both CPU and GPU backends and matches Nuke's ScanlineRender output.
+    if (_useBuiltinLight && !_scanlineCompat
+        && _allEnvLights.empty() && _allStudioLights.empty()) {
         // Sun/sky from local knobs
         if (_skyPreset > 0 && _skyMix > 0.001) {
             double m = _skyMix;
@@ -7588,7 +7877,12 @@ void SpectralRenderIop::_BuildLightRig()
 
     // Safety net: ensure scene has minimum illumination for spectral rendering.
     // Only when built-in light is enabled.
-    if (_useBuiltinLight) {
+    //
+    // Deliberately skipped when scanlineCompat is on: in that mode, zero
+    // lights is a feature, not a bug -- it triggers the constant-shader
+    // path (flat material colour) matching Nuke's ScanlineRender. Injecting
+    // a fallback dome here would defeat that contract.
+    if (_useBuiltinLight && !_scanlineCompat) {
     // Very dim/unbalanced lighting causes severe noise in GPU spectral path.
     {
         const auto& allLights = _scene->GetLights();
@@ -7680,7 +7974,8 @@ void SpectralRenderIop::_EnsureFrameRendered()
     _objectIdBuffer.assign(size_t(W) * H, 0.f);
     _materialIdBuffer.assign(size_t(W) * H, 0.f);
     _aoBuffer.assign(size_t(W) * H, 1.f);
-    if (_aovNormals)  _normalBuffer.assign(size_t(W) * H * 3, 0.f); else _normalBuffer.clear();
+    if (_aovNormals || _wireframeEnable)
+        _normalBuffer.assign(size_t(W) * H * 3, 0.f); else _normalBuffer.clear();
     if (_aovPosition) _posBuffer.assign(size_t(W) * H * 3, 0.f);    else _posBuffer.clear();
     if (_aovPRef)     _pRefBuffer.assign(size_t(W) * H * 3, 0.f);   else _pRefBuffer.clear();
     if (_aovUV || _wireframeEnable)
@@ -7694,6 +7989,7 @@ void SpectralRenderIop::_EnsureFrameRendered()
     if (_aovDiffuseIndirect) _diffuseIndirectBuffer.assign(size_t(W) * H * 3, 0.f); else _diffuseIndirectBuffer.clear();
     if (_aovSpecularIndirect) _specularIndirectBuffer.assign(size_t(W) * H * 3, 0.f); else _specularIndirectBuffer.clear();
     if (_aovTransmission)    _transmissionBuffer.assign(size_t(W) * H * 3, 0.f);    else _transmissionBuffer.clear();
+    if (_aovShadowCatcher)   _shadowCatcherBuffer.assign(size_t(W) * H * 4, 0.f);   else _shadowCatcherBuffer.clear();
     _cryptoObjectBuffer.assign(size_t(W) * H * 4, 0.f);  // RGBA: (hash0, cov0, hash1, cov1)
 
     SpectralCamera cam = _camera;
@@ -8001,12 +8297,13 @@ void SpectralRenderIop::_RenderStrip(int stripIdx)
                                                 _colorSpace,
                                                 _renderVolPtrs.empty() ? nullptr : _renderVolPtrs.data(),
                                                 (int)_renderVolPtrs.size(),
-                                                nullptr, 4);
+                                                nullptr, 4,
+                                                _aovShadowCatcher ? _shadowCatcherBuffer.data() : nullptr);
         } else
 #endif
         {
             SpectralIntegrator::AOVBuffers aovBufs;
-            aovBufs.normal   = _aovNormals  ? _normalBuffer.data()   : nullptr;
+            aovBufs.normal   = (_aovNormals || _wireframeEnable) ? _normalBuffer.data() : nullptr;
             aovBufs.position = _aovPosition ? _posBuffer.data()      : nullptr;
             aovBufs.pRef     = _aovPRef     ? _pRefBuffer.data()     : nullptr;
             aovBufs.uv       = (_aovUV || _wireframeEnable) ? _uvBuffer.data() : nullptr;
@@ -8019,6 +8316,7 @@ void SpectralRenderIop::_RenderStrip(int stripIdx)
             aovBufs.diffuseIndirect = _aovDiffuseIndirect ? _diffuseIndirectBuffer.data() : nullptr;
             aovBufs.specularIndirect = _aovSpecularIndirect ? _specularIndirectBuffer.data() : nullptr;
             aovBufs.transmission    = _aovTransmission    ? _transmissionBuffer.data()    : nullptr;
+            aovBufs.shadowCatcher   = _aovShadowCatcher   ? _shadowCatcherBuffer.data()   : nullptr;
 
             SpectralIntegrator::RenderFrame(*_scene, _renderCam, _frameBuffer.data(),
                                              _renderSpp, _depthBuffer.data(), _maxBounces,
@@ -8043,7 +8341,7 @@ void SpectralRenderIop::_RenderStrip(int stripIdx)
             if (needGeomPass) {
                 SpectralIntegrator::ComputeGeometryAOVs(
                     *_scene, _renderCam,
-                    _aovNormals  ? _normalBuffer.data() : nullptr,
+                    (_aovNormals || _wireframeEnable) ? _normalBuffer.data() : nullptr,
                     _aovPosition ? _posBuffer.data()    : nullptr,
                     _aovPRef     ? _pRefBuffer.data()   : nullptr,
                     (_aovUV || _wireframeEnable) ? _uvBuffer.data() : nullptr,
@@ -8117,9 +8415,7 @@ void SpectralRenderIop::_RenderStrip(int stripIdx)
             fprintf(stderr, "SpectralRender: edge AA — %d edge pixels smoothed (%d samples)\n", edgeCount, edgeSpp);
         }
 
-        // ─── Wireframe overlay (UV-grid drafting style) ───
-        // Uses UV coordinates to draw grid lines — naturally shows quads on
-        // subdivided meshes. Looks like drafting paper, not raw triangle edges.
+        // ─── Wireframe overlay (UV-grid + topo + pencil styles) ───
         if (_wireframeEnable && float(_wireOpacity) > 0.001f && !_uvBuffer.empty()) {
             const float thickness = float(_wireThickness);
             const float opacity   = float(_wireOpacity);
@@ -8128,69 +8424,269 @@ void SpectralRenderIop::_RenderStrip(int stripIdx)
             const float wireB = float(_wireColor[2]);
             const int   nth   = std::max(1, _wireNth);
             const int   style = _wireStyle;
+            const float gridFreq = float(nth);
+            const bool  hasNormals = !_normalBuffer.empty();
 
-            // UV grid density — derived from Nth control
-            // nth=1 → every unit UV line, nth=2 → every 0.5, etc.
-            const float gridDensity = float(nth);
+            // Pencil sketch: precompute noise LUT
+            auto pencilNoise = [](int x, int y) -> float {
+                unsigned int h = x * 374761393u + y * 668265263u;
+                h = (h ^ (h >> 13)) * 1274126177u;
+                return float(h & 0xFFFF) / 65535.f;
+            };
 
-            for (size_t i = 0; i < size_t(W) * H; ++i) {
-                // Skip background pixels
-                if (_objectIdBuffer[i] == 0.f) continue;
+            for (int y = 0; y < H; ++y) {
+                for (int x = 0; x < W; ++x) {
+                    size_t i = y * W + x;
+                    if (_objectIdBuffer[i] == 0.f) continue;
 
-                float u = _uvBuffer[i * 2 + 0];
-                float v = _uvBuffer[i * 2 + 1];
+                    float u = _uvBuffer[i * 2 + 0];
+                    float v = _uvBuffer[i * 2 + 1];
 
-                // Distance to nearest UV grid line
-                float gu = u * gridDensity;
-                float gv = v * gridDensity;
-                float distU = std::abs(gu - std::round(gu)) / gridDensity;
-                float distV = std::abs(gv - std::round(gv)) / gridDensity;
-                float edgeDist = std::min(distU, distV);
+                    // Screen-space UV derivative
+                    float dUdx = 0.f, dVdy = 0.f;
+                    if (x + 1 < W && _objectIdBuffer[i + 1] != 0.f) {
+                        dUdx = std::abs(_uvBuffer[(i + 1) * 2 + 0] - u);
+                        float dvx = std::abs(_uvBuffer[(i + 1) * 2 + 1] - v);
+                        dUdx = std::max(dUdx, dvx);
+                    }
+                    if (y + 1 < H && _objectIdBuffer[i + W] != 0.f) {
+                        dVdy = std::abs(_uvBuffer[(i + W) * 2 + 1] - v);
+                        float duy = std::abs(_uvBuffer[(i + W) * 2 + 0] - u);
+                        dVdy = std::max(dVdy, duy);
+                    }
+                    float pixelUVSize = std::max(dUdx, dVdy);
+                    if (pixelUVSize < 1e-8f) pixelUVSize = 1.f / float(W);
 
-                // Convert UV distance to approximate screen pixels
-                // Rough heuristic: assume UV 0-1 maps across ~W/2 pixels
-                float pixelDist = edgeDist * float(W) * 0.5f;
+                    float lineAlpha = 0.f;
+                    float lineThick = thickness;
 
-                // Style adjustments
-                float lineThick = thickness;
-                if (style == 1) lineThick *= 0.5f; // guide: thin
-                if (style == 2) {
-                    // Architectural: major lines (at integer UVs) are thicker
-                    float majorU = std::abs(std::round(u) - u);
-                    float majorV = std::abs(std::round(v) - v);
-                    bool isMajor = (majorU < 0.01f / gridDensity) || (majorV < 0.01f / gridDensity);
-                    lineThick *= isMajor ? 2.0f : 0.7f;
-                }
+                    // ── Style 5: Topographic contour lines ──
+                    if (style == 5 && (hasNormals || _topoDirection == 3)) {
+                        float elevation = 0.f;
+                        float dEdx = 0.f;
 
-                if (pixelDist > lineThick) continue;
+                        if (_topoDirection == 0) {
+                            // World Y (up) — dot(N, (0,1,0))
+                            elevation = _normalBuffer[i * 3 + 1];
+                        } else if (_topoDirection == 1) {
+                            // Custom direction vector
+                            float ux = float(_topoUpVector[0]);
+                            float uy = float(_topoUpVector[1]);
+                            float uz = float(_topoUpVector[2]);
+                            float len = std::sqrt(ux*ux + uy*uy + uz*uz);
+                            if (len > 1e-6f) { ux /= len; uy /= len; uz /= len; }
+                            elevation = _normalBuffer[i*3+0]*ux + _normalBuffer[i*3+1]*uy + _normalBuffer[i*3+2]*uz;
+                        } else if (_topoDirection == 2) {
+                            // Normal curvature — compare normal with neighbors
+                            float nx = _normalBuffer[i*3+0], ny = _normalBuffer[i*3+1], nz = _normalBuffer[i*3+2];
+                            float curvature = 0.f;
+                            int neighbors = 0;
+                            for (int dd = 0; dd < 4; ++dd) {
+                                int nx2 = x + ((dd==0)?1:(dd==1)?-1:0);
+                                int ny2 = y + ((dd==2)?1:(dd==3)?-1:0);
+                                if (nx2 < 0 || nx2 >= W || ny2 < 0 || ny2 >= H) continue;
+                                size_t ni = ny2 * W + nx2;
+                                if (_objectIdBuffer[ni] == 0.f) continue;
+                                float dnx = _normalBuffer[ni*3+0] - nx;
+                                float dny = _normalBuffer[ni*3+1] - ny;
+                                float dnz = _normalBuffer[ni*3+2] - nz;
+                                curvature += std::sqrt(dnx*dnx + dny*dny + dnz*dnz);
+                                neighbors++;
+                            }
+                            elevation = (neighbors > 0) ? curvature / float(neighbors) : 0.f;
+                        } else if (_topoDirection == 3) {
+                            // Barycentric — use UV fractional part as elevation proxy
+                            elevation = std::fmod(std::abs(u * 7.13f + v * 11.07f), 1.f);
+                        }
 
-                // Anti-aliased line alpha
-                float lineAlpha = opacity;
-                if (pixelDist > lineThick - 1.f) {
-                    lineAlpha *= std::max(0.f, lineThick - pixelDist);
-                }
+                        // Contour frequency from interval control
+                        float contourFreq = 1.f / std::max(0.01f, float(_topoContourInterval));
+                        float ge = elevation * contourFreq;
+                        float distE = std::abs(ge - std::round(ge)) / contourFreq;
 
-                // Dashed pattern
-                if (_wireDashed || style == 1) {
-                    int ix = int(i) % W, iy = int(i) / W;
-                    float dashPos = std::fmod(float(ix + iy) * 0.7071f,
-                                             float(_wireDashLength) + float(_wireGapLength));
-                    if (dashPos > float(_wireDashLength)) continue;
-                }
+                        // Screen-space derivative of elevation
+                        if (_topoDirection != 3) {
+                            auto getElev = [&](size_t idx) -> float {
+                                if (_topoDirection == 0) return _normalBuffer[idx*3+1];
+                                if (_topoDirection == 1) {
+                                    float ux=float(_topoUpVector[0]), uy=float(_topoUpVector[1]), uz=float(_topoUpVector[2]);
+                                    float len=std::sqrt(ux*ux+uy*uy+uz*uz);
+                                    if(len>1e-6f){ux/=len;uy/=len;uz/=len;}
+                                    return _normalBuffer[idx*3]*ux+_normalBuffer[idx*3+1]*uy+_normalBuffer[idx*3+2]*uz;
+                                }
+                                return 0.f;
+                            };
+                            if (x+1 < W && _objectIdBuffer[i+1] != 0.f)
+                                dEdx = std::abs(getElev(i+1) - elevation);
+                            if (y+1 < H && _objectIdBuffer[i+W] != 0.f)
+                                dEdx = std::max(dEdx, std::abs(getElev(i+W) - elevation));
+                        } else {
+                            // Barycentric: use UV derivative
+                            dEdx = pixelUVSize * 10.f;
+                        }
+                        if (dEdx < 1e-8f) dEdx = 0.01f;
 
-                // Hidden-line: dim backfacing grid lines
-                if (style == 3 && distU < distV) {
-                    lineAlpha *= 0.3f; // secondary direction dimmed
-                }
+                        float pixDistE = distE / dEdx;
 
-                // Blend
-                if (lineAlpha > 0.001f) {
-                    float* px = _frameBuffer.data() + i * 4;
-                    float invA = 1.f - lineAlpha;
-                    px[0] = px[0] * invA + wireR * lineAlpha;
-                    px[1] = px[1] * invA + wireG * lineAlpha;
-                    px[2] = px[2] * invA + wireB * lineAlpha;
-                    px[3] = std::min(1.f, px[3] + lineAlpha);
+                        // Major contours
+                        int majorEvery = std::max(2, _topoMajorEvery);
+                        float majorFrac = 1.f / float(majorEvery);
+                        float majorDist = std::abs(ge * majorFrac - std::round(ge * majorFrac));
+                        bool isMajor = (majorDist < 0.15f);
+                        lineThick = isMajor ? thickness * 2.5f : thickness;
+
+                        if (pixDistE < lineThick) {
+                            lineAlpha = opacity;
+                            if (pixDistE > lineThick - 1.f)
+                                lineAlpha *= std::max(0.f, lineThick - pixDistE);
+                            if (!isMajor) lineAlpha *= 0.5f;
+                        }
+                    } else {
+
+                    // ── UV-grid based styles (0-4) ──
+                    {
+                        float gu = u * gridFreq;
+                        float gv = v * gridFreq;
+                        float distU = std::abs(gu - std::round(gu)) / gridFreq;
+                        float distV = std::abs(gv - std::round(gv)) / gridFreq;
+                        float edgeDist = std::min(distU, distV);
+                        float pixelDist = edgeDist / pixelUVSize;
+
+                        // ── Style 0: Solid ──
+                        if (style == 0) {
+                            if (pixelDist > lineThick) continue;
+                            lineAlpha = opacity;
+                            if (pixelDist > lineThick - 1.f)
+                                lineAlpha *= std::max(0.f, lineThick - pixelDist);
+                        }
+
+                        // ── Style 1: Guide (thin dashed construction lines) ──
+                        else if (style == 1) {
+                            lineThick *= 0.5f;
+                            if (pixelDist > lineThick) continue;
+                            lineAlpha = opacity * 0.6f;
+                            if (pixelDist > lineThick - 1.f)
+                                lineAlpha *= std::max(0.f, lineThick - pixelDist);
+                            // Dash pattern
+                            float dashPos = std::fmod(float(x + y) * 0.7071f,
+                                                     float(_wireDashLength) + float(_wireGapLength));
+                            if (dashPos > float(_wireDashLength)) continue;
+                        }
+
+                        // ── Style 2: Architectural blueprint ──
+                        else if (style == 2) {
+                            float majorDistU = std::abs(std::round(u) - u);
+                            float majorDistV = std::abs(std::round(v) - v);
+                            float majorPixU = majorDistU / pixelUVSize;
+                            float majorPixV = majorDistV / pixelUVSize;
+                            bool isMajor = (majorPixU < 3.f) || (majorPixV < 3.f);
+
+                            float med5U = std::abs(u * gridFreq * 0.2f - std::round(u * gridFreq * 0.2f)) / (gridFreq * 0.2f);
+                            float med5V = std::abs(v * gridFreq * 0.2f - std::round(v * gridFreq * 0.2f)) / (gridFreq * 0.2f);
+                            float medDist = std::min(med5U, med5V) / pixelUVSize;
+                            bool isMedium = (medDist < 2.f);
+
+                            if (isMajor) {
+                                lineThick *= float(_archSilhouetteWeight);
+                            } else if (isMedium) {
+                                lineThick *= float(_archMediumWeight);
+                            } else {
+                                lineThick *= float(_archThinWeight);
+                            }
+
+                            if (pixelDist > lineThick) continue;
+                            lineAlpha = opacity;
+                            if (pixelDist > lineThick - 1.f)
+                                lineAlpha *= std::max(0.f, lineThick - pixelDist);
+
+                            // Line hierarchy opacity
+                            if (!isMajor && !isMedium) lineAlpha *= float(_archThinOpacity);
+                            else if (isMedium) lineAlpha *= 0.7f;
+
+                            // Silhouette color override
+                            if (isMajor) {
+                                float* px = _frameBuffer.data() + i * 4;
+                                float invA = 1.f - lineAlpha;
+                                px[0] = px[0] * invA + float(_archSilhouetteColor[0]) * lineAlpha;
+                                px[1] = px[1] * invA + float(_archSilhouetteColor[1]) * lineAlpha;
+                                px[2] = px[2] * invA + float(_archSilhouetteColor[2]) * lineAlpha;
+                                px[3] = std::min(1.f, px[3] + lineAlpha);
+                                lineAlpha = 0.f; // already blended
+                            }
+                        }
+
+                        // ── Style 3: Hidden-line ──
+                        else if (style == 3) {
+                            if (pixelDist > lineThick) continue;
+                            lineAlpha = opacity;
+                            if (pixelDist > lineThick - 1.f)
+                                lineAlpha *= std::max(0.f, lineThick - pixelDist);
+                            // Secondary direction dimmed and dashed
+                            if (distU < distV) {
+                                lineAlpha *= 0.3f;
+                                float dashPos = std::fmod(float(x) * 0.5f, 6.f);
+                                if (dashPos > 3.f) continue;
+                            }
+                        }
+
+                        // ── Style 4: Pencil sketch ──
+                        else if (style == 4) {
+                            float wobbleAmt = float(_pencilWobble);
+                            float pressureAmt = float(_pencilPressure);
+
+                            // Wobble: offset the grid distance with noise
+                            float noise = pencilNoise(x, y);
+                            float wobble = (noise - 0.5f) * wobbleAmt * pixelUVSize;
+                            float distUw = std::abs((gu + wobble * gridFreq) - std::round(gu + wobble * gridFreq)) / gridFreq;
+                            float distVw = std::abs((gv + wobble * gridFreq) - std::round(gv + wobble * gridFreq)) / gridFreq;
+                            float edgeDistW = std::min(distUw, distVw);
+                            float pixDistW = edgeDistW / pixelUVSize;
+
+                            // Variable thickness from pressure
+                            float thickNoise = pencilNoise(x / 4, y / 4);
+                            float pencilThick = lineThick * (1.f - pressureAmt + thickNoise * pressureAmt * 2.f);
+
+                            if (pixDistW > pencilThick) continue;
+                            lineAlpha = opacity * (1.f - pressureAmt * 0.5f + thickNoise * pressureAmt * 0.5f);
+                            if (pixDistW > pencilThick - 1.f)
+                                lineAlpha *= std::max(0.f, pencilThick - pixDistW);
+
+                            // Cross-hatch in shadowed areas
+                            if (_pencilCrossHatch && hasNormals) {
+                                float ny = _normalBuffer[i * 3 + 1];
+                                if (ny < 0.3f) {
+                                    float hatchSpacing = float(_pencilHatchDensity);
+                                    float angleRad = float(_pencilHatchAngle) * float(M_PI) / 180.f;
+                                    float hatchCoord = float(x) * std::cos(angleRad) + float(y) * std::sin(angleRad);
+                                    float hatch = std::fmod(std::abs(hatchCoord), hatchSpacing);
+                                    if (hatch < hatchSpacing * 0.3f) {
+                                        float hatchAlpha = opacity * 0.3f * (0.3f - ny);
+                                        // Wobble the hatch lines too
+                                        hatchAlpha *= (0.7f + pencilNoise(x + 999, y + 999) * 0.6f);
+                                        lineAlpha = std::max(lineAlpha, hatchAlpha);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Dashed override (applies to solid style when checkbox is on)
+                    if (_wireDashed && (style == 0 || style == 3)) {
+                        float dashPos = std::fmod(float(x + y) * 0.7071f,
+                                                 float(_wireDashLength) + float(_wireGapLength));
+                        if (dashPos > float(_wireDashLength)) continue;
+                    }
+
+                    } // end else (non-topo styles)
+
+                    if (lineAlpha > 0.001f) {
+                        float* px = _frameBuffer.data() + i * 4;
+                        float invA = 1.f - lineAlpha;
+                        px[0] = px[0] * invA + wireR * lineAlpha;
+                        px[1] = px[1] * invA + wireG * lineAlpha;
+                        px[2] = px[2] * invA + wireB * lineAlpha;
+                        px[3] = std::min(1.f, px[3] + lineAlpha);
+                    }
                 }
             }
             fprintf(stderr, "SpectralRender: wireframe overlay complete (%dx%d, style=%d)\n", W, H, style);

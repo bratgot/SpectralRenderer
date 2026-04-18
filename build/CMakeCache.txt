@@ -17,6 +17,9 @@
 //Path to a program.
 CMAKE_AR:FILEPATH=C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.38.33130/bin/Hostx64/x64/lib.exe
 
+//No help, variable specified on the command line.
+CMAKE_BUILD_TYPE:UNINITIALIZED=Release
+
 //Semicolon separated list of supported configuration types, only
 // supports Debug, Release, MinSizeRel, and RelWithDebInfo, anything
 // else will be ignored.
@@ -214,6 +217,9 @@ LIB_EMBREE:FILEPATH=C:/dev/embree-4/lib/embree4.lib
 
 //Path to a library.
 LIB_FDKBASE:FILEPATH=C:/Program Files/Nuke17.0v1/FdkBase.2.1.lib
+
+//Path to a library.
+LIB_GLEW:FILEPATH=C:/Program Files/Nuke17.0v1/glew32.lib
 
 //Path to a library.
 LIB_ILMTHREAD:FILEPATH=C:/vcpkg/installed/x64-windows/lib/IlmThread-3_4.lib

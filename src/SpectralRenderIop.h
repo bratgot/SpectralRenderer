@@ -149,8 +149,28 @@ private:
     bool   _wireDashed = false;
     double _wireDashLength = 8.0;     // pixels
     double _wireGapLength = 4.0;      // pixels
-    int    _wireNth = 1;              // show every Nth edge (1=all)
-    int    _wireStyle = 0;            // 0=solid, 1=guide, 2=architectural, 3=hidden-line
+    int    _wireNth = 1;              // grid density / every Nth edge
+    int    _wireStyle = 0;            // 0=solid,1=guide,2=arch,3=hidden,4=pencil,5=topo
+
+    // Architectural controls
+    double _archSilhouetteWeight = 3.0;
+    double _archMediumWeight = 1.5;
+    double _archThinWeight = 0.6;
+    double _archSilhouetteColor[3] = {0, 0, 0};  // separate silhouette color
+    double _archThinOpacity = 0.4;
+
+    // Pencil sketch controls
+    double _pencilWobble = 0.3;       // line wobble amount
+    double _pencilPressure = 0.6;     // pressure variation (0=uniform, 1=max variation)
+    bool   _pencilCrossHatch = true;
+    double _pencilHatchDensity = 4.0; // pixels between hatch lines
+    double _pencilHatchAngle = 45.0;  // degrees
+
+    // Topographic controls
+    int    _topoDirection = 0;        // 0=world Y, 1=custom vector, 2=normal curvature, 3=barycentric
+    double _topoUpVector[3] = {0, 1, 0};
+    double _topoContourInterval = 0.5;  // number of contour lines per unit
+    int    _topoMajorEvery = 5;         // every Nth contour is major
 
     // Shadow catcher
     const char* _shadowCatcherNames = "";  // comma-separated material names
@@ -377,6 +397,9 @@ private:
     bool  _aovDirect   = false;
     bool  _aovIndirect = false;
     bool  _aovEmission = false;
+    // Shadow catcher pass -- writes shadowcatcherAOV.{red,green,blue,alpha}
+    // with the per-pixel shadow factor (R=G=B=A) for use as a mask in comp.
+    bool  _aovShadowCatcher = false;
 
     // Volume-specific AOVs
     bool  _aovVolDensity = false;
@@ -466,6 +489,9 @@ private:
     std::vector<float>  _specularIndirectBuffer;
     std::vector<float>  _transmissionBuffer;
 
+    // Shadow catcher AOV: 4 floats per pixel (R=G=B=A=shadow factor).
+    std::vector<float>  _shadowCatcherBuffer;
+
     // Cryptomatte
     std::vector<float>  _cryptoObjectBuffer;  // (hash, coverage) pairs
 
@@ -489,6 +515,10 @@ private:
     Channel _chanDiffIndirectR = Chan_Black, _chanDiffIndirectG = Chan_Black, _chanDiffIndirectB = Chan_Black;
     Channel _chanSpecIndirectR = Chan_Black, _chanSpecIndirectG = Chan_Black, _chanSpecIndirectB = Chan_Black;
     Channel _chanTransmitR = Chan_Black, _chanTransmitG = Chan_Black, _chanTransmitB = Chan_Black;
+
+    // Shadow catcher AOV channels -- layer "shadowcatcherAOV", RGBA.
+    Channel _chanShadowCatcherR = Chan_Black, _chanShadowCatcherG = Chan_Black;
+    Channel _chanShadowCatcherB = Chan_Black, _chanShadowCatcherA = Chan_Black;
 
     // Cryptomatte
     Channel _chanCryptoR = Chan_Black, _chanCryptoG = Chan_Black;

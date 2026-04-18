@@ -1679,6 +1679,13 @@ extern "C" __global__ void __raygen__spectral()
                     }
                     float sFactor = params.lightCount > 0 ? shadow / float(params.lightCount) : 0.f;
                     alphaAccum += sFactor;
+                    // Shadow catcher AOV: accumulate per-sample, normalise at strip end.
+                    if (params.shadowCatcherAOV) {
+                        float4 prev = params.shadowCatcherAOV[pixIdx];
+                        params.shadowCatcherAOV[pixIdx] =
+                            make_float4(prev.x + sFactor, prev.y + sFactor,
+                                        prev.z + sFactor, prev.w + sFactor);
+                    }
                     continue;  // no RGB contribution
                 }
 
@@ -1823,6 +1830,13 @@ extern "C" __global__ void __raygen__spectral()
                     }
                     float sFactor = params.lightCount > 0 ? shadow / float(params.lightCount) : 0.f;
                     alphaAccum += sFactor;
+                    // Shadow catcher AOV: accumulate per-sample, normalise at strip end.
+                    if (params.shadowCatcherAOV) {
+                        float4 prev = params.shadowCatcherAOV[pixIdx];
+                        params.shadowCatcherAOV[pixIdx] =
+                            make_float4(prev.x + sFactor, prev.y + sFactor,
+                                        prev.z + sFactor, prev.w + sFactor);
+                    }
                     continue;  // no spectral contribution
                 }
 

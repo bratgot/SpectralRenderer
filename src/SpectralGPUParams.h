@@ -205,6 +205,11 @@ struct LaunchParams {
     // Shadow catcher: bitmask of material IDs (supports up to 32 materials)
     unsigned int       shadowCatcherMask;
 
+    // Shadow catcher AOV output buffer (4 floats per pixel: R=G=B=A=shadow).
+    // Null when the Iop isn't asking for the pass. Written alongside the
+    // alphaAccum contribution in the shadow catcher kernel branches.
+    float4*            shadowCatcherAOV;
+
     // UV projection lookup (one entry per pixel, built CPU-side)
     int*               uvTriIndex;      // triangle index per pixel (-1 = empty)
     float*             uvBaryU;         // barycentric U per pixel

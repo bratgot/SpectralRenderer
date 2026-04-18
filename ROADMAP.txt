@@ -1,0 +1,272 @@
+# SpectralRenderer - Roadmap
+
+Long-form planning doc. Companion to `CLAUDE.md` (which covers *how* to work
+in the codebase). This doc covers *what* to build next and why.
+
+Update this as phases close or priorities shift. When in doubt, add a note
+rather than rewrite -- context rot beats missing context.
+
+---
+
+## Current status (April 2026)
+
+Phase 17 + infrastructure complete. The renderer has:
+- Spectral path tracing (hero wavelength, 380-780nm, CIE 1931 2deg observer)
+- CPU path via Embree 4, GPU path via OptiX 9 / CUDA 12.6
+- UsdPreviewSurface materials with spectral extensions (dispersion, thin-film,
+  metal BRDFs, SSS, diffraction gratings, fluorescence, Beer-Lambert)
+- Volumes via OpenVDB / NanoVDB, multi-volume support, fire & explosions
+- HDRI / studio / sun+sky lighting
+- Shadow catcher material (AOV-style compositing surface)
+- Artistic wireframe overlay (6 styles incl. pencil sketch & topographic)
+- SpectralRenderIop frontend for Nuke 17 node graph
+- Hydra render delegate stub for Hydra viewer path (Phase 1 only)
+- OpenSubdiv Catmull-Clark for displacement and smooth surfaces
+- SpectralMeshProperties per-mesh override node
+
+Stack: Windows 11 + VS2022, Nuke 17, CUDA 12.6, OptiX 9.0, RTX 5060 Ti.
+
+---
+
+## Phase status table
+
+Phase numbers are historical -- they document the rough development order
+rather than priority. Treat them as labels.
+
+| Phase | Scope | Status |
+|-------|-------|--------|
+| 1     | CPU integrator, Moller-Trumbore, normal shading | Done |
+| 2     | Embree BVH, triangulation, OpenSubdiv | Done |
+| 3     | Hero-wavelength spectral sampling | Done |
+| 4     | Disney BSDF, emission, multi-bounce, materials | Done |
+| 5-10  | Textures, displacement, motion blur, AOVs | Done |
+| 11-13 | Volume rendering (dense + multi-volume) | Done |
+| 14    | Chromatic extinction, diffraction, fluorescence | Done |
+| 15    | HDRI lighting pipelines, virtual lights, SH | Done |
+| 15.5  | ScanlineRender compatibility mode | Done |
+| 16    | Shadow softness, neutral white balance | Done |
+| 17    | Fire, explosions, Cherenkov, core glow | Done |
+| 22    | NanoVDB sparse volumes | Done |
+| 23.1  | GPU caching (GAS, materials, textures, lights) | Done |
+| 24    | Shadow catcher (all 4 render paths) | Done |
+| 26    | Bidirectional volume/geometry shadows | Done |
+| 27    | Volume self-shadow improvements | Done |
+| **18**| Prebuilt materials & shader library | Pending |
+| **19**| Out-of-core rendering (scene larger than VRAM) | Pending |
+| **20**| Extended light types (mesh lights, portal lights) | Pending |
+| **21**| SpectralSurface Metal/PBR expansion | Pending |
+| **23**| Multi-GPU rendering | Pending |
+| **25**| Validation suite & showcase assets | Pending |
+| **28**| Gravitational lensing, Einstein ring | Future |
+| **29**| Hydra render delegate (HdSpectral) full | Future |
+| **30**| Object motion blur (currently camera only) | Pending |
+| **31**| Linux build (GCC/Clang) | Pending |
+| **32**| Marketing website / product page | Pending |
+
+---
+
+## Near-term backlog (next 1-3 sessions)
+
+Ordered roughly by value. Nothing here is committed; reorder as needed.
+
+### Finish SpectralMeshProperties wiring
+
+Currently registered but unused knobs:
+- `doubleSided` -- should control backface culling. Hook into material
+  `isShadowCatcher`-style flag that GPU kernel and CPU integrator honour.
+- `castsShadows` -- per-mesh shadow-ray opacity. Requires a flag in
+  `SpectralTriangle` (or per-material) that shadow rays check before
+  accumulating occlusion.
+- `visible` -- gate mesh-loading loop early. One line.
+- `orientation` -- winding-order flip. Already implicitly supported via
+  `flipNormals`; consider merging concepts or making `orientation` override.
+- `purpose` -- USD "render" vs "proxy" vs "guide". Affects inclusion in
+  render / viewport / bbox-only.
+
+Architectural prerequisite: replace substring matching in SpectralRenderIop
+with prim-path registration inside `processScenegraph`. See CLAUDE.md for
+why the current approach is brittle with multiple modifier nodes.
+
+### Volumetric refraction
+
+Glass containing smoke / fire / fog. Currently refraction rays see the
+volume as empty space. Needs the refraction path to call the volume
+integrator between hits, not just surface-to-surface.
+
+### Emission from volumes lighting geometry
+
+Currently volume emission (fire, explosions) is visible but does not
+contribute to geometry lighting. Needs virtual-light extraction from
+emissive voxels, similar to how HDRI virtual lights already work.
+
+### Full path tracing
+
+Currently a hybrid direct-lighting + limited-bounce indirect. Unified
+path tracing with MIS would simplify the integrator, improve convergence
+for complex lighting, and match industry expectations.
+
+### SpectralSurface PBR expansion (Phase 21)
+
+- Anisotropic roughness (brushed metal, hair, fabric)
+- Coat normal maps (independent of base normal)
+- Energy compensation for rough conductors
+- Better Fresnel for non-metals (Schlick -> exact Fresnel, optional)
+
+### Prebuilt material library (Phase 18)
+
+Curated spectral material presets as a picker menu:
+- Common metals (gold, copper, silver, aluminium, chrome) -- already in code
+  as `metalType` enum, expose as a proper material browser
+- Glass variants (crown, flint, sapphire, diamond, quartz) with correct
+  Abbe numbers
+- Skin (with matching SSS profile)
+- Common plastics, ceramics, woods
+
+---
+
+## Technical debt / known issues
+
+Tracked here so we don't forget. Each line is roughly the shape of an issue.
+
+- **SpectralMeshProperties affects scene when detached**: when the node is
+  in the script but its input is disconnected (floating in the DAG), its
+  registry entry still persists and is applied by SpectralRenderIop to
+  whichever mesh happens to match by substring / size-1 fallback. Reproduced
+  2026-04-18. Related to the `size() == 1` matching fallback below --
+  proper prim-path registration would fix both. Workaround: delete or
+  fully disable (both master `enable` knob OFF and Nuke D-key) the node
+  when not actively driving geometry.
+- **SpectralMeshProperties path matching**: `size() == 1` fallback is brittle;
+  breaks with >1 modifier node. Fix in `processScenegraph` via prim-path
+  registration. Tagged with `TODO` in `SpectralRenderIop.cpp`.
+- **Registry cleanup on node delete**: static registries never have entries
+  removed when nodes are deleted or renamed. Harmless but unclean. Add
+  destructors to the Op classes that erase from the registry.
+- **`Iop::append(hash)` not called at top of `SpectralRenderIop::append`**:
+  we're manually hashing each knob that affects output. Brittle -- new knobs
+  are easy to forget. Switch to base-class default + any registry extras.
+- **Subdivision level clamping**: knob range is 0-6 but OpenSubdiv clamps
+  internally to `[1, 4]`. Tooltip implies 6 works. Either raise the internal
+  cap or lower the knob max.
+- **Static log string bug**: fixed in recent patch, but the pattern (hardcoded
+  values in diagnostic strings) probably exists elsewhere. Audit when time
+  permits.
+- **Volume compositing on CPU**: volumes currently render behind geometry
+  on the CPU path. GPU is correct. Fix the CPU path to match.
+- **Neutral white balance**: only applied in non-scanlineCompat spectral mode.
+  Tooltip says so but this is a quirk, not a feature. Consider a dedicated
+  white-balance handling that works in all modes.
+
+---
+
+## Open design questions
+
+These need more thought before turning into tasks.
+
+### Hydra delegate scope
+
+How far do we take `HdSpectralRenderDelegate`? Full parity with the Nuke
+Iop path means duplicating scene conversion, material binding, light
+enumeration, AOV buffer management. Currently it's a Phase-1 stub doing
+normal-shaded geometry.
+
+Options:
+1. Keep as a stub, mark as "out of scope", don't maintain
+2. Bring to Phase-4 feature parity (materials, lights, volumes) and use it
+   as the viewport path for Nuke 17's Hydra-based renderer
+3. Full parity including GPU path -- effectively two frontends for the
+   same core renderer
+
+Gut feeling: (2) is worth the work because Nuke is moving to Hydra for
+viewport rendering and being absent from that is bad positioning. But it's
+a quarter of engineering at minimum.
+
+### Out-of-core rendering (Phase 19)
+
+Scenes larger than VRAM. Two approaches:
+1. **Tile-based scene streaming** -- bring geometry in/out as GAS tiles,
+   retrace pixels that miss. Needs careful BVH design and significant OptiX
+   restructuring.
+2. **Managed memory / UVA** -- let CUDA handle paging. Simpler but much
+   slower under realistic conditions.
+
+VFX production workflow normally pre-loads everything, so this mostly
+matters for very large single assets (multi-million-poly environments,
+high-res VDB caches). Low priority unless a specific user needs it.
+
+### Linux build (Phase 31)
+
+GCC/Clang on Ubuntu 24. Needed for farm rendering in production pipelines.
+Gotchas already surfaced in earlier work:
+- `_USE_MATH_DEFINES` is MSVC-specific; use literal `3.14159265f`
+- OpenVDB linking is fiddlier (vcpkg vs system packages)
+- GLEW linking fallback chain already in CMakeLists
+- CUDA/OptiX paths differ
+
+Not hard, just tedious. Worth doing before public release.
+
+### Multi-GPU (Phase 23)
+
+Two GPUs in one box is increasingly common. Simplest model: tile the image
+across GPUs, composite on download. More complex: share GAS and texture
+memory across GPUs via NVLink / P2P.
+
+Not urgent -- single-GPU on a 5060 Ti or better hits interactive speeds
+on most scenes -- but worth designing for before API choices lock it out.
+
+---
+
+## Things we will not build
+
+Keeping these explicit prevents scope creep conversations.
+
+- **A node editor / material graph UI**: Nuke's node graph is the UI.
+- **GPU compiler replacement**: OptiX/CUDA is fine.
+- **Full BSSRDF / volumetric SSS**: the current MPFR-less Christensen-Burley
+  SSS is good enough for VFX work. Exact BSSRDF is research territory.
+- **A denoiser of our own**: OIDN and OptiX denoiser cover the need.
+
+---
+
+## Release goals
+
+No hard timeline, but rough phases:
+
+### Private beta
+Complete: Phase 18 (materials library) + Phase 30 (object motion blur) +
+SpectralMeshProperties polish + Phase 31 (Linux).
+
+Ship to a handful of trusted VFX users for feedback.
+
+### Public beta
+Complete: Phase 19 (out-of-core) + Phase 20 (mesh/portal lights) +
+Phase 21 (PBR expansion) + Phase 25 (validation suite).
+
+Ship with docs, example scenes, a website (Phase 32).
+
+### 1.0
+Complete: Phase 23 (multi-GPU) + Phase 29 (Hydra delegate parity) +
+production hardening (farm-tested, stability pass, deterministic output
+across runs).
+
+### Post-1.0 / research
+Phase 28 (gravitational lensing). Fun, slightly eccentric, good for marketing
+screenshots, zero production need. Save for when the fundamentals are solid.
+
+---
+
+## Session journal
+
+One-line-per-session record of what happened. Add to the top. Serves as a
+memory aid for "what did I work on last week?"
+
+- **2026-04-17** -- SpectralMeshProperties subdivision bug fixes (4 patches),
+  normal mode (auto/smooth/faceted/vertex), flip-normals, scanline constant
+  shader fix (fallback dome skipped when scanlineCompat on), hash invalidation
+  for scanlineCompat / useBuiltinLight / deviceMode / mesh-props registry,
+  node-disable cleanup in registry, quantized-position hash for separate-
+  vertices smoothing, MSVC lambda capture fix, DAG label cleanup.
+- **2026-04-15** -- Shadow catcher Phase 24 complete, SpectralWireframe +
+  SpectralShadowCatcher + SpectralMeshProperties nodes, 6-style wireframe
+  rewrite, toolbar icons, Nuke 17 gate.
+- *(earlier sessions: see prior journal entries / chat transcripts)*

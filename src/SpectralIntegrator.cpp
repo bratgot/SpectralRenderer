@@ -187,6 +187,10 @@ void SpectralIntegrator::RenderFrame(
         std::vector<float> accLumSqSum(numPixels, 0.f); // for variance
         std::vector<int>   accCount(numPixels, 0);
         std::vector<float> accAlpha(numPixels, 0.f);
+        // Shadow-catcher AOV accumulator: per-pixel shadow factor, summed
+        // across samples and normalised by accCount at the end. Only
+        // populated when aovs->shadowCatcher is non-null.
+        std::vector<float> accShadowCatcher(numPixels, 0.f);
         std::vector<bool>  converged(numPixels, false);
         std::vector<float> depthBuf(numPixels, 1e30f);
         std::vector<int>   objIdBuf(numPixels, 0);
@@ -406,6 +410,9 @@ void SpectralIntegrator::RenderFrame(
                                         accZ[pixIdx] += 0.f;
                                         accCount[pixIdx]++;
                                         accAlpha[pixIdx] += shadowFactor;  // alpha = shadow darkness
+                                        // Dedicated AOV accumulator -- beauty still wants the shadow
+                                        // in alpha for back-compat, but the AOV gives a clean pass.
+                                        accShadowCatcher[pixIdx] += shadowFactor;
                                         GfVec3d viewHit2 = worldToView.Transform(worldHit);
                                         float camZ2 = static_cast<float>(-viewHit2[2]);
                                         if (camZ2 < depthBuf[pixIdx]) depthBuf[pixIdx] = camZ2;
@@ -481,6 +488,8 @@ void SpectralIntegrator::RenderFrame(
                                     float sFactor = lights.empty() ? 0.f : shadow / float(lights.size());
                                     accAlpha[pixIdx] += sFactor;
                                     accCount[pixIdx]++;
+                                    // Dedicated AOV accumulator (see above).
+                                    accShadowCatcher[pixIdx] += sFactor;
                                     GfVec3d viewHit = worldToView.Transform(worldHit);
                                     float camZ = static_cast<float>(-viewHit[2]);
                                     if (camZ < depthBuf[pixIdx]) depthBuf[pixIdx] = camZ;
@@ -1148,6 +1157,14 @@ void SpectralIntegrator::RenderFrame(
                 write3(aovs->diffuseIndirect, accDiffIndX[i], accDiffIndY[i], accDiffIndZ[i]);
                 write3(aovs->specularIndirect,accSpecIndX[i], accSpecIndY[i], accSpecIndZ[i]);
                 write3(aovs->transmission,    accTransX[i],   accTransY[i],   accTransZ[i]);
+            }
+            // Shadow catcher AOV -- RGB = alpha = shadow factor, normalised by sample count.
+            if (aovs && aovs->shadowCatcher) {
+                float s = std::min(1.f, std::max(0.f, accShadowCatcher[i] * invN));
+                aovs->shadowCatcher[i*4+0] = s;
+                aovs->shadowCatcher[i*4+1] = s;
+                aovs->shadowCatcher[i*4+2] = s;
+                aovs->shadowCatcher[i*4+3] = s;
             }
         }
 
@@ -2620,7 +2637,8 @@ void SpectralIntegrator::RenderFrameGPU(
     const SpectralVolume* const* volumes,
     int                   numVolumes,
     StripCallback         stripCallback,
-    int                   numStrips)
+    int                   numStrips,
+    float*                shadowCatcherAOV)
 {
     // Phase 13: GPU handles multi-volume natively (up to 8)
     if (numVolumes > SPECTRAL_MAX_GPU_VOLUMES) {
@@ -2629,30 +2647,42 @@ void SpectralIntegrator::RenderFrameGPU(
         numVolumes = SPECTRAL_MAX_GPU_VOLUMES;
     }
 
+    // CPU fallback helper -- forwards through an AOVBuffers struct if the
+    // caller wanted the shadow catcher AOV. Beauty-only callers stay on the
+    // minimal CPU fallback path.
+    auto cpuFallback = [&]() {
+        if (shadowCatcherAOV) {
+            AOVBuffers aovs;
+            aovs.shadowCatcher = shadowCatcherAOV;
+            RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces,
+                        nullptr, nullptr, &aovs, nullptr, nullptr, 0.5f, colorSpace,
+                        volumes, numVolumes);
+        } else {
+            RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces,
+                        nullptr, nullptr, nullptr, nullptr, nullptr, 0.5f, colorSpace,
+                        volumes, numVolumes);
+        }
+    };
+
     SpectralGPU* gpu = _GetGPU();
     if (!gpu) {
         fprintf(stderr, "SpectralIntegrator: GPU unavailable, using CPU\n");
-        RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces,
-                    nullptr, nullptr, nullptr, nullptr, nullptr, 0.5f, colorSpace,
-                    volumes, numVolumes);
+        cpuFallback();
         return;
     }
 
     if (!gpu->BuildAccel(scene)) {
         fprintf(stderr, "SpectralIntegrator: GPU accel build failed, using CPU\n");
-        RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces,
-                    nullptr, nullptr, nullptr, nullptr, nullptr, 0.5f, colorSpace,
-                    volumes, numVolumes);
+        cpuFallback();
         return;
     }
 
     if (!gpu->Render(camera, camera.imageWidth, camera.imageHeight,
                      pixels, depthOut, spp, maxBounces, colorSpace,
-                     volumes, numVolumes, stripCallback, numStrips)) {
+                     volumes, numVolumes, stripCallback, numStrips,
+                     shadowCatcherAOV)) {
         fprintf(stderr, "SpectralIntegrator: GPU render failed, using CPU\n");
-        RenderFrame(scene, camera, pixels, spp, depthOut, maxBounces,
-                    nullptr, nullptr, nullptr, nullptr, nullptr, 0.5f, colorSpace,
-                    volumes, numVolumes);
+        cpuFallback();
         return;
     }
 
