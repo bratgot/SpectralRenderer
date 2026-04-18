@@ -1534,6 +1534,13 @@ int SpectralRenderIop::knob_changed(Knob* k)
     if (k->is("scanline_compat") || k->is("vdb_3d_preview") || k->is("vdb_show_points") || k->is("vdb_shaded") || k->is("vdb_viewport_res") || k->is("vdb_point_density") || k->is("vdb_point_size") || k->is("vdb_show_bbox") || k->is("vdb_fast_scrub") || k->is("vp_shadow_pcf") || k->is("vp_vol_shadow") || k->is("vp_env_reflections") || k->is("vp_geo_reflections") || k->is("vp_vol_reflections") || k->is("vp_refl_steps")) {
         _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
         if (k->is("vdb_fast_scrub") || k->is("vdb_viewport_res")) _vdbLoadedPath.clear();
+        // Grey out built-in-light knob in compat mode so users see why their
+        // sun/sky/studio settings aren't contributing. Value is preserved --
+        // toggling compat off restores their setting as-was.
+        if (k->is("scanline_compat")) {
+            if (Knob* bl = knob("use_builtin_light"))
+                bl->enable(!_scanlineCompat);
+        }
         return 1;
     }
     if (k->is("vdb_cache_clear")) {
@@ -4305,7 +4312,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage,
                             mat.baseColor = meshPropsDisplayColor;
                         }
                         mat.opacity *= meshPropsDisplayOpacity;
-                        if (!meshPropsVisible) mat.opacity = 0.f;
+                        // visible=false handled at BVH build via data.visible below.
                     }
 
                     matId = _scene->AddMaterial(mat);
@@ -4460,7 +4467,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage,
                                 mat.baseColor = meshPropsDisplayColor;
                             }
                             mat.opacity *= meshPropsDisplayOpacity;
-                            if (!meshPropsVisible) mat.opacity = 0.f;
+                            // visible=false handled at BVH build via data.visible below.
                         }
 
                         matId = _scene->AddMaterial(mat);
@@ -4872,6 +4879,10 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage,
 
         pxr::SpectralMeshData data;
         data.id      = prim.GetPath();
+        // SpectralMeshProperties: visible=false gates the mesh out at BVH
+        // build time (SpectralBVH / SpectralIntegrator / SpectralGPU all
+        // check kv.second.visible when iterating meshes). Absent entry
+        // defaults to true.
         data.visible = true;
         data.objectId = _scene->NextObjectId();
 
@@ -8145,7 +8156,14 @@ void SpectralRenderIop::_BuildLightRig()
     }
 
     // ---- Fallback: use SpectralRender's own lighting knobs if no light nodes connected ----
-    if (_useBuiltinLight && _allEnvLights.empty() && _allStudioLights.empty()) {
+    // ScanlineRender-compat mode mimics Nuke's native renderer, which only uses
+    // lights that are explicitly wired into the scene. Injecting built-in sun/
+    // sky or studio lights here would make compat mode render noticeably
+    // brighter than the reference ScanlineRender output -- confusing users who
+    // expect the modes to match. Keep the knob value intact; the matching UI
+    // disable in knob_changed just greys it out.
+    if (_useBuiltinLight && !_scanlineCompat
+        && _allEnvLights.empty() && _allStudioLights.empty()) {
         // Sun/sky from local knobs
         if (_skyPreset > 0 && _skyMix > 0.001) {
             double m = _skyMix;

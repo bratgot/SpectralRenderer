@@ -38,8 +38,10 @@ SpectralDraftingOp::~SpectralDraftingOp()
 {
     auto& reg = GetRegistry();
     auto it = reg.find(node_name());
-    if (it != reg.end())
-        reg.erase(it);
+    const bool found = (it != reg.end());
+    if (found) reg.erase(it);
+    fprintf(stderr, "SpectralDraftingOp::~dtor node='%s' erased=%d reg_size_after=%zu\n",
+            node_name(), found ? 1 : 0, reg.size());
 }
 
 const char* SpectralDraftingOp::node_help() const
