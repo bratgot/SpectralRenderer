@@ -121,8 +121,8 @@ private:
 
     void _LoadStage();
     void _LoadFromPxrStage(const UsdStageRefPtr& stage,
-                           const UsdStageRefPtr& stageClose = UsdStageRefPtr(),
-                           DD::Image::Op* nodeGraphInput = nullptr);
+                       const UsdStageRefPtr& stageClose = UsdStageRefPtr(),
+                       DD::Image::Op*        nodeGraphInput = nullptr);
     void _BuildCameraFromInput();
     void _BuildLightRig();
     void _LoadVDB();
@@ -153,6 +153,8 @@ private:
     double _wireGapLength = 4.0;      // pixels
     int    _wireNth = 1;              // grid density / every Nth edge
     int    _wireStyle = 0;            // 0=solid,1=guide,2=arch,3=hidden,4=pencil,5=topo
+    int    _wireAAMode = 1;           // 0=off, 1=edge smooth, 2=soft 1.5x, 3=softest 2.5x
+    float  _wireAAWidth = 1.5f;       // smoothstep band in pixels
 
     // Architectural controls
     double _archSilhouetteWeight = 3.0;
@@ -173,11 +175,6 @@ private:
     double _topoUpVector[3] = {0, 1, 0};
     double _topoContourInterval = 0.5;  // number of contour lines per unit
     int    _topoMajorEvery = 5;         // every Nth contour is major
-
-    // Antialiasing controls (overlay is a single post-process pass -- render
-    // samples don't touch it, so flicker has to be fixed here).
-    int    _wireAAMode = 1;             // 0=off, 1=edge, 2=2x2, 3=4x4
-    double _wireAAWidth = 1.5;          // smoothstep band width in pixels
 
     // Shadow catcher
     const char* _shadowCatcherNames = "";  // comma-separated material names
@@ -338,6 +335,7 @@ private:
     // Project3D: per-material projection camera matrices
     std::unordered_map<int, pxr::GfMatrix4d> _projCameraVP;  // matId → viewProjection
     std::unordered_set<int> _shadowCatcherMatIds;  // materials acting as shadow catchers
+    std::unordered_set<int> _noShadowCastMatIds;   // materials with castsShadows=false
     GLuint _glVolTempTex = 0;
     int    _glVolTexFrame = -1;
     int    _glVolTexResX = 0, _glVolTexResY = 0, _glVolTexResZ = 0;
@@ -388,6 +386,7 @@ private:
     float _adaptiveThreshold = 0.05f; // adaptive sampling threshold
     bool  _progressive = false;          // progressive refinement mode
     bool  _blueNoise = true;            // R2 quasi-random sampling
+    bool  _objectMotionBlur = false;    // enable per-object motion blur via chain-walk
     float _fStop = 0.f;            // 0 = pinhole (no DOF)
     float _focusDistance = 100.f;    // world units
     int   _proxyMode = 3;              // 0=1/4, 1=1/2, 2=3/4, 3=full
@@ -401,10 +400,10 @@ private:
     bool  _aovPRef    = true;
     bool  _aovUV       = true;
     bool  _aovAlbedo   = true;
-    bool  _aovDepth    = true;   // camera-space Z output as depth.Z
     bool  _aovDirect   = false;
     bool  _aovIndirect = false;
     bool  _aovEmission = false;
+    bool  _aovDepth    = true;          // depth.Z AOV
 
     // Volume-specific AOVs
     bool  _aovVolDensity = false;
@@ -423,11 +422,6 @@ private:
     bool  _motionBlur = false;
     int   _shutterPreset = 1;  // 0=Start,1=Centre,2=End,3=Custom
     int   _motionSamples = 3;
-    // Object motion blur — geometry deformation + rigid body movement.
-    // Enabled by default because the integrator already handles it on CPU
-    // whenever shutter != 0; this knob just gives users a discoverable
-    // toggle and a way to force reference frames without changing shutter.
-    bool  _objectMotionBlur = true;
     // Camera motion blur
     bool  _cameraMblur = false;
     int   _cameraMblurQuality = 4;  // extra samples for camera blur
@@ -437,13 +431,8 @@ private:
     // Scrub detection: skip full render during rapid frame changes
     std::chrono::steady_clock::time_point _lastFrameChangeTime;
     bool  _scrubbing = false;
-    double _shutterOpen  = -0.25;  // shutter open  (relative to frame)
-    double _shutterClose =  0.25;  // shutter close (relative to frame)
-    // Default is a 180-degree shutter (half-frame exposure, centred on the
-    // frame), matching film convention and aligning with Arnold / Redshift
-    // / Karma / Nuke ScanlineRender defaults. Previous default of -0.5/0.5
-    // was effectively a 360-degree shutter (full-frame exposure) which
-    // gave about twice as much blur as users typically expect.
+    double _shutterOpen  = -0.5;   // shutter open  (relative to frame)
+    double _shutterClose =  0.5;   // shutter close (relative to frame)
     float _lightIntensity = 1.0f;  // global light intensity multiplier
     int   _illuminant = 0;         // 0=auto, 1=D50, 2=D65, 3=A, 4=F2, 5=F11
     const char* _cameraPath = "";
@@ -511,13 +500,13 @@ private:
     Channel _chanObjectId   = Chan_Black;
     Channel _chanMaterialId = Chan_Black;
     Channel _chanAO         = Chan_Black;
+    Channel _chanDepth      = Chan_Black;
     // Geometry AOV channels
     Channel _chanNx = Chan_Black, _chanNy = Chan_Black, _chanNz = Chan_Black;
     Channel _chanPx = Chan_Black, _chanPy = Chan_Black, _chanPz = Chan_Black;
     Channel _chanPRefX = Chan_Black, _chanPRefY = Chan_Black, _chanPRefZ = Chan_Black;
     Channel _chanUu = Chan_Black, _chanUv = Chan_Black;
     Channel _chanAlbedoR = Chan_Black, _chanAlbedoG = Chan_Black, _chanAlbedoB = Chan_Black;
-    Channel _chanDepth  = Chan_Black;   // depth.Z -- camera-space Z from _depthBuffer
     Channel _chanDirectR = Chan_Black, _chanDirectG = Chan_Black, _chanDirectB = Chan_Black;
     Channel _chanIndirectR = Chan_Black, _chanIndirectG = Chan_Black, _chanIndirectB = Chan_Black;
     Channel _chanEmissionR = Chan_Black, _chanEmissionG = Chan_Black, _chanEmissionB = Chan_Black;

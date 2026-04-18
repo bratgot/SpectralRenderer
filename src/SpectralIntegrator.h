@@ -77,6 +77,10 @@ struct SpectralCamera {
 
     // Shadow catcher material IDs
     std::unordered_set<int> shadowCatcherMatIds;
+    // Materials that do NOT cast shadows: shadow rays pass through as if
+    // invisible. Populated by SpectralRenderIop from
+    // SpectralMeshPropertiesOp::castsShadows=false entries.
+    std::unordered_set<int> noShadowCastMatIds;
 
     // UV projection lookup (CPU-rasterized, passed to GPU)
     const int*   uvTriIndex  = nullptr;
@@ -277,19 +281,6 @@ private:
 
     // Simple hash-based RNG for per-pixel, per-sample jitter
     static float _Hash(unsigned int seed);
-
-    // First-hit geometry AOV writer — keeps RenderFrame's four shading
-    // branches (scanline shadow catcher / scanline constant / spectral
-    // shadow catcher / full spectral) writing identical AOVs, matching the
-    // GPU ComputeGeometryAOVs pass. Previously only full-spectral wrote
-    // them, so CPU wireframe overlay broke on the other paths.
-    static void _WriteFirstHitAOVs(const AOVBuffers* aovs,
-                                    size_t pixIdx,
-                                    const SpectralTriangle& tri,
-                                    float u, float v,
-                                    const GfVec3f& hitPos,
-                                    const GfVec3f& rayDir,
-                                    const SpectralScene& scene);
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE

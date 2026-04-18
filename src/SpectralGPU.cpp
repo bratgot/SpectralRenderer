@@ -236,15 +236,7 @@ bool SpectralGPU::Initialize(const std::string& ptxSource)
     moduleOptions.debugLevel       = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
 
     OptixPipelineCompileOptions pipelineOptions = {};
-    // usesMotionBlur is a pipeline-level flag: when true, optixTrace takes
-    // an extra rayTime argument and the traversal consults motion keys on
-    // the GAS. We compile once at startup, so we enable it unconditionally
-    // -- static scenes pay a negligible traversal cost for the option, and
-    // it avoids the pipeline-rebuild churn a per-scene flag would require.
-    // Every optixTrace call site in the kernel passes rayTime (usually
-    // sampled from [camera.shutterOpen, camera.shutterClose]; 0 when
-    // motion blur is off).
-    pipelineOptions.usesMotionBlur        = true;
+    pipelineOptions.usesMotionBlur        = false;
     pipelineOptions.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
     pipelineOptions.numPayloadValues      = 7;  // nx,ny,nz,t,matId,uvX,uvY
     pipelineOptions.numAttributeValues    = 2;  // barycentrics
@@ -587,37 +579,20 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
 
     // Flatten triangles
     std::vector<float3> vertices;
-    std::vector<float3> verticesClose;   // shutter-close positions (motion blur)
     std::vector<float3> normals;
     std::vector<int>    matIds;
     std::vector<float2> uvs;
     vertices.reserve(scene.TotalTriangles() * 3);
-    verticesClose.reserve(scene.TotalTriangles() * 3);
     normals.reserve(scene.TotalTriangles() * 3);
     matIds.reserve(scene.TotalTriangles());
     uvs.reserve(scene.TotalTriangles() * 3);
 
-    bool anyTriHasMotion = false;
     for (auto& kv : scene.GetMeshes()) {
         if (!kv.second.visible) continue;
         for (auto& tri : kv.second.triangles) {
             vertices.push_back(make_float3(tri.v0[0], tri.v0[1], tri.v0[2]));
             vertices.push_back(make_float3(tri.v1[0], tri.v1[1], tri.v1[2]));
             vertices.push_back(make_float3(tri.v2[0], tri.v2[1], tri.v2[2]));
-            // Close-time vertices: for motionless tris these are the same
-            // as open. Always fill the parallel array so we can upload it
-            // unconditionally when any triangle has motion (GAS motion keys
-            // must cover all tris, not a subset).
-            if (tri.hasMotion) {
-                anyTriHasMotion = true;
-                verticesClose.push_back(make_float3(tri.v0_close[0], tri.v0_close[1], tri.v0_close[2]));
-                verticesClose.push_back(make_float3(tri.v1_close[0], tri.v1_close[1], tri.v1_close[2]));
-                verticesClose.push_back(make_float3(tri.v2_close[0], tri.v2_close[1], tri.v2_close[2]));
-            } else {
-                verticesClose.push_back(make_float3(tri.v0[0], tri.v0[1], tri.v0[2]));
-                verticesClose.push_back(make_float3(tri.v1[0], tri.v1[1], tri.v1[2]));
-                verticesClose.push_back(make_float3(tri.v2[0], tri.v2[1], tri.v2[2]));
-            }
             normals.push_back(make_float3(tri.n0[0], tri.n0[1], tri.n0[2]));
             normals.push_back(make_float3(tri.n1[0], tri.n1[1], tri.n1[2]));
             normals.push_back(make_float3(tri.n2[0], tri.n2[1], tri.n2[2]));
@@ -636,9 +611,6 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
         vertices.push_back(make_float3(1e10f, 1e10f, 1e10f));
         vertices.push_back(make_float3(1e10f, 1e10f+0.001f, 1e10f));
         vertices.push_back(make_float3(1e10f+0.001f, 1e10f, 1e10f));
-        verticesClose.push_back(make_float3(1e10f, 1e10f, 1e10f));
-        verticesClose.push_back(make_float3(1e10f, 1e10f+0.001f, 1e10f));
-        verticesClose.push_back(make_float3(1e10f+0.001f, 1e10f, 1e10f));
         normals.push_back(make_float3(0, 0, 1));
         normals.push_back(make_float3(0, 0, 1));
         normals.push_back(make_float3(0, 0, 1));
@@ -649,22 +621,12 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
         _triCount = 1;
     }
 
-    // Upload vertices (open time)
+    // Upload vertices
     CUdeviceptr d_vertices = 0;
     const size_t vertexBytes = vertices.size() * sizeof(float3);
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_vertices), vertexBytes));
     CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(d_vertices), vertices.data(),
                           vertexBytes, cudaMemcpyHostToDevice));
-
-    // Upload close-time vertices only when any triangle actually has motion.
-    // Static scenes pay zero extra memory / upload cost.
-    CUdeviceptr d_verticesClose = 0;
-    _hasMotionGAS = anyTriHasMotion;
-    if (_hasMotionGAS) {
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_verticesClose), vertexBytes));
-        CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(d_verticesClose),
-                              verticesClose.data(), vertexBytes, cudaMemcpyHostToDevice));
-    }
 
     // Upload normals
     const size_t normalBytes = normals.size() * sizeof(float3);
@@ -833,18 +795,13 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
     CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(d_indices), indices.data(),
                           indexBytes, cudaMemcpyHostToDevice));
 
-    // Build input. For motion blur we pass an array of two vertex buffer
-    // pointers (one per keyframe); for static we pass a single-element
-    // array. OptiX reads numVertices vertices from each buffer.
+    // Build input
     OptixBuildInput buildInput = {};
     buildInput.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
     buildInput.triangleArray.vertexFormat        = OPTIX_VERTEX_FORMAT_FLOAT3;
     buildInput.triangleArray.vertexStrideInBytes  = sizeof(float3);
     buildInput.triangleArray.numVertices          = static_cast<unsigned int>(vertices.size());
-    // vertexBuffers must point to storage that lives until optixAccelBuild
-    // returns; stack-local array is fine here.
-    CUdeviceptr vertexBuffersArr[2] = { d_vertices, d_verticesClose };
-    buildInput.triangleArray.vertexBuffers = vertexBuffersArr;
+    buildInput.triangleArray.vertexBuffers        = &d_vertices;
     buildInput.triangleArray.indexFormat           = OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
     buildInput.triangleArray.indexStrideInBytes    = sizeof(unsigned int) * 3;
     buildInput.triangleArray.numIndexTriplets      = _triCount;
@@ -854,21 +811,10 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
     buildInput.triangleArray.flags         = inputFlags;
     buildInput.triangleArray.numSbtRecords = 1;
 
-    // Accel options. Motion options tell OptiX to expect numKeys vertex
-    // buffers and to interpolate linearly between them as ray time moves
-    // from timeBegin to timeEnd. We normalise rayTime to [0,1] host-side
-    // (matching the CPU Embree convention), so timeBegin/End are 0/1.
+    // Accel options
     OptixAccelBuildOptions accelOptions = {};
     accelOptions.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_TRACE | OPTIX_BUILD_FLAG_ALLOW_COMPACTION;
     accelOptions.operation  = OPTIX_BUILD_OPERATION_BUILD;
-    if (_hasMotionGAS) {
-        accelOptions.motionOptions.numKeys   = 2;
-        accelOptions.motionOptions.flags     = OPTIX_MOTION_FLAG_NONE;
-        accelOptions.motionOptions.timeBegin = 0.0f;
-        accelOptions.motionOptions.timeEnd   = 1.0f;
-    } else {
-        accelOptions.motionOptions.numKeys   = 1;  // 1 = static
-    }
 
     // Query buffer sizes
     OptixAccelBufferSizes bufferSizes;
@@ -892,7 +838,6 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
     // Free temp buffers
     cudaFree(reinterpret_cast<void*>(d_temp));
     cudaFree(reinterpret_cast<void*>(d_vertices));
-    if (d_verticesClose) cudaFree(reinterpret_cast<void*>(d_verticesClose));
     cudaFree(reinterpret_cast<void*>(d_indices));
 
     // Update SBT hit group with normals pointer
@@ -914,8 +859,7 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
     _sbt.hitgroupRecordStrideInBytes = sizeof(HitGroupSbtRecord);
     _sbt.hitgroupRecordCount         = 1;
 
-    fprintf(stderr, "SpectralGPU: built OptiX GAS for %u triangles%s\n",
-            _triCount, _hasMotionGAS ? " (motion blur)" : "");
+    fprintf(stderr, "SpectralGPU: built OptiX GAS for %u triangles\n", _triCount);
     _gasBuilt = true;
     return true;
 }
@@ -1003,6 +947,21 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
         if (id >= 0 && id < 32) scMask |= (1u << id);
     }
     launchParams.shadowCatcherMask = scMask;
+
+    // No-shadow-cast bitmask: matIds from SpectralMeshProperties where
+    // castsShadows=false. Shadow rays in the kernel will treat these hits
+    // as transparent (no occlusion) and continue past them.
+    unsigned int nscMask = 0;
+    int nscOverflow = 0;
+    for (int id : camera.noShadowCastMatIds) {
+        if (id >= 0 && id < 32) nscMask |= (1u << id);
+        else if (id >= 32) nscOverflow++;
+    }
+    launchParams.noShadowCastMask = nscMask;
+    if (nscOverflow > 0) {
+        fprintf(stderr, "SpectralGPU: %d no-shadow-cast materials exceed 32-bit "
+                        "mask range; their shadows will render normally\n", nscOverflow);
+    }
 
     // UV projection lookup buffers
     if (_d_uvTriIndex) { cudaFree(reinterpret_cast<void*>(_d_uvTriIndex)); _d_uvTriIndex = 0; }
@@ -1397,13 +1356,6 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     if (camera.cameraMblur) {
         copyMatrixTransposed(camera.viewToWorldClose, launchParams.camera.viewToWorldClose);
     }
-    // Object motion blur shutter range. camera.shutterOpen/Close are
-    // already normalised to [0,1] on the host when the scene has motion
-    // (_shutterOpen != _shutterClose). Static scenes pass 0/0 which makes
-    // rayTime always 0 in the kernel -- no motion blur, no performance
-    // cost.
-    launchParams.camera.shutterOpen  = camera.shutterOpen;
-    launchParams.camera.shutterClose = camera.shutterClose;
 
     // Camera basis vectors for lens disk sampling
     pxr::GfVec3d right = camera.viewToWorld.TransformDir(pxr::GfVec3d(1, 0, 0));

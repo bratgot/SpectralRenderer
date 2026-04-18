@@ -2265,6 +2265,7 @@ void SpectralRenderIop::_LoadStage()
     _scene = std::make_unique<pxr::SpectralScene>();
     _projCameraVP.clear();
     _shadowCatcherMatIds.clear();
+    _noShadowCastMatIds.clear();
     _camera = SpectralCamera();
     _vdbHasSceneXform = false;
     _volumeXforms.clear();
@@ -3063,6 +3064,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage,
         GfVec3f meshPropsDisplayColor    (0.8f, 0.8f, 0.8f);
         float   meshPropsDisplayOpacity  = 1.0f;
         bool    meshPropsVisible         = true;
+        bool    meshPropsCastsShadows    = true;
         bool    meshPropsHasEntry        = false;
 
         // TODO: replace substring / size==1 matching with prim-path
@@ -3086,6 +3088,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage,
                         entry.second.displayColor[2]);
                     meshPropsDisplayOpacity  = entry.second.displayOpacity;
                     meshPropsVisible         = entry.second.visible;
+                    meshPropsCastsShadows    = entry.second.castsShadows;
                     meshPropsHasEntry        = true;
                     SLOG("SpectralRender: mesh props for '%s' via node '%s' "
                          "(level=%d scheme=%d flipN=%d normMode=%d)\n",
@@ -4319,6 +4322,15 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage,
                         _shadowCatcherMatIds.erase(-1);
                         _shadowCatcherMatIds.insert(matId);
                         SLOG("SpectralRender: shadow catcher assigned to material %d\n", matId);
+                    }
+
+                    // Remap no-shadow-cast from temp key to actual matId.
+                    // Temp-key insert done just before AddMaterial; see the
+                    // block that tags meshPropsCastsShadows earlier in this function.
+                    if (_noShadowCastMatIds.count(-1)) {
+                        _noShadowCastMatIds.erase(-1);
+                        _noShadowCastMatIds.insert(matId);
+                        SLOG("SpectralRender: castsShadows=false for material %d\n", matId);
                     }
 
                     SLOG("SpectralRender: material '%s' — color=(%.2f,%.2f,%.2f) metal=%.2f rough=%.2f opacity=%.2f\n",
@@ -8394,6 +8406,7 @@ void SpectralRenderIop::_EnsureFrameRendered()
     cam.wireNth = _wireNth;
     cam.wireStyle = _wireStyle;
     cam.shadowCatcherMatIds = _shadowCatcherMatIds;
+    cam.noShadowCastMatIds  = _noShadowCastMatIds;
     cam.fStop = _fStop;
     cam.focusDistance = _focusDistance;
     cam.volumeSpp = _volumeSpp;

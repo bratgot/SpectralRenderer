@@ -77,11 +77,6 @@ struct CameraParams {
     float viewToWorld[16];
     float viewToWorldClose[16]; // camera at shutter close (motion blur)
     int   cameraMblur;          // 0 = off, 1 = on
-    // Object motion blur: rayTime is sampled uniformly from
-    // [shutterOpen, shutterClose]. When the two are equal (default 0,0)
-    // motion blur is off and every ray has time=0.
-    float shutterOpen;          // normalized to [0,1] matching GAS motion keys
-    float shutterClose;
     float fStop;            // 0 = pinhole
     float focusDistance;
     float focalLength;      // mm
@@ -209,6 +204,11 @@ struct LaunchParams {
 
     // Shadow catcher: bitmask of material IDs (supports up to 32 materials)
     unsigned int       shadowCatcherMask;
+    // Non-shadow-casting materials: shadow rays treat these as invisible
+    // (ray passes through without accumulating occlusion). Set via
+    // SpectralMeshProperties::castsShadows=false. Same 32-material cap
+    // as shadowCatcherMask -- overflow is logged host-side.
+    unsigned int       noShadowCastMask;
 
     // UV projection lookup (one entry per pixel, built CPU-side)
     int*               uvTriIndex;      // triangle index per pixel (-1 = empty)

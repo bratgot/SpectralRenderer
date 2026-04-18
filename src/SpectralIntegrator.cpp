@@ -21,72 +21,6 @@ static SpectralMaterial _ResolveMaterial(
     float w, float u, float v, const SpectralScene& scene);
 
 // ---------------------------------------------------------------------------
-// _WriteFirstHitAOVs — populate geometry AOVs (N, P, pRef, UV, albedo) for
-// the first hit at a pixel. Called from every shading branch in RenderFrame
-// so the CPU path writes the same AOVs as the GPU ComputeGeometryAOVs pass.
-//
-// Previously only the full-spectral branch wrote AOVs; scanline-compat
-// (shadow catcher and constant shader) and the spectral shadow-catcher
-// branch skipped them. That left _uvBuffer zero-filled on those paths, so
-// the wireframe overlay's grid distance computation degenerated and nothing
-// drew on CPU -- "CPU doesn't work" despite GPU working fine. Factoring
-// this out keeps the four sites in sync.
-//
-// Promoted to a private static member (rather than a file-scope static) so
-// the AOVBuffers type is looked up in class scope, not at file scope --
-// which tripped MSVC and cascaded into a C2511 on the unrelated
-// RenderFrameGPU definition a few thousand lines later.
-// ---------------------------------------------------------------------------
-void SpectralIntegrator::_WriteFirstHitAOVs(
-    const AOVBuffers* aovs,
-    size_t pixIdx,
-    const SpectralTriangle& tri,
-    float u, float v,
-    const GfVec3f& hitPos,
-    const GfVec3f& rayDir,
-    const SpectralScene& scene)
-{
-    if (!aovs) return;
-    float w = 1.f - u - v;
-    GfVec3f N = tri.n0 * w + tri.n1 * u + tri.n2 * v;
-    float nlen = N.GetLength();
-    if (nlen > 1e-6f) N /= nlen;
-    GfVec3f V = -rayDir;
-    float vlen = V.GetLength();
-    if (vlen > 1e-6f) V /= vlen;
-    if (N[0]*V[0] + N[1]*V[1] + N[2]*V[2] < 0.f) N = -N;
-
-    if (aovs->normal) {
-        aovs->normal[pixIdx*3+0] = N[0];
-        aovs->normal[pixIdx*3+1] = N[1];
-        aovs->normal[pixIdx*3+2] = N[2];
-    }
-    if (aovs->position) {
-        aovs->position[pixIdx*3+0] = hitPos[0];
-        aovs->position[pixIdx*3+1] = hitPos[1];
-        aovs->position[pixIdx*3+2] = hitPos[2];
-    }
-    if (aovs->pRef) {
-        GfVec3f pRef = tri.pRef0 * w + tri.pRef1 * u + tri.pRef2 * v;
-        aovs->pRef[pixIdx*3+0] = pRef[0];
-        aovs->pRef[pixIdx*3+1] = pRef[1];
-        aovs->pRef[pixIdx*3+2] = pRef[2];
-    }
-    if (aovs->uv) {
-        GfVec2f uv2 = tri.uv0 * w + tri.uv1 * u + tri.uv2 * v;
-        aovs->uv[pixIdx*2+0] = uv2[0];
-        aovs->uv[pixIdx*2+1] = uv2[1];
-    }
-    if (aovs->albedo) {
-        const SpectralMaterial& mat = scene.GetMaterial(tri.materialId);
-        SpectralMaterial resolved = _ResolveMaterial(mat, tri, w, u, v, scene);
-        aovs->albedo[pixIdx*3+0] = resolved.baseColor[0];
-        aovs->albedo[pixIdx*3+1] = resolved.baseColor[1];
-        aovs->albedo[pixIdx*3+2] = resolved.baseColor[2];
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Procedural fBm noise — deterministic, no tables, world-space
 // Ported from VDBmarcher (Marten Blumen)
 // ---------------------------------------------------------------------------
@@ -126,6 +60,11 @@ static double _noiseFBm(double x, double y, double z, int octaves, double roughn
 // ---------------------------------------------------------------------------
 // File-scoped flag set by RenderFrame, read by _ShadeSpectral
 static bool s_scanlineCompat = false;
+// Pointer to the current render's no-shadow-cast material set. Owned by
+// the SpectralCamera on RenderFrame's stack; valid for the duration of
+// RenderFrame() only. _ShadeSpectral / bounce shadow loops reach this
+// from any call-site. Same pattern as s_scanlineCompat.
+static const std::unordered_set<int>* s_noShadowCastMatIds = nullptr;
 
 void SpectralIntegrator::RenderFrame(
     const SpectralScene&  scene,
@@ -145,6 +84,7 @@ void SpectralIntegrator::RenderFrame(
     int                   numVolumes)
 {
     s_scanlineCompat = camera.scanlineCompat;
+    s_noShadowCastMatIds = &camera.noShadowCastMatIds;
 
     // Compute white balance correction for neutral rendering
     // The spectral round-trip (RGB→spectral→XYZ→RGB) introduces a colour tint.
@@ -478,9 +418,6 @@ void SpectralIntegrator::RenderFrame(
                                         if (objIdBuf[pixIdx] == 0) {
                                             objIdBuf[pixIdx] = hit.tri->objectId;
                                             matIdBuf[pixIdx] = hit.tri->materialId;
-                                            _WriteFirstHitAOVs(aovs, pixIdx, *hit.tri,
-                                                               float(hit.u), float(hit.v),
-                                                               hitPos, rayDir, scene);
                                         }
                                         continue;
                                     }
@@ -524,9 +461,6 @@ void SpectralIntegrator::RenderFrame(
                                     if (objIdBuf[pixIdx] == 0) {
                                         objIdBuf[pixIdx] = hit.tri->objectId;
                                         matIdBuf[pixIdx] = hit.tri->materialId;
-                                        _WriteFirstHitAOVs(aovs, pixIdx, *hit.tri,
-                                                           float(hit.u), float(hit.v),
-                                                           hitPos, rayDir, scene);
                                     }
                                     continue;
                                 }
@@ -559,9 +493,6 @@ void SpectralIntegrator::RenderFrame(
                                     if (objIdBuf[pixIdx] == 0) {
                                         objIdBuf[pixIdx] = hit.tri->objectId;
                                         matIdBuf[pixIdx] = hit.tri->materialId;
-                                        _WriteFirstHitAOVs(aovs, pixIdx, *hit.tri,
-                                                           float(hit.u), float(hit.v),
-                                                           hitPos, rayDir, scene);
                                     }
                                     continue;
                                 }
@@ -598,9 +529,46 @@ void SpectralIntegrator::RenderFrame(
                                 if (objIdBuf[pixIdx] == 0) {
                                     objIdBuf[pixIdx] = hit.tri->objectId;
                                     matIdBuf[pixIdx] = hit.tri->materialId;
-                                    _WriteFirstHitAOVs(aovs, pixIdx, *hit.tri,
-                                                       float(hit.u), float(hit.v),
-                                                       hitPos, rayDir, scene);
+
+                                    // Geometry AOVs — first hit only
+                                    if (aovs) {
+                                        float w = 1.f - float(hit.u) - float(hit.v);
+                                        GfVec3f N = hit.tri->n0 * w + hit.tri->n1 * float(hit.u) + hit.tri->n2 * float(hit.v);
+                                        float nlen = N.GetLength();
+                                        if (nlen > 1e-6f) N /= nlen;
+                                        GfVec3f V = GfVec3f(-rayDir);
+                                        float vlen = V.GetLength();
+                                        if (vlen > 1e-6f) V /= vlen;
+                                        if (N[0]*V[0]+N[1]*V[1]+N[2]*V[2] < 0.f) N = -N;
+
+                                        if (aovs->normal) {
+                                            aovs->normal[pixIdx*3+0] = N[0];
+                                            aovs->normal[pixIdx*3+1] = N[1];
+                                            aovs->normal[pixIdx*3+2] = N[2];
+                                        }
+                                        if (aovs->position) {
+                                            aovs->position[pixIdx*3+0] = hitPos[0];
+                                            aovs->position[pixIdx*3+1] = hitPos[1];
+                                            aovs->position[pixIdx*3+2] = hitPos[2];
+                                        }
+                                        if (aovs->pRef) {
+                                            GfVec3f pRef = hit.tri->pRef0 * w + hit.tri->pRef1 * float(hit.u) + hit.tri->pRef2 * float(hit.v);
+                                            aovs->pRef[pixIdx*3+0] = pRef[0];
+                                            aovs->pRef[pixIdx*3+1] = pRef[1];
+                                            aovs->pRef[pixIdx*3+2] = pRef[2];
+                                        }
+                                        if (aovs->uv) {
+                                            GfVec2f uv = hit.tri->uv0 * w + hit.tri->uv1 * float(hit.u) + hit.tri->uv2 * float(hit.v);
+                                            aovs->uv[pixIdx*2+0] = uv[0];
+                                            aovs->uv[pixIdx*2+1] = uv[1];
+                                        }
+                                        if (aovs->albedo) {
+                                            SpectralMaterial resolved = _ResolveMaterial(mat, *hit.tri, w, float(hit.u), float(hit.v), scene);
+                                            aovs->albedo[pixIdx*3+0] = resolved.baseColor[0];
+                                            aovs->albedo[pixIdx*3+1] = resolved.baseColor[1];
+                                            aovs->albedo[pixIdx*3+2] = resolved.baseColor[2];
+                                        }
+                                    }
                                 }
                             } else {
                                 // Primary ray miss
@@ -922,7 +890,9 @@ void SpectralIntegrator::RenderFrame(
                                                     GfRay geoShadowRay;
                                                     geoShadowRay.SetPointAndDirection(GfVec3d(p + shadowDir * 0.01f), GfVec3d(shadowDir));
                                                     SpectralBVH::Hit geoHit = bvh.Intersect(geoShadowRay, 0.f);
-                                                    if (geoHit.valid()) {
+                                                    // castsShadows=false: treat as no hit.
+                                                    if (geoHit.valid() &&
+                                                        camera.noShadowCastMatIds.count(geoHit.tri->materialId) == 0) {
                                                         // Geometry blocks light — check opacity for glass
                                                         const SpectralMaterial& gMat = scene.GetMaterial(geoHit.tri->materialId);
                                                         if (gMat.opacity > 0.99f || gMat.metallic > 0.5f) {
@@ -1692,6 +1662,15 @@ float SpectralIntegrator::_ShadeSpectral(
 
                 const SpectralMaterial& sMat = scene.GetMaterial(shadowHit.tri->materialId);
 
+                // castsShadows=false: step ray past this hit and continue.
+                // Semantically identical to glass passthrough except no
+                // transmittance attenuation -- mesh is shadow-transparent.
+                if (s_noShadowCastMatIds &&
+                    s_noShadowCastMatIds->count(shadowHit.tri->materialId) > 0) {
+                    shadowOrigin = GfVec3f(GfVec3d(shadowOrigin) + shadowHit.t * GfVec3d(L)) + L * 0.02f;
+                    continue;
+                }
+
                 // Glass: pass through
                 if (sMat.opacity < 0.99f && sMat.metallic < 0.5f) {
                     shadowTransmit *= (1.f - sMat.opacity) * 0.95f;
@@ -2084,6 +2063,12 @@ float SpectralIntegrator::_ShadeSpectral(
                     if (!shadowHit.valid()) break;
 
                     const SpectralMaterial& sMat = scene.GetMaterial(shadowHit.tri->materialId);
+                    // castsShadows=false: step past and continue.
+                    if (s_noShadowCastMatIds &&
+                        s_noShadowCastMatIds->count(shadowHit.tri->materialId) > 0) {
+                        sOrig = GfVec3f(GfVec3d(sOrig) + shadowHit.t * GfVec3d(L)) + L * 0.02f;
+                        continue;
+                    }
                     if (sMat.opacity < 0.99f && sMat.metallic < 0.5f) {
                         shadowTransmit *= (1.f - sMat.opacity) * 0.95f;
                         if (shadowTransmit < 0.01f) { inShadow = true; break; }

@@ -613,7 +613,7 @@ static __forceinline__ __device__ float3 sampleLightDir(
 // ---------------------------------------------------------------------------
 static __forceinline__ __device__ float shadeHit(
     const GPUMaterial& mat, float3 N, float3 V, float3 hitPos, float lambda,
-    unsigned int& rngSeed, float rayTime)
+    unsigned int& rngSeed)
 {
     float radiance = 0.f;
 
@@ -636,14 +636,25 @@ static __forceinline__ __device__ float shadeHit(
             for (int sb = 0; sb < 8; ++sb) {
                 unsigned int sp0=0,sp1=0,sp2=0,sp3=__float_as_uint(1e30f),sp4=0,sp5=0,sp6=0;
                 optixTrace(params.traversable, sOrig, L,
-                           1e-4f, 1e30f, rayTime, OptixVisibilityMask(0xFF),
+                           1e-4f, 1e30f, 0.f, OptixVisibilityMask(0xFF),
                            OPTIX_RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
                            0, 1, 0, sp0,sp1,sp2,sp3,sp4,sp5,sp6);
 
                 if (sp4 == 0u) break;  // no hit — reached light
 
-                // Check if hit is glass
+                // Check if hit is glass or flagged castsShadows=false
                 int sMatId = int(sp4) - 1;
+                // No-shadow-cast: matId was registered via SpectralMeshProperties
+                // with castsShadows=false. Step ray past and keep going as if
+                // the hit weren't there. Same geometry as glass passthrough.
+                if (sMatId >= 0 && sMatId < 32 &&
+                    (params.noShadowCastMask & (1u << sMatId))) {
+                    float sDist = __uint_as_float(sp3);
+                    sOrig = make_float3(sOrig.x+L.x*(sDist+0.02f),
+                                        sOrig.y+L.y*(sDist+0.02f),
+                                        sOrig.z+L.z*(sDist+0.02f));
+                    continue;
+                }
                 if (sMatId >= 0 && sMatId < int(params.materialCount)) {
                     const GPUMaterial& sMat = params.materials[sMatId];
                     if (sMat.opacity < 0.99f && sMat.metallic < 0.5f) {
@@ -901,7 +912,7 @@ static __forceinline__ __device__ float gpuNoiseFBm(float x, float y, float z, i
 static __forceinline__ __device__ void marchSingleVolume(
     const spectral_gpu::GPUVolume& vol,
     float3 ro, float3 rdRaw, float surfaceT, float lambda, unsigned int seed,
-    float3& outRGB, float& outTransmittance, float rayTime)
+    float3& outRGB, float& outTransmittance)
 {
     outRGB = make_float3(0.f, 0.f, 0.f);
     outTransmittance = 1.f;
@@ -1104,9 +1115,19 @@ static __forceinline__ __device__ void marchSingleVolume(
                     float3 shadowOrig = make_float3(px+shadowDir.x*0.01f, py+shadowDir.y*0.01f, pz+shadowDir.z*0.01f);
                     unsigned int gp0=0,gp1=0,gp2=0,gp3=__float_as_uint(1e30f),gp4=0,gp5=0,gp6=0;
                     optixTrace(params.traversable, shadowOrig, shadowDir,
-                               1e-3f, 1e30f, rayTime, OptixVisibilityMask(0xFF),
+                               1e-3f, 1e30f, 0.f, OptixVisibilityMask(0xFF),
                                OPTIX_RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
                                0, 1, 0, gp0,gp1,gp2,gp3,gp4,gp5,gp6);
+                    // castsShadows=false: treat the hit as if the ray passed
+                    // through cleanly. Simplest form -- zero the hit-id so
+                    // the blocker logic below does nothing.
+                    if (gp4 != 0u) {
+                        int nscMatId = int(gp4) - 1;
+                        if (nscMatId >= 0 && nscMatId < 32 &&
+                            (params.noShadowCastMask & (1u << nscMatId))) {
+                            gp4 = 0u;
+                        }
+                    }
                     if (gp4 != 0u) {
                         int gMatId = int(gp4) - 1;
                         if (gMatId >= 0 && gMatId < int(params.materialCount)) {
@@ -1234,9 +1255,17 @@ static __forceinline__ __device__ void marchSingleVolume(
                     float3 shadowOrig = make_float3(px+shadowDir.x*0.01f, py+shadowDir.y*0.01f, pz+shadowDir.z*0.01f);
                     unsigned int gp0=0,gp1=0,gp2=0,gp3=__float_as_uint(1e30f),gp4=0,gp5=0,gp6=0;
                     optixTrace(params.traversable, shadowOrig, shadowDir,
-                               1e-3f, 1e30f, rayTime, OptixVisibilityMask(0xFF),
+                               1e-3f, 1e30f, 0.f, OptixVisibilityMask(0xFF),
                                OPTIX_RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
                                0, 1, 0, gp0,gp1,gp2,gp3,gp4,gp5,gp6);
+                    // castsShadows=false: zero the hit-id so blocker logic skips.
+                    if (gp4 != 0u) {
+                        int nscMatId = int(gp4) - 1;
+                        if (nscMatId >= 0 && nscMatId < 32 &&
+                            (params.noShadowCastMask & (1u << nscMatId))) {
+                            gp4 = 0u;
+                        }
+                    }
                     if (gp4 != 0u) {
                         int gMatId = int(gp4) - 1;
                         if (gMatId >= 0 && gMatId < int(params.materialCount)) {
@@ -1359,7 +1388,7 @@ static __forceinline__ __device__ void marchSingleVolume(
 // Multi-volume compositing wrapper - matches CPU logic (Phase 13)
 static __forceinline__ __device__ void marchVolume(
     float3 ro, float3 rd, float surfaceT, float lambda, unsigned int seed,
-    float3& outRGB, float& outTransmittance, float rayTime)
+    float3& outRGB, float& outTransmittance)
 {
     outRGB = make_float3(0.f, 0.f, 0.f);
     outTransmittance = 1.f;
@@ -1371,7 +1400,7 @@ static __forceinline__ __device__ void marchVolume(
         float3 volRGB = make_float3(0.f, 0.f, 0.f);
         float volTrans = 1.f;
         marchSingleVolume(vol, ro, rd, surfaceT, lambda, seed + vi * 31u,
-                          volRGB, volTrans, rayTime);
+                          volRGB, volTrans);
 
         // Composite: accumulate scatter, multiply transmittance
         outRGB.x += outTransmittance * volRGB.x;
@@ -1580,18 +1609,12 @@ extern "C" __global__ void __raygen__spectral()
                 unsigned int seed = pixIdx*1031u + s*6571u;
                 float wu = (float(s)+hashRNG(seed+2u))/float(spp);
                 float lambda = 380.f + wu*400.f;
-                // Sample motion-blur time once per primary sample. All
-                // secondary rays (shadow, transmission, bounce) use the
-                // same value so that "shadow at time T cast by object at
-                // time T" is physically coherent.
-                float rayTime = params.camera.shutterOpen +
-                    hashRNG(seed+7u) * (params.camera.shutterClose - params.camera.shutterOpen);
 
                 float radiance;
                 if (params.scanlineCompat && params.lightCount == 0) {
                     radiance = spectralReflectance(mat, lambda);
                 } else {
-                    radiance = shadeHit(mat, N, V, hitPos, lambda, seed, rayTime);
+                    radiance = shadeHit(mat, N, V, hitPos, lambda, seed);
                 }
                 radiance *= mat.opacity;
 
@@ -1623,15 +1646,12 @@ extern "C" __global__ void __raygen__spectral()
                     jx = fmodf(hashRNG(pixSeed*2u) + float(s)*0.7548776662f, 1.f);
                     jy = fmodf(hashRNG(pixSeed*2u+1u) + float(s)*0.5698402909f, 1.f);
                 }
-                // Motion-blur time, sampled once per primary ray.
-                float rayTime = params.camera.shutterOpen +
-                    hashRNG(seed+7u) * (params.camera.shutterClose - params.camera.shutterOpen);
 
                 float3 origin, dir;
                 makeRay(px+jx, py+jy, W, H, origin, dir, seed + 50u);
 
                 unsigned int p0=0,p1=0,p2=0,p3=__float_as_uint(1e30f),p4=0,p5=0,p6=0;
-                optixTraverse(params.traversable, origin, dir, 1e-4f,1e30f,rayTime,
+                optixTraverse(params.traversable, origin, dir, 1e-4f,1e30f,0.f,
                               OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0);
                 optixReorder();
                 optixInvoke(p0,p1,p2,p3,p4,p5,p6);
@@ -1681,9 +1701,17 @@ extern "C" __global__ void __raygen__spectral()
                         // Shadow ray
                         float3 sOrig = make_float3(hitPos.x+N.x*0.001f, hitPos.y+N.y*0.001f, hitPos.z+N.z*0.001f);
                         unsigned int sp0=0,sp1=0,sp2=0,sp3=__float_as_uint(1e30f),sp4=0,sp5=0,sp6=0;
-                        optixTrace(params.traversable, sOrig, L, 0.001f, dist-0.002f, rayTime,
+                        optixTrace(params.traversable, sOrig, L, 0.001f, dist-0.002f, 0.f,
                                    OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
                                    0,1,0, sp0,sp1,sp2,sp3,sp4,sp5,sp6);
+                        // castsShadows=false: don't count as shadow.
+                        if (sp4 > 0u) {
+                            int nscMatId = int(sp4) - 1;
+                            if (nscMatId >= 0 && nscMatId < 32 &&
+                                (params.noShadowCastMask & (1u << nscMatId))) {
+                                sp4 = 0u;
+                            }
+                        }
                         if (sp4 > 0u) shadow += 1.f;
                     }
                     float sFactor = params.lightCount > 0 ? shadow / float(params.lightCount) : 0.f;
@@ -1743,19 +1771,12 @@ extern "C" __global__ void __raygen__spectral()
             }
             float lambda = 380.f + wu*400.f;
 
-            // Motion-blur time. Threaded through shadow / transmission /
-            // bounce rays so all hits for one primary sample share the
-            // same t. When shutterOpen == shutterClose (default 0,0)
-            // rayTime is 0 and we get static-scene behaviour.
-            float rayTime = params.camera.shutterOpen +
-                hashRNG(seed+7u) * (params.camera.shutterClose - params.camera.shutterOpen);
-
             float3 origin, dir;
             makeRay(px+jx, py+jy, W, H, origin, dir, seed + 50u);
 
             // Primary ray — Hit Object API for SER
             unsigned int p0=0,p1=0,p2=0,p3=__float_as_uint(1e30f),p4=0,p5=0,p6=0;
-            optixTraverse(params.traversable, origin, dir, 1e-4f,1e30f,rayTime,
+            optixTraverse(params.traversable, origin, dir, 1e-4f,1e30f,0.f,
                           OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0);
             optixReorder();
             optixInvoke(p0,p1,p2,p3,p4,p5,p6);
@@ -1832,9 +1853,17 @@ extern "C" __global__ void __raygen__spectral()
                         if (NdotL < 0.001f) { shadow += 1.f; continue; }
                         float3 sOrig = make_float3(hitPos.x+N.x*0.001f, hitPos.y+N.y*0.001f, hitPos.z+N.z*0.001f);
                         unsigned int sp0=0,sp1=0,sp2=0,sp3=__float_as_uint(1e30f),sp4=0,sp5=0,sp6=0;
-                        optixTrace(params.traversable, sOrig, L, 0.001f, dist-0.002f, rayTime,
+                        optixTrace(params.traversable, sOrig, L, 0.001f, dist-0.002f, 0.f,
                                    OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
                                    0,1,0, sp0,sp1,sp2,sp3,sp4,sp5,sp6);
+                        // castsShadows=false: don't count as shadow.
+                        if (sp4 > 0u) {
+                            int nscMatId = int(sp4) - 1;
+                            if (nscMatId >= 0 && nscMatId < 32 &&
+                                (params.noShadowCastMask & (1u << nscMatId))) {
+                                sp4 = 0u;
+                            }
+                        }
                         if (sp4 > 0u) shadow += 1.f;
                     }
                     float sFactor = params.lightCount > 0 ? shadow / float(params.lightCount) : 0.f;
@@ -1844,7 +1873,7 @@ extern "C" __global__ void __raygen__spectral()
 
                 // Direct lighting at primary hit (scaled by opacity for premultiplied alpha)
                 unsigned int shadowSeed = seed + 50u;
-                radiance = shadeHit(mat, N, V, hitPos, lambda, shadowSeed, rayTime) * mat.opacity;
+                radiance = shadeHit(mat, N, V, hitPos, lambda, shadowSeed) * mat.opacity;
 
                 // Bounce rays with refraction support
                 float throughput = 1.f;
@@ -1890,14 +1919,14 @@ extern "C" __global__ void __raygen__spectral()
                     float bOff = bTransmitted ? -0.1f : 0.01f;
                     float3 bOrig = make_float3(bOrigin.x+bN.x*bOff, bOrigin.y+bN.y*bOff, bOrigin.z+bN.z*bOff);
                     unsigned int bp0=0,bp1=0,bp2=0,bp3=__float_as_uint(1e30f),bp4=0,bp5=0,bp6=0;
-                    optixTrace(params.traversable, bOrig, bounceDir, 1e-4f,1e30f,rayTime,
+                    optixTrace(params.traversable, bOrig, bounceDir, 1e-4f,1e30f,0.f,
                                OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0, bp0,bp1,bp2,bp3,bp4,bp5,bp6);
 
                     if (bp4 == 0u) {
                         // Bounce miss — march through volumes before adding dome
                         if (params.numGpuVolumes > 0) {
                             float3 volRGB; float volTrans;
-                            marchVolume(bOrig, bounceDir, 1e30f, lambda, bSeed + bounce*97u, volRGB, volTrans, rayTime);
+                            marchVolume(bOrig, bounceDir, 1e30f, lambda, bSeed + bounce*97u, volRGB, volTrans);
                             // Convert RGB to spectral: weight by wavelength
                             float volSpec = (lambda < 500.f) ? volRGB.z :
                                            (lambda < 580.f) ? volRGB.y : volRGB.x;
@@ -1917,7 +1946,7 @@ extern "C" __global__ void __raygen__spectral()
                     float bDepth = __uint_as_float(bp3);
                     if (params.numGpuVolumes > 0) {
                         float3 volRGB; float volTrans;
-                        marchVolume(bOrig, bounceDir, bDepth, lambda, bSeed + bounce*97u, volRGB, volTrans, rayTime);
+                        marchVolume(bOrig, bounceDir, bDepth, lambda, bSeed + bounce*97u, volRGB, volTrans);
                         float volSpec = (lambda < 500.f) ? volRGB.z :
                                        (lambda < 580.f) ? volRGB.y : volRGB.x;
                         radiance += throughput * volSpec;
@@ -1963,7 +1992,7 @@ extern "C" __global__ void __raygen__spectral()
                     // Skip direct lighting inside transparent objects
                     bool insideGlass = (!isEntering && bMat->opacity < 0.99f);
                     if (!insideGlass)
-                        radiance += throughput * shadeHit(*bMat, bN, bV, bOrigin, lambda, bSeed, rayTime);
+                        radiance += throughput * shadeHit(*bMat, bN, bV, bOrigin, lambda, bSeed);
                 }
             } else {
             spectral_miss:
@@ -1993,7 +2022,7 @@ extern "C" __global__ void __raygen__spectral()
             if (params.numGpuVolumes > 0 && s < params.volumeSpp) {
                 float surfT = isHit ? depth : 1e30f;
                 float3 volRGB = make_float3(0.f,0.f,0.f); float volTrans = 1.f;
-                marchVolume(origin, dir, surfT, lambda, seed + 200u, volRGB, volTrans, rayTime);
+                marchVolume(origin, dir, surfT, lambda, seed + 200u, volRGB, volTrans);
                 // Scale volume contribution to compensate for fewer samples
                 float volScale = float(spp) / float(params.volumeSpp);
                 // Volume RGB → XYZ directly (sRGB D65 matrix)
