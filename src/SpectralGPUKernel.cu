@@ -1661,30 +1661,59 @@ extern "C" __global__ void __raygen__spectral()
                 bool isSC = (matId < 32) && (params.shadowCatcherMask & (1u << matId));
                 if (isSC) {
                     float shadow = 0.f;
+                    float3 shadowRGB = make_float3(0.f, 0.f, 0.f);
+                    unsigned int scSeed = seed + 0x51ABu;
                     for (unsigned int li = 0; li < params.lightCount; ++li) {
-                        float3 lp = params.lights[li].position;
-                        float3 L = make_float3(lp.x-hitPos.x, lp.y-hitPos.y, lp.z-hitPos.z);
-                        float dist = sqrtf(L.x*L.x+L.y*L.y+L.z*L.z);
-                        if (dist < 1e-6f) continue;
-                        L.x/=dist; L.y/=dist; L.z/=dist;
+                        const GPULight& light = params.lights[li];
+                        // Jittered light sample -- gives penumbra on sphere / area lights
+                        // when averaged across samples. Matches the main shadeHit path.
+                        float3 L = sampleLightDir(light, hitPos,
+                                                  hashRNG(scSeed++), hashRNG(scSeed++), N);
                         float NdotL = fmaxf(0.f, N.x*L.x+N.y*L.y+N.z*L.z);
-                        if (NdotL < 0.001f) { shadow += 1.f; continue; }
-                        // Shadow ray
-                        float3 sOrig = make_float3(hitPos.x+N.x*0.001f, hitPos.y+N.y*0.001f, hitPos.z+N.z*0.001f);
-                        unsigned int sp0=0,sp1=0,sp2=0,sp3=__float_as_uint(1e30f),sp4=0,sp5=0,sp6=0;
-                        optixTrace(params.traversable, sOrig, L, 0.001f, dist-0.002f, 0.f,
-                                   OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
-                                   0,1,0, sp0,sp1,sp2,sp3,sp4,sp5,sp6);
-                        if (sp4 > 0u) shadow += 1.f;
+                        float blocked = 0.f;
+                        if (NdotL < 0.001f) {
+                            blocked = 1.f;
+                        } else {
+                            float3 sOrig = make_float3(hitPos.x+N.x*0.001f, hitPos.y+N.y*0.001f, hitPos.z+N.z*0.001f);
+                            // Use a generous tmax; hit-vs-light-distance is the kernel's
+                            // occlusion test for positional lights, infinite for distant.
+                            float tmax = 1e30f;
+                            if (light.type != 0u /*distant*/ && light.type != 3u /*dome*/) {
+                                float3 lp = light.position;
+                                float3 d = make_float3(lp.x-hitPos.x, lp.y-hitPos.y, lp.z-hitPos.z);
+                                tmax = sqrtf(d.x*d.x+d.y*d.y+d.z*d.z) - 0.002f;
+                                if (tmax <= 0.f) { ++li; continue; }
+                            }
+                            unsigned int sp0=0,sp1=0,sp2=0,sp3=__float_as_uint(1e30f),sp4=0,sp5=0,sp6=0;
+                            optixTrace(params.traversable, sOrig, L, 0.001f, tmax, 0.f,
+                                       OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
+                                       0,1,0, sp0,sp1,sp2,sp3,sp4,sp5,sp6);
+                            if (sp4 > 0u) blocked = 1.f;
+                        }
+                        shadow += blocked;
+                        // Lambert diffuse contribution -- matches main shadeHit formula.
+                        //   contrib = NdotL * (1/dist^2 for positional, 1 for distant/dome)
+                        //             * intensity / pi
+                        float atten = 1.f;
+                        if (light.type != 0u /*distant*/ && light.type != 3u /*dome*/) {
+                            float3 lp = light.position;
+                            float3 d = make_float3(lp.x-hitPos.x, lp.y-hitPos.y, lp.z-hitPos.z);
+                            float dist2 = d.x*d.x + d.y*d.y + d.z*d.z;
+                            atten = 1.f / fmaxf(dist2, 1e-6f);
+                        }
+                        float contrib = NdotL * atten * light.intensity * 0.31830988618f;  // 1/pi
+                        float3 lc = light.color;
+                        shadowRGB.x += blocked * lc.x * contrib;
+                        shadowRGB.y += blocked * lc.y * contrib;
+                        shadowRGB.z += blocked * lc.z * contrib;
                     }
                     float sFactor = params.lightCount > 0 ? shadow / float(params.lightCount) : 0.f;
                     alphaAccum += sFactor;
-                    // Shadow catcher AOV: accumulate per-sample, normalise at strip end.
                     if (params.shadowCatcherAOV) {
                         float4 prev = params.shadowCatcherAOV[pixIdx];
                         params.shadowCatcherAOV[pixIdx] =
-                            make_float4(prev.x + sFactor, prev.y + sFactor,
-                                        prev.z + sFactor, prev.w + sFactor);
+                            make_float4(prev.x + shadowRGB.x, prev.y + shadowRGB.y,
+                                        prev.z + shadowRGB.z, prev.w + sFactor);
                     }
                     continue;  // no RGB contribution
                 }
@@ -1813,29 +1842,56 @@ extern "C" __global__ void __raygen__spectral()
                 bool isSC = (matId < 32) && (params.shadowCatcherMask & (1u << matId));
                 if (isSC) {
                     float shadow = 0.f;
+                    float3 shadowRGB = make_float3(0.f, 0.f, 0.f);
+                    unsigned int scSeed = seed + 0x51ABu;
                     for (unsigned int li = 0; li < params.lightCount; ++li) {
-                        float3 lp = params.lights[li].position;
-                        float3 L = make_float3(lp.x-hitPos.x, lp.y-hitPos.y, lp.z-hitPos.z);
-                        float dist = sqrtf(L.x*L.x+L.y*L.y+L.z*L.z);
-                        if (dist < 1e-6f) continue;
-                        L.x/=dist; L.y/=dist; L.z/=dist;
+                        const GPULight& light = params.lights[li];
+                        // Jittered light sample -- matches the main shadeHit path
+                        // so penumbra from sphere/area lights appears identically
+                        // in the AOV and the beauty.
+                        float3 L = sampleLightDir(light, hitPos,
+                                                  hashRNG(scSeed++), hashRNG(scSeed++), N);
                         float NdotL = fmaxf(0.f, N.x*L.x+N.y*L.y+N.z*L.z);
-                        if (NdotL < 0.001f) { shadow += 1.f; continue; }
-                        float3 sOrig = make_float3(hitPos.x+N.x*0.001f, hitPos.y+N.y*0.001f, hitPos.z+N.z*0.001f);
-                        unsigned int sp0=0,sp1=0,sp2=0,sp3=__float_as_uint(1e30f),sp4=0,sp5=0,sp6=0;
-                        optixTrace(params.traversable, sOrig, L, 0.001f, dist-0.002f, 0.f,
-                                   OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
-                                   0,1,0, sp0,sp1,sp2,sp3,sp4,sp5,sp6);
-                        if (sp4 > 0u) shadow += 1.f;
+                        float blocked = 0.f;
+                        if (NdotL < 0.001f) {
+                            blocked = 1.f;
+                        } else {
+                            float3 sOrig = make_float3(hitPos.x+N.x*0.001f, hitPos.y+N.y*0.001f, hitPos.z+N.z*0.001f);
+                            float tmax = 1e30f;
+                            if (light.type != 0u /*distant*/ && light.type != 3u /*dome*/) {
+                                float3 lp = light.position;
+                                float3 d = make_float3(lp.x-hitPos.x, lp.y-hitPos.y, lp.z-hitPos.z);
+                                tmax = sqrtf(d.x*d.x+d.y*d.y+d.z*d.z) - 0.002f;
+                                if (tmax <= 0.f) continue;
+                            }
+                            unsigned int sp0=0,sp1=0,sp2=0,sp3=__float_as_uint(1e30f),sp4=0,sp5=0,sp6=0;
+                            optixTrace(params.traversable, sOrig, L, 0.001f, tmax, 0.f,
+                                       OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
+                                       0,1,0, sp0,sp1,sp2,sp3,sp4,sp5,sp6);
+                            if (sp4 > 0u) blocked = 1.f;
+                        }
+                        shadow += blocked;
+                        // Lambert diffuse contribution -- see block #1.
+                        float atten = 1.f;
+                        if (light.type != 0u /*distant*/ && light.type != 3u /*dome*/) {
+                            float3 lp = light.position;
+                            float3 d = make_float3(lp.x-hitPos.x, lp.y-hitPos.y, lp.z-hitPos.z);
+                            float dist2 = d.x*d.x + d.y*d.y + d.z*d.z;
+                            atten = 1.f / fmaxf(dist2, 1e-6f);
+                        }
+                        float contrib = NdotL * atten * light.intensity * 0.31830988618f;  // 1/pi
+                        float3 lc = light.color;
+                        shadowRGB.x += blocked * lc.x * contrib;
+                        shadowRGB.y += blocked * lc.y * contrib;
+                        shadowRGB.z += blocked * lc.z * contrib;
                     }
                     float sFactor = params.lightCount > 0 ? shadow / float(params.lightCount) : 0.f;
                     alphaAccum += sFactor;
-                    // Shadow catcher AOV: accumulate per-sample, normalise at strip end.
                     if (params.shadowCatcherAOV) {
                         float4 prev = params.shadowCatcherAOV[pixIdx];
                         params.shadowCatcherAOV[pixIdx] =
-                            make_float4(prev.x + sFactor, prev.y + sFactor,
-                                        prev.z + sFactor, prev.w + sFactor);
+                            make_float4(prev.x + shadowRGB.x, prev.y + shadowRGB.y,
+                                        prev.z + shadowRGB.z, prev.w + sFactor);
                     }
                     continue;  // no spectral contribution
                 }

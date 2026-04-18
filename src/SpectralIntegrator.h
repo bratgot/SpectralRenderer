@@ -145,9 +145,13 @@ public:
         float* diffuseIndirect = nullptr;
         float* specularIndirect = nullptr;
         float* transmission    = nullptr;
-        // Shadow catcher output: 4 floats per pixel (R=G=B=shadow, A=shadow).
-        // Monochrome RGB so the pass reads fine in the viewer; alpha matches
-        // for use as a premultiplied mask in comp.
+        // Shadow catcher AOV: 4 floats per pixel.
+        //   RGB = diffuse (Lambert) lighting that was blocked at this pixel,
+        //         matching what a white-diffuse surface would have received from
+        //         the blocked lights (NdotL * attenuation * intensity / pi per light,
+        //         weighted by light colour). Reads in natural 0..1-ish range for
+        //         typical lighting, not blown-out raw light intensities.
+        //   A   = per-pixel shadow fraction in [0,1] (same scalar as the beauty alpha).
         float* shadowCatcher   = nullptr;
     };
 

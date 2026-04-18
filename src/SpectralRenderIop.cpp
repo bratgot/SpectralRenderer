@@ -1218,10 +1218,12 @@ void SpectralRenderIop::knobs(Knob_Callback f)
 
     Bool_knob(f, &_aovShadowCatcher, "aov_shadowcatcher", "shadow catcher");
     ClearFlags(f, Knob::STARTLINE);
-    Tooltip(f, "Per-pixel shadow factor from SpectralShadowCatcher surfaces,\n"
-               "written to shadowcatcherAOV.{red,green,blue,alpha}.\n"
-               "R=G=B=A so the pass can be used either as RGB visualisation\n"
-               "or alpha mask in comp.");
+    Tooltip(f, "Shadow catcher pass written to shadowcatcherAOV.{red,green,blue,alpha}.\n"
+               "  RGB = diffuse lighting that was blocked at this pixel, scaled by\n"
+               "        the standard Lambert BRDF (NdotL * intensity / pi per light).\n"
+               "        Reads in normal exposure range, not raw light intensities.\n"
+               "  A   = shadow fraction (0=fully lit, 1=fully shadowed).\n"
+               "Use RGB to comp the shadow's colour, A as the mask.");
 
     BeginClosedGroup(f, "aov_lpe", "LPE decomposition (advanced)");
     {

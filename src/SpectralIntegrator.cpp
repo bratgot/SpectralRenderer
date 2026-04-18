@@ -187,10 +187,12 @@ void SpectralIntegrator::RenderFrame(
         std::vector<float> accLumSqSum(numPixels, 0.f); // for variance
         std::vector<int>   accCount(numPixels, 0);
         std::vector<float> accAlpha(numPixels, 0.f);
-        // Shadow-catcher AOV accumulator: per-pixel shadow factor, summed
-        // across samples and normalised by accCount at the end. Only
-        // populated when aovs->shadowCatcher is non-null.
-        std::vector<float> accShadowCatcher(numPixels, 0.f);
+        // Shadow-catcher AOV accumulator: RGBA per pixel.
+        //   RGB = per-sample sum of (blocked_for_each_light * light.color * light.intensity)
+        //   A   = per-sample shadow fraction (matching the existing beauty alpha)
+        // Normalised by accCount at finalisation. Only populated when the
+        // caller set aovs->shadowCatcher.
+        std::vector<float> accShadowCatcher(numPixels * 4, 0.f);
         std::vector<bool>  converged(numPixels, false);
         std::vector<float> depthBuf(numPixels, 1e30f);
         std::vector<int>   objIdBuf(numPixels, 0);
@@ -390,19 +392,50 @@ void SpectralIntegrator::RenderFrame(
                                     bool isShadowCatcher = camera.shadowCatcherMatIds.count(hit.tri->materialId) > 0;
                                     if (isShadowCatcher) {
                                         float shadow = 0.f;
+                                        // Per-sample colored shadow: sum of blocked-light contributions.
+                                        // A light blocked by occluder adds its colour * intensity to the
+                                        // AOV RGB for this sample; unblocked lights add nothing.
+                                        GfVec3f sampleShadowRGB(0.f, 0.f, 0.f);
+                                        unsigned int li = 0;
                                         for (const auto& light : lights) {
-                                            GfVec3f L = light.position - hitPos;
-                                            float dist = L.GetLength();
-                                            if (dist < 1e-6f) continue;
-                                            L /= dist;
+                                            // Jittered direction: for sphere / area / dome lights,
+                                            // SampleDirection returns a direction to a random point
+                                            // on the light's extent, giving the penumbra when averaged
+                                            // across samples. Distant lights are deterministic.
+                                            float su1 = _Hash(seed + 41u + li * 17u);
+                                            float su2 = _Hash(seed + 42u + li * 17u);
+                                            GfVec3f L = light.SampleDirection(hitPos, su1, su2, N);
                                             float NdotL = std::max(0.f, N[0]*L[0] + N[1]*L[1] + N[2]*L[2]);
-                                            if (NdotL < 0.001f) { shadow += 1.f; continue; }
-                                            // Shadow ray
-                                            GfRay shadowRay(GfVec3d(hitPos) + GfVec3d(N)*0.001, GfVec3d(L));
-                                            SpectralBVH::Hit sHit = bvh.Intersect(shadowRay, 0.f);
-                                            if (sHit.valid() && sHit.t < dist) {
-                                                shadow += 1.f;  // in shadow
+                                            float blocked = 0.f;
+                                            if (NdotL < 0.001f) {
+                                                blocked = 1.f;  // back-facing counts as shadowed
+                                            } else {
+                                                GfRay shadowRay(GfVec3d(hitPos) + GfVec3d(N)*0.001, GfVec3d(L));
+                                                SpectralBVH::Hit sHit = bvh.Intersect(shadowRay, 0.f);
+                                                if (sHit.valid()) {
+                                                    if (light.type == SpectralLight::Type::Distant ||
+                                                        light.type == SpectralLight::Type::Dome) {
+                                                        blocked = 1.f;
+                                                    } else {
+                                                        float lightDist = (light.position - hitPos).GetLength();
+                                                        if (sHit.t < lightDist) blocked = 1.f;
+                                                    }
+                                                }
                                             }
+                                            shadow += blocked;
+                                            // Lambert diffuse contribution -- matches the main shader's
+                                            // direct-lighting term so the AOV reads in the same range as
+                                            // a white-diffuse surface lit by these same lights (no HDR
+                                            // clipping on bright suns).
+                                            //   contrib = NdotL * attenuation * intensity / pi
+                                            float atten = light.Attenuation(hitPos);
+                                            float contrib = NdotL * atten
+                                                          * light.EffectiveIntensity()
+                                                          * 0.31830988618f;  // 1/pi
+                                            sampleShadowRGB[0] += blocked * light.color[0] * contrib;
+                                            sampleShadowRGB[1] += blocked * light.color[1] * contrib;
+                                            sampleShadowRGB[2] += blocked * light.color[2] * contrib;
+                                            ++li;
                                         }
                                         float shadowFactor = lights.empty() ? 0.f : shadow / float(lights.size());
                                         accX[pixIdx] += 0.f;
@@ -410,9 +443,12 @@ void SpectralIntegrator::RenderFrame(
                                         accZ[pixIdx] += 0.f;
                                         accCount[pixIdx]++;
                                         accAlpha[pixIdx] += shadowFactor;  // alpha = shadow darkness
-                                        // Dedicated AOV accumulator -- beauty still wants the shadow
-                                        // in alpha for back-compat, but the AOV gives a clean pass.
-                                        accShadowCatcher[pixIdx] += shadowFactor;
+                                        // AOV accumulator: RGB = colored shadow contribution,
+                                        // A = shadow fraction. Normalised by sample count later.
+                                        accShadowCatcher[pixIdx*4+0] += sampleShadowRGB[0];
+                                        accShadowCatcher[pixIdx*4+1] += sampleShadowRGB[1];
+                                        accShadowCatcher[pixIdx*4+2] += sampleShadowRGB[2];
+                                        accShadowCatcher[pixIdx*4+3] += shadowFactor;
                                         GfVec3d viewHit2 = worldToView.Transform(worldHit);
                                         float camZ2 = static_cast<float>(-viewHit2[2]);
                                         if (camZ2 < depthBuf[pixIdx]) depthBuf[pixIdx] = camZ2;
@@ -473,23 +509,50 @@ void SpectralIntegrator::RenderFrame(
                                     float nlen = N.GetLength();
                                     if (nlen > 1e-6f) N /= nlen;
                                     float shadow = 0.f;
+                                    GfVec3f sampleShadowRGB(0.f, 0.f, 0.f);
                                     const auto& lights = scene.GetLights();
+                                    unsigned int li = 0;
                                     for (const auto& light : lights) {
-                                        GfVec3f L = light.position - hitPos;
-                                        float dist = L.GetLength();
-                                        if (dist < 1e-6f) continue;
-                                        L /= dist;
+                                        // Jittered sample direction -- see block #1 for rationale.
+                                        float su1 = _Hash(seed + 41u + li * 17u);
+                                        float su2 = _Hash(seed + 42u + li * 17u);
+                                        GfVec3f L = light.SampleDirection(hitPos, su1, su2, N);
                                         float NdotL = std::max(0.f, N[0]*L[0] + N[1]*L[1] + N[2]*L[2]);
-                                        if (NdotL < 0.001f) { shadow += 1.f; continue; }
-                                        GfRay shadowRay(GfVec3d(hitPos) + GfVec3d(N) * 0.001, GfVec3d(L));
-                                        SpectralBVH::Hit sHit = bvh.Intersect(shadowRay, 0.f);
-                                        if (sHit.valid() && sHit.t < dist) shadow += 1.f;
+                                        float blocked = 0.f;
+                                        if (NdotL < 0.001f) {
+                                            blocked = 1.f;
+                                        } else {
+                                            GfRay shadowRay(GfVec3d(hitPos) + GfVec3d(N) * 0.001, GfVec3d(L));
+                                            SpectralBVH::Hit sHit = bvh.Intersect(shadowRay, 0.f);
+                                            if (sHit.valid()) {
+                                                if (light.type == SpectralLight::Type::Distant ||
+                                                    light.type == SpectralLight::Type::Dome) {
+                                                    blocked = 1.f;
+                                                } else {
+                                                    float lightDist = (light.position - hitPos).GetLength();
+                                                    if (sHit.t < lightDist) blocked = 1.f;
+                                                }
+                                            }
+                                        }
+                                        shadow += blocked;
+                                        // Lambert diffuse contribution -- see block #1.
+                                        float atten = light.Attenuation(hitPos);
+                                        float contrib = NdotL * atten
+                                                      * light.EffectiveIntensity()
+                                                      * 0.31830988618f;  // 1/pi
+                                        sampleShadowRGB[0] += blocked * light.color[0] * contrib;
+                                        sampleShadowRGB[1] += blocked * light.color[1] * contrib;
+                                        sampleShadowRGB[2] += blocked * light.color[2] * contrib;
+                                        ++li;
                                     }
                                     float sFactor = lights.empty() ? 0.f : shadow / float(lights.size());
                                     accAlpha[pixIdx] += sFactor;
                                     accCount[pixIdx]++;
-                                    // Dedicated AOV accumulator (see above).
-                                    accShadowCatcher[pixIdx] += sFactor;
+                                    // AOV: colored shadow in RGB, shadow fraction in A.
+                                    accShadowCatcher[pixIdx*4+0] += sampleShadowRGB[0];
+                                    accShadowCatcher[pixIdx*4+1] += sampleShadowRGB[1];
+                                    accShadowCatcher[pixIdx*4+2] += sampleShadowRGB[2];
+                                    accShadowCatcher[pixIdx*4+3] += sFactor;
                                     GfVec3d viewHit = worldToView.Transform(worldHit);
                                     float camZ = static_cast<float>(-viewHit[2]);
                                     if (camZ < depthBuf[pixIdx]) depthBuf[pixIdx] = camZ;
@@ -1158,13 +1221,14 @@ void SpectralIntegrator::RenderFrame(
                 write3(aovs->specularIndirect,accSpecIndX[i], accSpecIndY[i], accSpecIndZ[i]);
                 write3(aovs->transmission,    accTransX[i],   accTransY[i],   accTransZ[i]);
             }
-            // Shadow catcher AOV -- RGB = alpha = shadow factor, normalised by sample count.
+            // Shadow catcher AOV -- RGB = accumulated coloured shadow, A = shadow fraction.
+            // RGB may exceed 1.0 with HDR lights; only non-negativity is enforced.
+            // Alpha is clamped to 0..1 to match the beauty alpha.
             if (aovs && aovs->shadowCatcher) {
-                float s = std::min(1.f, std::max(0.f, accShadowCatcher[i] * invN));
-                aovs->shadowCatcher[i*4+0] = s;
-                aovs->shadowCatcher[i*4+1] = s;
-                aovs->shadowCatcher[i*4+2] = s;
-                aovs->shadowCatcher[i*4+3] = s;
+                aovs->shadowCatcher[i*4+0] = std::max(0.f, accShadowCatcher[i*4+0] * invN);
+                aovs->shadowCatcher[i*4+1] = std::max(0.f, accShadowCatcher[i*4+1] * invN);
+                aovs->shadowCatcher[i*4+2] = std::max(0.f, accShadowCatcher[i*4+2] * invN);
+                aovs->shadowCatcher[i*4+3] = std::min(1.f, std::max(0.f, accShadowCatcher[i*4+3] * invN));
             }
         }
 

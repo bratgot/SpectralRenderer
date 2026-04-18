@@ -1450,14 +1450,19 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
                               reinterpret_cast<void*>(_d_shadowCatcherAOV),
                               px * sizeof(float4),
                               cudaMemcpyDeviceToHost));
-        // Per-sample accumulation on-device; divide by spp here, matching the
-        // CPU path's 1/accCount normalisation.
+        // Per-sample accumulation on-device; divide by spp here. RGB carries
+        // HDR light colours so only non-negativity is enforced. Alpha stays
+        // in [0,1] to match the beauty alpha's meaning.
         float invS = (spp > 0) ? 1.f / float(spp) : 1.f;
-        for (size_t i = 0; i < px * 4; ++i) {
-            float v = shadowCatcherAOV[i] * invS;
-            if (v < 0.f) v = 0.f;
-            else if (v > 1.f) v = 1.f;
-            shadowCatcherAOV[i] = v;
+        for (size_t i = 0; i < px; ++i) {
+            float r = shadowCatcherAOV[i*4+0] * invS;
+            float g = shadowCatcherAOV[i*4+1] * invS;
+            float b = shadowCatcherAOV[i*4+2] * invS;
+            float a = shadowCatcherAOV[i*4+3] * invS;
+            shadowCatcherAOV[i*4+0] = (r < 0.f) ? 0.f : r;
+            shadowCatcherAOV[i*4+1] = (g < 0.f) ? 0.f : g;
+            shadowCatcherAOV[i*4+2] = (b < 0.f) ? 0.f : b;
+            shadowCatcherAOV[i*4+3] = (a < 0.f) ? 0.f : (a > 1.f ? 1.f : a);
         }
     }
     {
