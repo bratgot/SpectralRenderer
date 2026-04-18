@@ -58,6 +58,10 @@ static double _noiseFBm(double x, double y, double z, int octaves, double roughn
 // ---------------------------------------------------------------------------
 // RenderFrame  — full image, parallel over rows
 // ---------------------------------------------------------------------------
+// Compat-mode soft shadow sample count for Sphere lights with radius > 0.
+// Hard shadow (Distant, Point, radius=0 Sphere) always takes 1 sample.
+static constexpr int SOFT_SHADOW_SAMPLES_CPU = 4;
+
 // File-scoped flag set by RenderFrame, read by _ShadeSpectral
 static bool s_scanlineCompat = false;
 // Pointer to the current render's no-shadow-cast material set. Owned by
@@ -490,23 +494,68 @@ void SpectralIntegrator::RenderFrame(
                                             float NdotL = std::abs(N[0]*L[0] + N[1]*L[1] + N[2]*L[2]);
                                             if (NdotL < 1e-4f) continue;
 
-                                            // Shadow test: single occlusion ray per light. Offset along
-                                            // the face normal (flipped to match the light-facing side)
-                                            // so we don't self-intersect on the originating triangle.
+                                            // Shadow test: offset origin along the light-facing side
+                                            // of the normal so we don't self-intersect on the
+                                            // originating triangle.
                                             GfVec3f Ns = (N[0]*L[0] + N[1]*L[1] + N[2]*L[2] >= 0.f) ? N : -N;
-                                            GfRay   shadowRay(GfVec3d(hitPos) + GfVec3d(Ns) * 0.001,
-                                                              GfVec3d(L));
-                                            SpectralBVH::Hit sHit = bvh.Intersect(shadowRay, rayTime);
-                                            if (sHit.valid() && sHit.t < shadowMax) {
-                                                // castsShadows=false on the blocker: treat as unoccluded.
-                                                int blockerMatId = sHit.tri ? sHit.tri->materialId : -1;
-                                                bool noCast = (s_noShadowCastMatIds &&
-                                                               blockerMatId >= 0 &&
-                                                               s_noShadowCastMatIds->count(blockerMatId) > 0);
-                                                if (!noCast) continue;  // in shadow, skip this light
+                                            GfVec3f sOrig = hitPos + Ns * 0.001f;
+
+                                            // Soft shadows: Sphere lights with radius > 0 take N samples
+                                            // jittered across a disc on the light's surface facing the
+                                            // shading point. All other lights take one hard ray.
+                                            // No new knob: SpectralEnvLight's sunShadowSoftness already
+                                            // drives sphere-light radius, so dialing that in automatically
+                                            // softens the shadow.
+                                            bool softShadow = (light.type == SpectralLight::Type::Sphere)
+                                                              && (light.radius > 1e-4f);
+                                            int numShadowSamples = softShadow ? SOFT_SHADOW_SAMPLES_CPU : 1;
+                                            float shadowAccum = 0.f;
+
+                                            // Build a tangent frame at L for jittering samples on the disc.
+                                            GfVec3f Tu, Tv;
+                                            if (softShadow) {
+                                                GfVec3f ref = (std::abs(L[1]) < 0.99f)
+                                                              ? GfVec3f(0.f, 1.f, 0.f)
+                                                              : GfVec3f(1.f, 0.f, 0.f);
+                                                Tu = GfCross(L, ref);
+                                                float tlen = Tu.GetLength();
+                                                Tu = (tlen > 1e-6f) ? Tu / tlen : GfVec3f(1.f, 0.f, 0.f);
+                                                Tv = GfCross(L, Tu);
                                             }
 
-                                            float contrib = NdotL * atten * intensity * float(1.0 / M_PI);
+                                            for (int ss = 0; ss < numShadowSamples; ++ss) {
+                                                GfVec3f sL = L;
+                                                float sMax = shadowMax;
+                                                if (softShadow) {
+                                                    // Uniform disc sample in tangent plane at light center.
+                                                    unsigned int sseed = seed + 11u + unsigned(ss) * 31u;
+                                                    float r1 = _Hash(sseed);
+                                                    float r2 = _Hash(sseed + 1u);
+                                                    float r = std::sqrt(r1) * light.radius;
+                                                    float phi = 2.f * float(M_PI) * r2;
+                                                    GfVec3f offset = Tu * (r * std::cos(phi))
+                                                                   + Tv * (r * std::sin(phi));
+                                                    GfVec3f samplePos = light.position + offset;
+                                                    GfVec3f toSample = samplePos - hitPos;
+                                                    float sdist = toSample.GetLength();
+                                                    if (sdist < 1e-6f) continue;
+                                                    sL = toSample / sdist;
+                                                    sMax = sdist - 0.002f;
+                                                }
+                                                GfRay shadowRay{GfVec3d(sOrig), GfVec3d(sL)};
+                                                SpectralBVH::Hit sHit = bvh.Intersect(shadowRay, rayTime);
+                                                if (sHit.valid() && sHit.t < sMax) {
+                                                    int blockerMatId = sHit.tri ? sHit.tri->materialId : -1;
+                                                    bool noCast = (s_noShadowCastMatIds &&
+                                                                   blockerMatId >= 0 &&
+                                                                   s_noShadowCastMatIds->count(blockerMatId) > 0);
+                                                    if (!noCast) shadowAccum += 1.f;
+                                                }
+                                            }
+                                            float visibility = 1.f - shadowAccum / float(numShadowSamples);
+                                            if (visibility < 1e-4f) continue;
+
+                                            float contrib = NdotL * atten * intensity * float(1.0 / M_PI) * visibility;
                                             rgb[0] += baseCol[0] * light.color[0] * contrib;
                                             rgb[1] += baseCol[1] * light.color[1] * contrib;
                                             rgb[2] += baseCol[2] * light.color[2] * contrib;

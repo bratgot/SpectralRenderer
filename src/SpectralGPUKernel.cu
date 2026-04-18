@@ -7,6 +7,12 @@
 #include <cuda_runtime.h>
 #include "SpectralGPUParams.h"
 
+// Compat-mode soft shadow sample count for Sphere lights with radius > 0.
+// Hard shadow (Distant, Point, radius=0 Sphere) takes 1 sample.
+#ifndef SOFT_SHADOW_SAMPLES_GPU
+#define SOFT_SHADOW_SAMPLES_GPU 4
+#endif
+
 // NanoVDB sparse volume sampling (Phase 22) — disabled pending OpenVDB 12 compat
 // #define SPECTRAL_USE_NANOVDB
 #ifdef SPECTRAL_USE_NANOVDB
@@ -1625,26 +1631,72 @@ extern "C" __global__ void __raygen__spectral()
                         float NdotL = fabsf(N.x*L.x+N.y*L.y+N.z*L.z);
                         if (NdotL < 1e-4f) continue;
 
-                        // Shadow ray: offset along light-facing normal side
-                        float sign = (N.x*L.x+N.y*L.y+N.z*L.z >= 0.f) ? 1.f : -1.f;
-                        float3 sOrig = make_float3(hitPos.x + N.x*sign*0.001f,
-                                                   hitPos.y + N.y*sign*0.001f,
-                                                   hitPos.z + N.z*sign*0.001f);
-                        unsigned int sp0=0,sp1=0,sp2=0,sp3=__float_as_uint(1e30f),sp4=0,sp5=0,sp6=0;
-                        optixTrace(params.traversable, sOrig, L, 0.001f, rayMax, 0.f,
-                                   OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
-                                   0,1,0, sp0,sp1,sp2,sp3,sp4,sp5,sp6);
-                        // castsShadows=false on the blocker: treat as unoccluded
-                        if (sp4 > 0u) {
-                            int blockerMatId = int(sp4) - 1;
-                            if (blockerMatId >= 0 && blockerMatId < 32 &&
-                                (params.noShadowCastMask & (1u << blockerMatId))) {
-                                sp4 = 0u;
-                            }
-                        }
-                        if (sp4 > 0u) continue;  // in shadow
+                        // Shadow origin offset along light-facing normal side
+                        float shSign = (N.x*L.x+N.y*L.y+N.z*L.z >= 0.f) ? 1.f : -1.f;
+                        float3 sOrig = make_float3(hitPos.x + N.x*shSign*0.001f,
+                                                   hitPos.y + N.y*shSign*0.001f,
+                                                   hitPos.z + N.z*shSign*0.001f);
 
-                        float contrib = NdotL*atten*intensity*0.31830988618f;  // 1/pi
+                        // Soft shadows for Sphere lights with radius > 0.
+                        bool softShadow = (ltype == 1) && (params.lights[li].radius > 1e-4f);
+                        int numShadowSamples = softShadow ? SOFT_SHADOW_SAMPLES_GPU : 1;
+                        float shadowAccum = 0.f;
+
+                        // Tangent frame at L for disc jitter
+                        float3 Tu, Tv;
+                        if (softShadow) {
+                            float3 ref = (fabsf(L.y) < 0.99f) ? make_float3(0.f,1.f,0.f)
+                                                              : make_float3(1.f,0.f,0.f);
+                            Tu = make_float3(L.y*ref.z - L.z*ref.y,
+                                             L.z*ref.x - L.x*ref.z,
+                                             L.x*ref.y - L.y*ref.x);
+                            float tlen = sqrtf(Tu.x*Tu.x+Tu.y*Tu.y+Tu.z*Tu.z);
+                            if (tlen > 1e-6f) { Tu.x/=tlen; Tu.y/=tlen; Tu.z/=tlen; }
+                            else              { Tu = make_float3(1.f,0.f,0.f); }
+                            Tv = make_float3(L.y*Tu.z - L.z*Tu.y,
+                                             L.z*Tu.x - L.x*Tu.z,
+                                             L.x*Tu.y - L.y*Tu.x);
+                        }
+
+                        unsigned int sseedBase = pixIdx*1031u + li*97u;
+                        for (int ss = 0; ss < numShadowSamples; ++ss) {
+                            float3 sL = L;
+                            float sMax = rayMax;
+                            if (softShadow) {
+                                float r1 = hashRNG(sseedBase + (unsigned)ss*13u);
+                                float r2 = hashRNG(sseedBase + (unsigned)ss*13u + 1u);
+                                float r = sqrtf(r1) * params.lights[li].radius;
+                                float phi = 6.28318530718f * r2;
+                                float sx = r * cosf(phi), sy = r * sinf(phi);
+                                float3 lp2 = params.lights[li].position;
+                                float3 samplePos = make_float3(lp2.x + Tu.x*sx + Tv.x*sy,
+                                                               lp2.y + Tu.y*sx + Tv.y*sy,
+                                                               lp2.z + Tu.z*sx + Tv.z*sy);
+                                float3 toSample = make_float3(samplePos.x - hitPos.x,
+                                                              samplePos.y - hitPos.y,
+                                                              samplePos.z - hitPos.z);
+                                float sdist = sqrtf(toSample.x*toSample.x+toSample.y*toSample.y+toSample.z*toSample.z);
+                                if (sdist < 1e-6f) continue;
+                                sL = make_float3(toSample.x/sdist, toSample.y/sdist, toSample.z/sdist);
+                                sMax = sdist - 0.002f;
+                            }
+                            unsigned int sp0=0,sp1=0,sp2=0,sp3=__float_as_uint(1e30f),sp4=0,sp5=0,sp6=0;
+                            optixTrace(params.traversable, sOrig, sL, 0.001f, sMax, 0.f,
+                                       OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
+                                       0,1,0, sp0,sp1,sp2,sp3,sp4,sp5,sp6);
+                            if (sp4 > 0u) {
+                                int blockerMatId = int(sp4) - 1;
+                                if (blockerMatId >= 0 && blockerMatId < 32 &&
+                                    (params.noShadowCastMask & (1u << blockerMatId))) {
+                                    sp4 = 0u;
+                                }
+                            }
+                            if (sp4 > 0u) shadowAccum += 1.f;
+                        }
+                        float visibility = 1.f - shadowAccum / float(numShadowSamples);
+                        if (visibility < 1e-4f) continue;
+
+                        float contrib = NdotL*atten*intensity*0.31830988618f*visibility;  // 1/pi
                         rgb.x += baseCol.x*params.lights[li].color.x*contrib;
                         rgb.y += baseCol.y*params.lights[li].color.y*contrib;
                         rgb.z += baseCol.z*params.lights[li].color.z*contrib;
@@ -1828,25 +1880,71 @@ extern "C" __global__ void __raygen__spectral()
                         float NdotL = fabsf(N.x*L.x+N.y*L.y+N.z*L.z);
                         if (NdotL < 1e-4f) continue;
 
-                        // Shadow ray
-                        float sign = (N.x*L.x+N.y*L.y+N.z*L.z >= 0.f) ? 1.f : -1.f;
-                        float3 sOrig = make_float3(hitPos.x + N.x*sign*0.001f,
-                                                   hitPos.y + N.y*sign*0.001f,
-                                                   hitPos.z + N.z*sign*0.001f);
-                        unsigned int sp0=0,sp1=0,sp2=0,sp3=__float_as_uint(1e30f),sp4=0,sp5=0,sp6=0;
-                        optixTrace(params.traversable, sOrig, L, 0.001f, rayMax, 0.f,
-                                   OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
-                                   0,1,0, sp0,sp1,sp2,sp3,sp4,sp5,sp6);
-                        if (sp4 > 0u) {
-                            int blockerMatId = int(sp4) - 1;
-                            if (blockerMatId >= 0 && blockerMatId < 32 &&
-                                (params.noShadowCastMask & (1u << blockerMatId))) {
-                                sp4 = 0u;
-                            }
-                        }
-                        if (sp4 > 0u) continue;
+                        float shSign = (N.x*L.x+N.y*L.y+N.z*L.z >= 0.f) ? 1.f : -1.f;
+                        float3 sOrig = make_float3(hitPos.x + N.x*shSign*0.001f,
+                                                   hitPos.y + N.y*shSign*0.001f,
+                                                   hitPos.z + N.z*shSign*0.001f);
 
-                        float contrib = NdotL*atten*intensity*0.31830988618f;
+                        // Soft shadows for Sphere lights with radius > 0 (e.g. sun-as-sphere
+                        // from SpectralEnvLight.sunShadowSoftness).
+                        bool softShadow = (ltype == 1) && (params.lights[li].radius > 1e-4f);
+                        int numShadowSamples = softShadow ? SOFT_SHADOW_SAMPLES_GPU : 1;
+                        float shadowAccum = 0.f;
+
+                        float3 Tu, Tv;
+                        if (softShadow) {
+                            float3 ref = (fabsf(L.y) < 0.99f) ? make_float3(0.f,1.f,0.f)
+                                                              : make_float3(1.f,0.f,0.f);
+                            Tu = make_float3(L.y*ref.z - L.z*ref.y,
+                                             L.z*ref.x - L.x*ref.z,
+                                             L.x*ref.y - L.y*ref.x);
+                            float tlen = sqrtf(Tu.x*Tu.x+Tu.y*Tu.y+Tu.z*Tu.z);
+                            if (tlen > 1e-6f) { Tu.x/=tlen; Tu.y/=tlen; Tu.z/=tlen; }
+                            else              { Tu = make_float3(1.f,0.f,0.f); }
+                            Tv = make_float3(L.y*Tu.z - L.z*Tu.y,
+                                             L.z*Tu.x - L.x*Tu.z,
+                                             L.x*Tu.y - L.y*Tu.x);
+                        }
+
+                        unsigned int sseedBase = seed + li*97u + 113u;
+                        for (int ss = 0; ss < numShadowSamples; ++ss) {
+                            float3 sL = L;
+                            float sMax = rayMax;
+                            if (softShadow) {
+                                float r1 = hashRNG(sseedBase + (unsigned)ss*13u);
+                                float r2 = hashRNG(sseedBase + (unsigned)ss*13u + 1u);
+                                float r = sqrtf(r1) * params.lights[li].radius;
+                                float phi = 6.28318530718f * r2;
+                                float sx = r * cosf(phi), sy = r * sinf(phi);
+                                float3 lp2 = params.lights[li].position;
+                                float3 samplePos = make_float3(lp2.x + Tu.x*sx + Tv.x*sy,
+                                                               lp2.y + Tu.y*sx + Tv.y*sy,
+                                                               lp2.z + Tu.z*sx + Tv.z*sy);
+                                float3 toSample = make_float3(samplePos.x - hitPos.x,
+                                                              samplePos.y - hitPos.y,
+                                                              samplePos.z - hitPos.z);
+                                float sdist = sqrtf(toSample.x*toSample.x+toSample.y*toSample.y+toSample.z*toSample.z);
+                                if (sdist < 1e-6f) continue;
+                                sL = make_float3(toSample.x/sdist, toSample.y/sdist, toSample.z/sdist);
+                                sMax = sdist - 0.002f;
+                            }
+                            unsigned int sp0=0,sp1=0,sp2=0,sp3=__float_as_uint(1e30f),sp4=0,sp5=0,sp6=0;
+                            optixTrace(params.traversable, sOrig, sL, 0.001f, sMax, 0.f,
+                                       OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
+                                       0,1,0, sp0,sp1,sp2,sp3,sp4,sp5,sp6);
+                            if (sp4 > 0u) {
+                                int blockerMatId = int(sp4) - 1;
+                                if (blockerMatId >= 0 && blockerMatId < 32 &&
+                                    (params.noShadowCastMask & (1u << blockerMatId))) {
+                                    sp4 = 0u;
+                                }
+                            }
+                            if (sp4 > 0u) shadowAccum += 1.f;
+                        }
+                        float visibility = 1.f - shadowAccum / float(numShadowSamples);
+                        if (visibility < 1e-4f) continue;
+
+                        float contrib = NdotL*atten*intensity*0.31830988618f*visibility;
                         rgb.x += baseCol.x*params.lights[li].color.x*contrib;
                         rgb.y += baseCol.y*params.lights[li].color.y*contrib;
                         rgb.z += baseCol.z*params.lights[li].color.z*contrib;
