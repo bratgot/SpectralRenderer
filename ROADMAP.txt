@@ -59,7 +59,7 @@ rather than priority. Treat them as labels.
 | **25**| Validation suite & showcase assets | Pending |
 | **28**| Gravitational lensing, Einstein ring | Future |
 | **29**| Hydra render delegate (HdSpectral) full | Future |
-| **30**| Object motion blur (currently camera only) | Pending |
+| **30**| Object motion blur (CPU done, GPU pending) | Partial |
 | **31**| Linux build (GCC/Clang) | Pending |
 | **32**| Marketing website / product page | Pending |
 
@@ -92,6 +92,36 @@ why the current approach is brittle with multiple modifier nodes.
 Glass containing smoke / fire / fog. Currently refraction rays see the
 volume as empty space. Needs the refraction path to call the volume
 integrator between hits, not just surface-to-surface.
+
+### GPU object motion blur (Phase 30 completion)
+
+CPU path is fully wired: `SpectralTriangle::v*_close` + `hasMotion` + two-
+timestep Embree motion BVH + per-sample `rayTime ∈ [shutterOpen,
+shutterClose]` threaded through primary / shadow / transmission / bounce.
+Works end-to-end today; the new `object_motion_blur` toggle lets users
+opt out for reference frames.
+
+GPU path falls back to CPU when object motion blur is active. To finish:
+
+- **SpectralGPU::BuildAccel**: detect scene motion (any tri with
+  `hasMotion`), build GAS with two vertex buffers and
+  `OptixMotionOptions { numKeys = 2, timeBegin = 0, timeEnd = 1,
+  flags = OPTIX_MOTION_FLAG_NONE }`. Vertex buffer at time 1 uses
+  `v*_close` positions.
+- **Pipeline compile options**: `usesMotionBlur = true` whenever the
+  current GAS has motion keys. Requires pipeline rebuild on scene motion
+  state change; cheap since it only happens when the scene topology
+  changes.
+- **SpectralGPUKernel.cu**: each `optixTrace` call gets a `rayTime`
+  argument (it's the 6th arg, inserted between `tmax` and `mask`).
+  Generate `rayTime = shutterOpen + hashRNG * (shutterClose - shutterOpen)`
+  in `__raygen__spectral`, thread it through shadow / transmission /
+  bounce calls (same pattern as CPU).
+- **Fallback removal**: drop the `useGPU = false` gate in
+  `SpectralRenderIop` once the kernel path is complete.
+
+Estimated 100-150 lines across the three files. The bones are ready, it's
+mostly wiring + testing against known-good CPU output.
 
 ### Emission from volumes lighting geometry
 
@@ -315,7 +345,11 @@ memory aid for "what did I work on last week?"
   bugs), `node_disabled()` respected in RegisterParams across all three
   ShaderOps (Wireframe / ShadowCatcher / Surface -- fixes disabled
   shader still rendering). SpectralShaderMerge design sketched into
-  near-term backlog.
+  near-term backlog. Object motion blur surfaced as a discoverable
+  feature: `object_motion_blur` knob (default on), UI relabel of the
+  volume-velocity blur knob, motion-blur-enabled gate now honours the
+  knob, GPU auto-falls-back to CPU with a one-time log when object
+  mblur is active. Phase 30 moved from Pending to Partial (CPU done).
 - **2026-04-17** -- SpectralMeshProperties subdivision bug fixes (4 patches),
   normal mode (auto/smooth/faceted/vertex), flip-normals, scanline constant
   shader fix (fallback dome skipped when scanlineCompat on), hash invalidation

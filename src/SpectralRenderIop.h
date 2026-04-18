@@ -120,7 +120,9 @@ private:
     static const char* const CLASS;
 
     void _LoadStage();
-    void _LoadFromPxrStage(const UsdStageRefPtr& stage);
+    void _LoadFromPxrStage(const UsdStageRefPtr& stage,
+                           const UsdStageRefPtr& stageClose = UsdStageRefPtr(),
+                           DD::Image::Op* nodeGraphInput = nullptr);
     void _BuildCameraFromInput();
     void _BuildLightRig();
     void _LoadVDB();
@@ -421,6 +423,11 @@ private:
     bool  _motionBlur = false;
     int   _shutterPreset = 1;  // 0=Start,1=Centre,2=End,3=Custom
     int   _motionSamples = 3;
+    // Object motion blur — geometry deformation + rigid body movement.
+    // Enabled by default because the integrator already handles it on CPU
+    // whenever shutter != 0; this knob just gives users a discoverable
+    // toggle and a way to force reference frames without changing shutter.
+    bool  _objectMotionBlur = true;
     // Camera motion blur
     bool  _cameraMblur = false;
     int   _cameraMblurQuality = 4;  // extra samples for camera blur
@@ -430,8 +437,13 @@ private:
     // Scrub detection: skip full render during rapid frame changes
     std::chrono::steady_clock::time_point _lastFrameChangeTime;
     bool  _scrubbing = false;
-    double _shutterOpen  = -0.5;   // shutter open  (relative to frame)
-    double _shutterClose =  0.5;   // shutter close (relative to frame)
+    double _shutterOpen  = -0.25;  // shutter open  (relative to frame)
+    double _shutterClose =  0.25;  // shutter close (relative to frame)
+    // Default is a 180-degree shutter (half-frame exposure, centred on the
+    // frame), matching film convention and aligning with Arnold / Redshift
+    // / Karma / Nuke ScanlineRender defaults. Previous default of -0.5/0.5
+    // was effectively a 360-degree shutter (full-frame exposure) which
+    // gave about twice as much blur as users typically expect.
     float _lightIntensity = 1.0f;  // global light intensity multiplier
     int   _illuminant = 0;         // 0=auto, 1=D50, 2=D65, 3=A, 4=F2, 5=F11
     const char* _cameraPath = "";

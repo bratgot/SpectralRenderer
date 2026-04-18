@@ -527,15 +527,6 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                    "A = tungsten incandescent (2856K)<br>"
                    "F2 = cool white fluorescent<br>"
                    "F11 = narrow-band fluorescent");
-        Divider(f, "Motion blur");
-        Float_knob(f, &_shutterOpen, "shutter_open", "shutter open"); SetRange(f, -1.f, 0.f);
-        Tooltip(f, "Shutter open time relative to frame.<br>"
-                   "-0.5 = half frame before (centred shutter)<br>"
-                   "0.0 = starts at current frame");
-        Float_knob(f, &_shutterClose, "shutter_close", "shutter close"); SetRange(f, 0.f, 1.f);
-        Tooltip(f, "Shutter close time relative to frame.<br>"
-                   "0.5 = half frame after (180 degree shutter)<br>"
-                   "0.0 = no motion blur (both open and close at 0)");
     }
     EndGroup(f);
 
@@ -1153,6 +1144,103 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         "</font>"
     );
 
+    // ───────────────────────────────────────────────────────────────
+    // Motion Blur tab
+    // All motion blur controls live here: shutter, object (geometry)
+    // motion blur, volume velocity blur, camera blur (when wired up).
+    // ───────────────────────────────────────────────────────────────
+    Tab_knob(f, "Motion Blur");
+
+    Text_knob(f,
+        "<font color='#777' size='-1'>"
+        "Motion blur is driven by the shutter interval.<br>"
+        "Shutter=0 disables all motion blur.<br>"
+        "Object and volume contributions are independent toggles below."
+        "</font>"
+    );
+
+    Divider(f, "Shutter");
+    {
+        // Presets are 180-degree shutter equivalents (half-frame exposure)
+        // applied via knob_changed when the preset index changes. "Custom"
+        // disables auto-apply so the user can type arbitrary values.
+        static const char* const shutP[] = {
+            "Start (0 to 0.5)",
+            "Centre (-0.25 to 0.25)",
+            "End (-0.5 to 0)",
+            "Custom",
+            nullptr
+        };
+        Enumeration_knob(f, &_shutterPreset, shutP, "shutter_preset", "preset");
+        Tooltip(f, "Shutter offset preset (all are 180 shutter = half-frame exposure):\n"
+                   "  Start  - exposure begins at frame  (blur leads ahead of motion)\n"
+                   "  Centre - exposure centred on frame (blur even on both sides, default)\n"
+                   "  End    - exposure ends at frame    (blur trails behind motion)\n"
+                   "  Custom - do not override open/close below");
+        Newline(f);
+        Double_knob(f, &_shutterOpen, "shutter_open", "open"); SetRange(f, -1, 0);
+        Tooltip(f, "Shutter open time relative to frame, in frames.\n"
+                   "-0.25 = one quarter frame before current (default, 180 shutter centred).\n"
+                   "-0.5  = one half   frame before current (360 shutter centred, full blur).\n"
+                   " 0.0  = exposure starts at current frame.\n"
+                   "Equal to shutter close disables motion blur entirely.");
+        Double_knob(f, &_shutterClose, "shutter_close", "close"); SetRange(f, 0, 1);
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Shutter close time relative to frame, in frames.\n"
+                   "0.25 = one quarter frame after current (default, 180 shutter centred).\n"
+                   "0.5  = one half   frame after current (360 shutter centred, full blur).");
+        Int_knob(f, &_motionSamples, "motion_samples", "samples"); SetRange(f, 2, 8);
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Volume-velocity time samples across the shutter.\n"
+                   "2 = fast. 3 = good. 5 = smooth. 8 = overkill.\n"
+                   "Object motion blur doesn't use this -- it samples time\n"
+                   "once per spp, so raise the main spp for smoother blur.");
+    }
+
+    Divider(f, "Object motion blur");
+    {
+        Text_knob(f,
+            "<font color='#777' size='-1'>"
+            "Geometry deformation and rigid body transforms on animated meshes."
+            "</font>"
+        );
+        Newline(f);
+        Bool_knob(f, &_objectMotionBlur, "object_motion_blur", "enable");
+        Tooltip(f, "Motion blur from vertex deformation and rigid body\n"
+                   "transforms on animated meshes.\n"
+                   "\n"
+                   "Disable for reference frames where motion should be\n"
+                   "frozen without changing shutter settings.\n"
+                   "\n"
+                   "CPU: fully supported.\n"
+                   "GPU: currently falls back to CPU when active\n"
+                   "(OptiX motion GAS support landing in next patch).");
+    }
+
+    Divider(f, "Volume velocity blur");
+    {
+        Text_knob(f,
+            "<font color='#777' size='-1'>"
+            "VDB velocity grids (vel/v) drive volume sample motion across the shutter."
+            "</font>"
+        );
+        Newline(f);
+        Bool_knob(f, &_motionBlur, "motion_blur", "enable");
+        Tooltip(f, "Render volume motion blur from VDB velocity grids.\n"
+                   "Offsets volume samples across the shutter interval.\n"
+                   "Requires a velocity grid to be loaded.\n"
+                   "\n"
+                   "This is NOT the same as object motion blur above --\n"
+                   "this is purely for volumes that carry per-voxel velocity data.");
+    }
+
+    // Camera motion blur kept INVISIBLE until the axis-chain evaluation is wired.
+    // Knob definitions live here so their values load/save from existing .nk files.
+    Bool_knob(f, &_cameraMblur, "camera_mblur", "camera blur");
+    SetFlags(f, Knob::INVISIBLE);
+    Int_knob(f, &_cameraMblurQuality, "camera_mblur_quality", "quality");
+    SetFlags(f, Knob::INVISIBLE);
+
     Tab_knob(f, "AOV");
 
     Text_knob(f,
@@ -1336,46 +1424,6 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                "More samples cluster where volume is dense,\n"
                "empty space is skipped entirely.");
 
-    // ─── Motion Blur ────────────────────────────────────────────────
-    Divider(f, "Motion blur");
-    Text_knob(f,
-        "<font color='#777' size='-1'>"
-        "Velocity-based motion blur from VDB velocity grids (vel/v).<br>"
-        "Set the velocity grid in the Volumes tab Grids section."
-        "</font>"
-    );
-    Newline(f);
-    Bool_knob(f, &_motionBlur, "motion_blur", "enable");
-    Tooltip(f, "Render motion blur from velocity grid data.\n"
-               "Offsets ray origins across the shutter interval.\n"
-               "Requires a velocity grid to be loaded.");
-    static const char* const shutP[] = {
-        "Start (0 to 1)", "Centre (-0.5 to 0.5)", "End (-1 to 0)", "Custom", nullptr
-    };
-    Enumeration_knob(f, &_shutterPreset, shutP, "shutter_preset", "shutter");
-    ClearFlags(f, Knob::STARTLINE);
-    Tooltip(f, "Start = blur trails behind motion direction\n"
-               "Centre = blur centred on current frame (default)\n"
-               "End = blur leads ahead of motion\n"
-               "Custom = set open/close manually");
-    Newline(f);
-    Double_knob(f, &_shutterOpen, "shutter_open", "open"); SetRange(f, -1, 0);
-    Tooltip(f, "Shutter open time relative to frame.\n"
-               "-0.5 = half frame before current.");
-    Double_knob(f, &_shutterClose, "shutter_close", "close"); SetRange(f, 0, 1);
-    ClearFlags(f, Knob::STARTLINE);
-    Tooltip(f, "Shutter close time relative to frame.\n"
-               "0.5 = half frame after current.");
-    Int_knob(f, &_motionSamples, "motion_samples", "samples"); SetRange(f, 2, 8);
-    ClearFlags(f, Knob::STARTLINE);
-    Tooltip(f, "Time samples across shutter. 2 = fast. 3 = good. 5 = smooth.");
-
-    // ─── Camera Motion Blur (TODO) ─────────────────────────────────
-    Bool_knob(f, &_cameraMblur, "camera_mblur", "camera blur");
-    SetFlags(f, Knob::INVISIBLE);
-    Int_knob(f, &_cameraMblurQuality, "camera_mblur_quality", "quality");
-    SetFlags(f, Knob::INVISIBLE);
-
 }
 
 int SpectralRenderIop::knob_changed(Knob* k)
@@ -1412,6 +1460,37 @@ int SpectralRenderIop::knob_changed(Knob* k)
         // Clear any label that a previous version of the node may have set.
         if (Knob* lk = knob("label")) lk->set_text("");
         if (k->is("device_mode")) return 1;
+    }
+
+    // Shutter preset -> apply 180-degree shutter values (0.5-frame exposure)
+    // to open/close knobs. "Custom" leaves them alone. Writing the knob
+    // values here lets the user see the numbers update in the panel and
+    // still tweak them manually afterwards (doing so will bounce the enum
+    // to "Custom" only if they pick values that don't match a preset --
+    // we don't force that, the enum just stays on whatever they last picked).
+    if (k->is("shutter_preset")) {
+        Knob* kOpen  = knob("shutter_open");
+        Knob* kClose = knob("shutter_close");
+        if (kOpen && kClose) {
+            switch (_shutterPreset) {
+                case 0:  // Start: exposure begins at frame
+                    kOpen->set_value(0.0);
+                    kClose->set_value(0.5);
+                    break;
+                case 1:  // Centre: exposure centred on frame (default)
+                    kOpen->set_value(-0.25);
+                    kClose->set_value(0.25);
+                    break;
+                case 2:  // End: exposure ends at frame
+                    kOpen->set_value(-0.5);
+                    kClose->set_value(0.0);
+                    break;
+                case 3:  // Custom: leave knob values alone
+                default:
+                    break;
+            }
+        }
+        return 1;
     }
 
     // VDB auto-sequence
@@ -2203,14 +2282,27 @@ void SpectralRenderIop::_LoadStage()
             // Validate the upstream op
             in0->validate(true);
 
-            // Build a usg::Stage from the upstream GeomOp
+            // Build a usg::Stage from the upstream GeomOp.
+            //
+            // GeometryProviderI::BuildStage evaluates the Nuke op graph at
+            // a single time and bakes the result into a static USD stage.
+            // Earlier we tried building two stages at tOpen and tClose to
+            // detect motion, plus Op::setOutputContext + invalidate +
+            // validate to force the chain to re-evaluate -- none of it
+            // worked. The USG bridge bakes at Nuke's global current frame
+            // regardless of what we do. Diagnostics confirmed both stages
+            // came out identical.
+            //
+            // What DOES work: walking the input chain and reading knobs
+            // directly via Knob::get_value_at(time). That's handled inside
+            // _LoadFromPxrStage via the nodeGraphInput pointer; see the
+            // chain-walk helpers above this function.
             usg::StageRef usgStage = usg::Stage::CreateInMemory();
             if (!usgStage) {
                 SLOG("SpectralRender: failed to create in-memory stage\n");
                 return;
             }
 
-            // Use the current frame time
             fdk::TimeValue sampleTime(static_cast<double>(_frame));
             OpGraphLocation location(in0);
             GeometryProviderI::BuildStage(usgStage, location, sampleTime);
@@ -2235,8 +2327,62 @@ void SpectralRenderIop::_LoadStage()
                 return;
             }
 
-            SLOG("SpectralRender: got PXR stage from node graph\n");
-            _LoadFromPxrStage(*pxrStagePtr);
+            const bool nodeGraphMotionBlur =
+                _objectMotionBlur && (_shutterOpen != _shutterClose);
+            const double tOpenLog  = static_cast<double>(_frame) + _shutterOpen;
+            const double tCloseLog = static_cast<double>(_frame) + _shutterClose;
+
+            SLOG("SpectralRender: got PXR stage from node graph%s\n",
+                 nodeGraphMotionBlur ? " (chain-walk motion blur enabled)" : "");
+
+            // Input chain diagnostic: log any transform-like knobs we find,
+            // reading open/close values directly. Useful for verifying what
+            // the chain walker will see. Kept in place because motion blur
+            // bugs are hard to debug without it.
+            if (nodeGraphMotionBlur) {
+                SLOG("SpectralRender: motion blur stage times -- open=%g close=%g (frame=%d)\n",
+                     tOpenLog, tCloseLog, _frame);
+                Op* cur = in0;
+                for (int d = 0; d < 8 && cur; ++d) {
+                    const char* cls = cur->Class();
+                    DD::Image::Knob* kTrans = cur->knob("translate");
+                    DD::Image::Knob* kRot   = cur->knob("rotate");
+                    DD::Image::Knob* kScale = cur->knob("scaling");
+                    DD::Image::Knob* kUScl  = cur->knob("uniform_scale");
+                    if (kTrans || kRot || kScale || kUScl) {
+                        SLOG("SpectralRender: mblur chain[%d] class=%s",
+                             d, cls ? cls : "?");
+                        if (kRot) {
+                            SLOG(" rot_open=(%.3f,%.3f,%.3f) rot_close=(%.3f,%.3f,%.3f)",
+                                 (float)kRot->get_value_at(tOpenLog, 0),
+                                 (float)kRot->get_value_at(tOpenLog, 1),
+                                 (float)kRot->get_value_at(tOpenLog, 2),
+                                 (float)kRot->get_value_at(tCloseLog, 0),
+                                 (float)kRot->get_value_at(tCloseLog, 1),
+                                 (float)kRot->get_value_at(tCloseLog, 2));
+                        }
+                        if (kTrans) {
+                            SLOG(" tr_open=(%.3f,%.3f,%.3f) tr_close=(%.3f,%.3f,%.3f)",
+                                 (float)kTrans->get_value_at(tOpenLog, 0),
+                                 (float)kTrans->get_value_at(tOpenLog, 1),
+                                 (float)kTrans->get_value_at(tOpenLog, 2),
+                                 (float)kTrans->get_value_at(tCloseLog, 0),
+                                 (float)kTrans->get_value_at(tCloseLog, 1),
+                                 (float)kTrans->get_value_at(tCloseLog, 2));
+                        }
+                        SLOG("\n");
+                    } else if (d < 3) {
+                        SLOG("SpectralRender: mblur chain[%d] class=%s (no xform knobs)\n",
+                             d, cls ? cls : "?");
+                    }
+                    cur = cur->input(0);
+                }
+            }
+
+            // Pass in0 through so the mesh loader can chain-walk to get
+            // correct open/close xforms. stageClose is a null stub now --
+            // kept for signature back-compat but no longer used.
+            _LoadFromPxrStage(*pxrStagePtr, UsdStageRefPtr(), in0);
             return;
 
         } catch (const std::exception& e) {
@@ -2276,14 +2422,133 @@ void SpectralRenderIop::_LoadStage()
 }
 
 // ---------------------------------------------------------------------------
-// _LoadFromPxrStage — shared mesh/camera loading from a PXR UsdStageRefPtr
+// Chain-walk matrix helpers.
+//
+// The Nuke 3D -> USD bridge (GeometryProviderI::BuildStage) bakes the stage
+// at Nuke's current global frame; it ignores the sampleTime we pass it and
+// doesn't respect Op::setOutputContext on our input op. So we can't trust
+// the bridge to give us open-time and close-time xforms -- both builds
+// return the same current-frame snapshot.
+//
+// Workaround: walk up the input op chain ourselves, reading transform
+// knobs directly via Knob::get_value_at(time, component). That API DOES
+// honour the requested time (diagnosed by logging the rotate values at
+// open vs close -- they differed correctly). Compose a world matrix per
+// time and use it to drive motion blur.
+//
+// Limitations:
+//   - Only recognises translate / rotate / scaling / uniform_scale knobs.
+//     Pivot and skew aren't handled yet; most real scenes don't use them.
+//   - Rotation order is fixed at Nuke's default (ZXY). Ops with custom
+//     rot_order will produce wrong motion matrices (shape animates
+//     correctly at current frame because that part comes from the USG
+//     bridge; only the motion delta is affected).
+//   - If any op in the chain has a transform that our knob read can't
+//     reconstruct, its motion contribution is missed.
 // ---------------------------------------------------------------------------
-void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
+
+namespace {
+
+// Build a local 4x4 matrix from translate/rotate/scaling knobs on an op,
+// sampled at 'time'. Returns identity if the op has no transform knobs.
+// Matrix follows the USD row-vector convention (p_world = p_local * M).
+pxr::GfMatrix4d _ExtractOpLocalMatrixAt(DD::Image::Op* op, double time)
+{
+    pxr::GfMatrix4d M(1.0);
+    if (!op) return M;
+
+    DD::Image::Knob* kT  = op->knob("translate");
+    DD::Image::Knob* kR  = op->knob("rotate");
+    DD::Image::Knob* kS  = op->knob("scaling");
+    DD::Image::Knob* kUS = op->knob("uniform_scale");
+
+    if (!kT && !kR && !kS && !kUS) return M;  // pass-through op
+
+    pxr::GfVec3d t(0.0, 0.0, 0.0);
+    pxr::GfVec3d r(0.0, 0.0, 0.0);
+    pxr::GfVec3d s(1.0, 1.0, 1.0);
+    double us = 1.0;
+    if (kT)  for (int i = 0; i < 3; ++i) t[i] = kT->get_value_at(time, i);
+    if (kR)  for (int i = 0; i < 3; ++i) r[i] = kR->get_value_at(time, i);
+    if (kS)  for (int i = 0; i < 3; ++i) s[i] = kS->get_value_at(time, i);
+    if (kUS) us = kUS->get_value_at(time, 0);
+    s *= us;
+
+    pxr::GfMatrix4d S(1.0); S.SetScale(s);
+    pxr::GfMatrix4d T(1.0); T.SetTranslate(t);
+
+    // Rotation: build per-axis matrices. GfRotation takes degrees.
+    pxr::GfMatrix4d Rx(1.0); Rx.SetRotate(pxr::GfRotation(pxr::GfVec3d(1,0,0), r[0]));
+    pxr::GfMatrix4d Ry(1.0); Ry.SetRotate(pxr::GfRotation(pxr::GfVec3d(0,1,0), r[1]));
+    pxr::GfMatrix4d Rz(1.0); Rz.SetRotate(pxr::GfRotation(pxr::GfVec3d(0,0,1), r[2]));
+
+    // Nuke default rot_order is ZXY. In row-vector convention (v * R), the
+    // order of multiplication reverses relative to the Euler name: ZXY
+    // means "rotate about Y first, then X, then Z" on the vector, which
+    // as row-vector matrix ops is  R = Ry * Rx * Rz.
+    pxr::GfMatrix4d R = Ry * Rx * Rz;
+
+    // SRT composition in row-vector form: p' = ((p * S) * R) * T
+    M = S * R * T;
+    return M;
+}
+
+// Walk the input chain from 'top' upward (via input(0)) and compose the
+// world matrix at 'time'. Caps depth at 16 to avoid runaway on cycles.
+//
+// We walk from the op closest to SpectralRender (downstream) toward the
+// source (upstream). In Nuke's row-vector convention, data flow is
+//   p_final = p_source * M_upstream * ... * M_downstream
+// So walking downstream -> upstream, the correct accumulation is
+//   world = local * world
+// (local is the more-upstream op, which gets left-multiplied so the
+// next iteration's even-more-upstream op ends up further left).
+pxr::GfMatrix4d _ComputeInputChainWorldMatrix(DD::Image::Op* top, double time)
+{
+    pxr::GfMatrix4d world(1.0);
+    DD::Image::Op* cur = top;
+    int depth = 0;
+    while (cur && depth < 16) {
+        pxr::GfMatrix4d local = _ExtractOpLocalMatrixAt(cur, time);
+        world = local * world;
+        cur = cur->input(0);
+        ++depth;
+    }
+    return world;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// _LoadFromPxrStage — shared mesh/camera loading from a PXR UsdStageRefPtr.
+//
+// nodeGraphInput, if non-null, is the Nuke input op that produced the stage.
+// It enables the chain-walk motion blur path: for each mesh, we compute
+// world matrices at tOpen and tClose by reading transform knobs on the
+// input chain directly. This is the only way to get correct object motion
+// blur from upstream animated Nuke 3D ops, because the USG bridge bakes
+// its stage at a single global frame and ignores our retime attempts.
+//
+// For USD file input, pass nodeGraphInput = nullptr; the mesh loader then
+// falls back to reading mesh.GetPointsAttr() and xforms at timeClose on
+// the main stage, which works for files with native time samples.
+//
+// stageClose is currently unused by the mesh loader (the USG bridge
+// produces identical stages regardless of sampleTime, so comparing them
+// was fruitless) but the parameter is retained for signature stability.
+void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage,
+                                           const UsdStageRefPtr& stageClose,
+                                           DD::Image::Op* nodeGraphInput)
 {
     const UsdTimeCode timeCode(_frame);
     const UsdTimeCode timeOpen(_frame + _shutterOpen);
     const UsdTimeCode timeClose(_frame + _shutterClose);
-    const bool motionBlurEnabled = (_shutterOpen != _shutterClose);
+    // Object motion blur gate: both the knob (user toggle) and the shutter
+    // interval must be non-trivial. Previously this was only shutter-gated,
+    // so users got object motion blur unconditionally whenever shutter was
+    // non-zero (which is the default) and couldn't force reference frames
+    // without editing shutter times.
+    const bool motionBlurEnabled = _objectMotionBlur && (_shutterOpen != _shutterClose);
     UsdGeomXformCache xfCache(timeCode);
 
     int meshCount = 0;
@@ -2837,34 +3102,100 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
             }
         }
 
-        // Read points at shutter close for motion blur
+        // Read points at shutter close for motion blur.
+        //
+        // Two paths here, because the open/close stages may or may not be
+        // distinct objects:
+        //   - USD file input (stageClose null): the stage has time samples,
+        //     so reading mesh.GetPointsAttr() at timeClose returns the
+        //     deformed-at-close values, and UsdGeomXformCache(timeClose)
+        //     resolves the xform at close.
+        //   - Nuke 3D node graph input (stageClose non-null): each stage is
+        //     a static snapshot built by BuildStage at one time value.
+        //     Time-parametric reads on a single stage return identical
+        //     results, so we have to look up the prim in stageClose and
+        //     read its default-time values.
         VtVec3fArray pointsClose;
         bool meshHasMotion = false;
+        GfMatrix4d chainWorldOpen(1.0);   // identity unless nodeGraphInput
+        GfMatrix4d chainWorldClose(1.0);
+        bool useChainWalk = false;
+        UsdPrim closePrim;  // only used when stageClose is non-null
         if (motionBlurEnabled) {
-            mesh.GetPointsAttr().Get(&pointsClose, timeClose);
+            // Node-graph input: chain-walk matrices trump anything the USG
+            // bridge gives us for xform motion, because the bridge bakes
+            // at current frame and its time-parametric reads return
+            // identical values regardless of sampleTime.
+            if (nodeGraphInput) {
+                const double tOpen  = static_cast<double>(_frame) + _shutterOpen;
+                const double tClose = static_cast<double>(_frame) + _shutterClose;
+                chainWorldOpen  = _ComputeInputChainWorldMatrix(nodeGraphInput, tOpen);
+                chainWorldClose = _ComputeInputChainWorldMatrix(nodeGraphInput, tClose);
+                useChainWalk = true;
+            }
+
+            if (stageClose) {
+                closePrim = stageClose->GetPrimAtPath(prim.GetPath());
+                if (closePrim && closePrim.IsA<UsdGeomMesh>()) {
+                    UsdGeomMesh closeMesh(closePrim);
+                    closeMesh.GetPointsAttr().Get(&pointsClose, UsdTimeCode::Default());
+                } else {
+                    mesh.GetPointsAttr().Get(&pointsClose, timeClose);
+                }
+            } else {
+                mesh.GetPointsAttr().Get(&pointsClose, timeClose);
+            }
 
             // Check if local positions differ (vertex deformation)
+            bool pointsDiffer = false;
             if (pointsClose.size() == points.size()) {
                 for (size_t pi = 0; pi < points.size(); ++pi) {
                     if ((points[pi] - pointsClose[pi]).GetLengthSq() > 1e-10f) {
-                        meshHasMotion = true;
+                        pointsDiffer = true;
                         break;
                     }
                 }
             }
+            if (pointsDiffer) meshHasMotion = true;
 
-            // Check if the world transform differs (rigid body motion)
+            // Check if the world transform differs (rigid body motion).
+            // This is the branch that catches GeoTransform, animated Axis,
+            // and other Nuke 3D ops that don't deform vertices but move
+            // the whole mesh through space.
+            bool xfDiffers = false;
             if (!meshHasMotion) {
-                UsdGeomXformCache xfCacheOpen(timeOpen);
-                UsdGeomXformCache xfCacheClose(timeClose);
-                GfMatrix4d xfOpen  = xfCacheOpen.GetLocalToWorldTransform(prim);
-                GfMatrix4d xfClose = xfCacheClose.GetLocalToWorldTransform(prim);
-                if (xfOpen != xfClose) {
-                    meshHasMotion = true;
-                    // Use the same points but they'll get different transforms
-                    pointsClose = points;
+                if (useChainWalk) {
+                    // Chain-walk path: compare matrices we computed above.
+                    // This is the one that actually catches node-graph
+                    // motion; USG-based xfCache doesn't.
+                    if (chainWorldOpen != chainWorldClose) {
+                        xfDiffers = true;
+                        meshHasMotion = true;
+                        pointsClose = points;  // no deformation, just xform
+                    }
+                } else {
+                    // USD file input: read xform via cache at the two times.
+                    // Works because the file has native time samples.
+                    UsdGeomXformCache xfCacheOpen(timeOpen);
+                    UsdGeomXformCache xfCacheClose(timeClose);
+                    GfMatrix4d xfOpen  = xfCacheOpen.GetLocalToWorldTransform(prim);
+                    GfMatrix4d xfClose = xfCacheClose.GetLocalToWorldTransform(prim);
+                    if (xfOpen != xfClose) {
+                        xfDiffers = true;
+                        meshHasMotion = true;
+                        pointsClose = points;
+                    }
                 }
             }
+
+            // Diagnostic -- if the user reports "no motion blur on my
+            // animated mesh" this log tells us whether the detector saw
+            // the motion or not. Without it we're guessing.
+            SLOG("SpectralRender: mblur detect '%s': path=%s "
+                 "pointsDiffer=%d xfDiffers=%d -> hasMotion=%d\n",
+                 prim.GetPath().GetText(),
+                 useChainWalk ? "chain-walk" : "usd-file",
+                 (int)pointsDiffer, (int)xfDiffers, (int)meshHasMotion);
 
             if (!meshHasMotion) pointsClose.clear();
         }
@@ -4474,9 +4805,21 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
         }
 #endif // SPECTRAL_HAS_OSD
 
-        // World transform (at shutter open if motion blur, else at frame)
+        // World transform.
+        //
+        // Chain-walk path (Nuke node-graph input + motion blur enabled):
+        //   The USG bridge baked every prim at the current frame so we can't
+        //   trust xfCache at timeOpen/timeClose -- they all return the same
+        //   snapshot. We already composed chainWorldOpen / chainWorldClose
+        //   from upstream knob values read directly via get_value_at, which
+        //   DO reflect animation. Use those.
+        //
+        // USD file / non-motion-blur path:
+        //   xfCache with the relevant TimeCode works correctly.
         GfMatrix4d worldXf;
-        if (motionBlurEnabled) {
+        if (useChainWalk) {
+            worldXf = chainWorldOpen;
+        } else if (motionBlurEnabled) {
             UsdGeomXformCache xfCacheOpen(timeOpen);
             worldXf = xfCacheOpen.GetLocalToWorldTransform(prim);
         } else {
@@ -4484,11 +4827,15 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage)
         }
         GfMatrix4d normalXf = worldXf.GetInverse().GetTranspose();
 
-        // Close-time transform for motion blur
+        // Close-time transform for motion blur.
         GfMatrix4d worldXfClose = worldXf;
         if (meshHasMotion) {
-            UsdGeomXformCache xfCacheClose(timeClose);
-            worldXfClose = xfCacheClose.GetLocalToWorldTransform(prim);
+            if (useChainWalk) {
+                worldXfClose = chainWorldClose;
+            } else {
+                UsdGeomXformCache xfCacheClose(timeClose);
+                worldXfClose = xfCacheClose.GetLocalToWorldTransform(prim);
+            }
         }
 
         const int numPoints = static_cast<int>(points.size());
@@ -8082,6 +8429,22 @@ void SpectralRenderIop::_EnsureFrameRendered()
         useGPU = SpectralIntegrator::IsGPUAvailable();
     }
 #endif
+
+    // Object motion blur: not yet supported on GPU (OptiX motion GAS +
+    // rayTime threading through all optixTrace call sites is a follow-up
+    // patch). Fall back to CPU cleanly with a one-time log so the user
+    // isn't confused by a silent missing feature.
+    if (useGPU && _objectMotionBlur && _shutterOpen != _shutterClose) {
+        static bool s_warnedMblurFallback = false;
+        if (!s_warnedMblurFallback) {
+            SLOG("SpectralRender: object motion blur active -- GPU motion GAS "
+                 "not yet implemented, falling back to CPU for this render. "
+                 "Disable object motion blur or zero the shutter interval to "
+                 "render on GPU.\n");
+            s_warnedMblurFallback = true;
+        }
+        useGPU = false;
+    }
 
     // Auto-preview disabled — GPU renders fast enough at full spp (28-100ms).
     // spp=1 preview showed normals-as-color that persisted because Nuke's
