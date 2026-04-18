@@ -359,6 +359,11 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
         {
             int triSampled = 0;
             for (const auto& mesh : scene.GetMeshes()) {
+                // Include per-mesh flags in checksum so toggling visible
+                // (from SpectralMeshProperties) triggers a GAS rebuild.
+                // Without this the GAS stays stale when only a per-mesh
+                // knob changes and no triangle positions have moved.
+                geoCheck ^= (mesh.second.visible ? 0xA5A5A5A5u : 0x5A5A5A5Au);
                 size_t step = std::max(size_t(1), mesh.second.triangles.size() / 8);
                 for (size_t i = 0; i < mesh.second.triangles.size(); i += step) {
                     const auto& tri = mesh.second.triangles[i];
