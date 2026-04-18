@@ -5413,9 +5413,19 @@ void SpectralRenderIop::append(Hash& hash)
     //
     // The manual hash.append() calls below remain as defensive double-
     // coverage AND to cover things Iop::append() can't see: registries
-    // populated by other nodes (SpectralWireframeOp etc.), internal state
-    // that isn't knob-backed (_volumes.size, _shadowCatcherNames), and
-    // the multi-hop scene graph walk below. Those must stay.
+    // populated by other nodes (SpectralDraftingOp, SpectralShadowCatcherOp,
+    // SpectralSurfaceOp, SpectralMeshPropertiesOp), internal state that
+    // isn't knob-backed (_volumes.size, _shadowCatcherNames), and the
+    // multi-hop scene graph walk below. Those must stay.
+    //
+    // Removed from this function: the local _wire* / _arch* / _pencil* /
+    // _topo* / _wireAA* member hashes. Those members live on this Op but
+    // are populated FROM the Drafting registry during _LoadFromPxrStage,
+    // which runs after append(). Hashing them here was either redundant
+    // (registry hash below already covers the authoritative values) or
+    // actively stale (append() sees last-render's state). The registry
+    // hash is the single source of truth; its expanded coverage below
+    // was the real fix.
     Iop::append(hash);
 
     hash.append(outputContext().frame());
@@ -5429,30 +5439,6 @@ void SpectralRenderIop::append(Hash& hash)
     hash.append(_deviceMode);
     if (_vdbFile) hash.append(_vdbFile);
     hash.append((int)_volumes.size());
-    // Hash wireframe + shadow catcher params
-    hash.append(_wireframeEnable ? 1 : 0);
-    hash.append(_wireThickness);
-    hash.append(_wireOpacity);
-    hash.append(_wireStyle);
-    hash.append(_wireNth);
-    hash.append(_wireDashed ? 1 : 0);
-    hash.append(_archSilhouetteWeight);
-    hash.append(_archMediumWeight);
-    hash.append(_archThinWeight);
-    hash.append(_archThinOpacity);
-    hash.append(_pencilWobble);
-    hash.append(_pencilPressure);
-    hash.append(_pencilCrossHatch ? 1 : 0);
-    hash.append(_pencilHatchDensity);
-    hash.append(_pencilHatchAngle);
-    hash.append(_topoDirection);
-    hash.append(_topoUpVector[0]);
-    hash.append(_topoUpVector[1]);
-    hash.append(_topoUpVector[2]);
-    hash.append(_topoContourInterval);
-    hash.append(_topoMajorEvery);
-    hash.append(_wireAAMode);
-    hash.append(_wireAAWidth);
     hash.append(_edgeSamples);
     if (_shadowCatcherNames) hash.append(_shadowCatcherNames);
     // Hash wireframe registry — every field that affects output. The

@@ -184,9 +184,10 @@ Tracked here so we don't forget. Each line is roughly the shape of an issue.
   name in the Op and erase the old entry when `RegisterParams` sees a
   change. Harmless in typical workflows (you rename before you hook things
   up); annoying for Ops that are already affecting a render.
-- **`Iop::append(hash)` not called at top of `SpectralRenderIop::append`**:
-  we're manually hashing each knob that affects output. Brittle -- new knobs
-  are easy to forget. Switch to base-class default + any registry extras.
+- **Iop::append(hash)**: *done 2026-04-18*. Now called at the top of
+  SpectralRenderIop::append, auto-hashing every knob declared in knobs().
+  Individual knob hashes removed; Drafting registry hash expanded to cover
+  every DraftingParams field (was previously only 4 of 30+).
 - **Subdivision level clamping**: knob range is 0-6 but OpenSubdiv clamps
   internally to `[1, 4]`. Tooltip implies 6 works. Either raise the internal
   cap or lower the knob max.
@@ -302,6 +303,14 @@ screenshots, zero production need. Save for when the fundamentals are solid.
 One-line-per-session record of what happened. Add to the top. Serves as a
 memory aid for "what did I work on last week?"
 
+- **2026-04-18 (late pm)** -- Iop::append(hash) cleanup. Replaced 25+ lines
+  of manual per-knob hashing with a single Iop::append(hash) call at the
+  top of SpectralRenderIop::append -- every knob declared in knobs() is
+  now auto-hashed, preempting the entire "I toggle X and nothing happens
+  until I scrub" class of bugs. Drafting registry hash expanded from 4
+  fields to all 30+ DraftingParams fields (including new aaMode/aaWidth,
+  and the arch/pencil/topo sections that were previously only hashed via
+  stale local-member copies).
 - **2026-04-18 (pm)** -- Housekeeping. (1) Registry cleanup on node
   destruction: added `~SpectralSurfaceOp`, `~SpectralWireframeOp`,
   `~SpectralShadowCatcherOp`, `~SpectralMeshPropertiesOp` destructors
