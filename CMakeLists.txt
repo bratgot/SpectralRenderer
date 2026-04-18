@@ -311,7 +311,7 @@ endif()
 add_library(SpectralRender SHARED
     src/SpectralRenderIop.cpp src/SpectralSurfaceOp.cpp src/SpectralVDBRead.cpp src/SpectralVolumeMaterial.cpp
     src/SpectralEnvLight.cpp src/SpectralStudioLight.cpp src/SpectralVolMerge.cpp
-    src/SpectralWireframeOp.cpp src/SpectralShadowCatcherOp.cpp
+    src/SpectralDraftingOp.cpp src/SpectralShadowCatcherOp.cpp
     src/SpectralMeshPropertiesOp.cpp
 )
 target_include_directories(SpectralRender PRIVATE ${SPECTRAL_INCLUDES})

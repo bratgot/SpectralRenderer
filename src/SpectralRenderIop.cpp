@@ -1,6 +1,6 @@
 #include "SpectralRenderIop.h"
 #include "SpectralSurfaceOp.h"
-#include "SpectralWireframeOp.h"
+#include "SpectralDraftingOp.h"
 #include "SpectralShadowCatcherOp.h"
 #include "SpectralMeshPropertiesOp.h"
 #include <chrono>
@@ -4226,10 +4226,10 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage,
                         }
                     }
 
-                    // Check for SpectralWireframe node assigned to this material
+                    // Check for SpectralDrafting node assigned to this material
                     {
                         std::string shaderPath = surfaceShader.GetPath().GetString();
-                        const auto& wireReg = SpectralWireframeOp::GetRegistry();
+                        const auto& wireReg = SpectralDraftingOp::GetRegistry();
                         for (const auto& entry : wireReg) {
                             if (shaderPath.find(entry.first) != std::string::npos) {
                                 _wireframeEnable = true;
@@ -4267,7 +4267,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage,
                                 _wireAAMode = entry.second.aaMode;
                                 _wireAAWidth = entry.second.aaWidth;
                                 mat.opacity = 0.02f;
-                                SLOG("SpectralRender: wireframe from SpectralWireframe '%s'\n",
+                                SLOG("SpectralRender: wireframe from SpectralDrafting '%s'\n",
                                         entry.first.c_str());
                                 break;
                             }
@@ -5461,7 +5461,7 @@ void SpectralRenderIop::append(Hash& hash)
     // registry but fail to invalidate the Iop's cached frame until the user
     // scrubbed the timeline. Classic CLAUDE.md gotcha #1.
     {
-        const auto& wireReg = SpectralWireframeOp::GetRegistry();
+        const auto& wireReg = SpectralDraftingOp::GetRegistry();
         hash.append((int)wireReg.size());
         for (const auto& kv : wireReg) {
             const auto& p = kv.second;
