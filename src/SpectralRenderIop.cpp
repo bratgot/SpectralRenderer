@@ -1943,6 +1943,12 @@ void SpectralRenderIop::_validate(bool forReal)
         }
     }
 
+    // Reset the wireframe-overlay sticky flag. It gets re-enabled inside
+    // the material-processing loop when a live Drafting material is found.
+    // Without this reset, disabling or deleting the Drafting node would
+    // still leave the overlay pass running from a previous validate.
+    _wireframeEnable = false;
+
     // Read current frame from Nuke's timeline
     int currentFrame = static_cast<int>(outputContext().frame());
     if (currentFrame != _frame) {
