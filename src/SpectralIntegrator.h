@@ -77,6 +77,7 @@ struct SpectralCamera {
 
     // Shadow catcher material IDs
     std::unordered_set<int> shadowCatcherMatIds;
+    std::unordered_set<int> noShadowReceiveMatIds;
     // Materials that do NOT cast shadows: shadow rays pass through as if
     // invisible. Populated by SpectralRenderIop from
     // SpectralMeshPropertiesOp::castsShadows=false entries.

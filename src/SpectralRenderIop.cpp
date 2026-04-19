@@ -1444,22 +1444,30 @@ int SpectralRenderIop::knob_changed(Knob* k)
         _progressiveSppDone = 0;
     }
 
-    // Update DAG node tile colour based on device mode.
+    // Update DAG node tile colour based on device mode OR scanline compat.
     // (The CPU/GPU/AUTO text label was dropped at user request — the
     // device is still visible via tile colour alone.)
-    if (k->is("device_mode") || k->is("showPanel")) {
+    // Scanline compat mode overrides to grey so the inline-RGB render
+    // path is visually obvious in the DAG -- avoids confusion between
+    // compat and spectral paths which behave differently in subtle ways.
+    if (k->is("device_mode") || k->is("showPanel") || k->is("scanline_compat")) {
         int idx = std::max(0, std::min(_deviceMode, 2));
 
-        // Tile color: CPU=blue tint, GPU=green tint, Auto=amber tint
+        // Tile color: CPU=blue tint, GPU=green tint, Auto=amber tint.
+        // Compat override: neutral grey so it stands out clearly.
         unsigned int tileColors[] = { 0x1a3a5aFF, 0x1a4a2aFF, 0x3a3a1aFF };
+        unsigned int color = _scanlineCompat ? 0x606060FFu : tileColors[idx];
         std::string nm(node_name());
         std::string cmd = "import nuke; n = nuke.toNode('" + nm + "')\n"
-                          "if n: n['tile_color'].setValue(" + std::to_string(tileColors[idx]) + ")";
+                          "if n: n['tile_color'].setValue(" + std::to_string(color) + ")";
         script_command(cmd.c_str(), true, false);
 
         // Clear any label that a previous version of the node may have set.
         if (Knob* lk = knob("label")) lk->set_text("");
         if (k->is("device_mode")) return 1;
+        // scanline_compat intentionally falls through -- the later
+        // knob_changed block at k->is("scanline_compat") handles the
+        // built-in-light enable/disable toggle AND returns 1 there.
     }
 
     // Shutter preset -> apply 180-degree shutter values (0.5-frame exposure)
@@ -2273,6 +2281,7 @@ void SpectralRenderIop::_LoadStage()
     _projCameraVP.clear();
     _shadowCatcherMatIds.clear();
     _noShadowCastMatIds.clear();
+    _noShadowReceiveMatIds.clear();
     _camera = SpectralCamera();
     _vdbHasSceneXform = false;
     _volumeXforms.clear();
@@ -3072,6 +3081,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage,
         float   meshPropsDisplayOpacity  = 1.0f;
         bool    meshPropsVisible         = true;
         bool    meshPropsCastsShadows    = true;
+        bool    meshPropsReceivesShadows = true;
         bool    meshPropsHasEntry        = false;
 
         // TODO: replace substring / size==1 matching with prim-path
@@ -3080,35 +3090,77 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage,
         {
             std::string meshPath = prim.GetPath().GetString();
             const auto& meshReg = SpectralMeshPropertiesOp::GetRegistry();
+
+            // Last path component: "/GeoCard1" -> "GeoCard1", "/parent/GeoCard1"
+            // -> "GeoCard1". This is the component we match against the names
+            // in entry.second.targetPrimPaths (which are Nuke Op node_name()
+            // values, e.g. "GeoCard1").
+            std::string meshLeaf;
+            {
+                size_t slash = meshPath.rfind('/');
+                meshLeaf = (slash == std::string::npos) ? meshPath
+                                                        : meshPath.substr(slash + 1);
+            }
+
+            // Two-pass matching:
+            //   1. Preferred: entry.targetPrimPaths contains meshLeaf (exact).
+            //      Populated by SpectralMeshPropertiesOp's upstream walk of
+            //      Geo* source nodes.
+            //   2. Legacy fallback: targetPrimPaths empty AND only one entry
+            //      in the registry. This preserves single-MeshProperties
+            //      single-mesh-scene behaviour for very old setups; new
+            //      scenes should never hit this path.
+            const SpectralMeshPropertiesOp::MeshProps* matched = nullptr;
+            std::string matchedNodeName;
             for (const auto& entry : meshReg) {
-                if (meshPath.find(entry.first) != std::string::npos
-                    || meshReg.size() == 1) {
-                    meshSubdivOverride = entry.second.subdivLevel;
-                    if (entry.second.subdivScheme > 0)
-                        meshSchemeOverride = entry.second.subdivScheme;
-                    meshFlipNormals          = entry.second.flipNormals;
-                    meshNormalMode           = entry.second.normalMode;
-                    meshPropsUseDisplayColor = entry.second.useDisplayColor;
-                    meshPropsDisplayColor    = GfVec3f(
-                        entry.second.displayColor[0],
-                        entry.second.displayColor[1],
-                        entry.second.displayColor[2]);
-                    meshPropsDisplayOpacity  = entry.second.displayOpacity;
-                    meshPropsVisible         = entry.second.visible;
-                    meshPropsCastsShadows    = entry.second.castsShadows;
-                    meshPropsHasEntry        = true;
-                    SLOG("SpectralRender: mesh props for '%s' via node '%s' "
-                         "(level=%d scheme=%d flipN=%d normMode=%d)\n",
-                         meshPath.c_str(), entry.first.c_str(),
-                         meshSubdivOverride, meshSchemeOverride,
-                         (int)meshFlipNormals, meshNormalMode);
-                    break;
+                const auto& targets = entry.second.targetPrimPaths;
+                if (!targets.empty()) {
+                    bool hit = false;
+                    for (const auto& t : targets) {
+                        if (t == meshLeaf) { hit = true; break; }
+                    }
+                    if (hit) {
+                        matched = &entry.second;
+                        matchedNodeName = entry.first;
+                        break;
+                    }
                 }
             }
-            if (!meshPropsHasEntry && !meshReg.empty()) {
-                SLOG("SpectralRender: mesh '%s' - no matching "
+            if (!matched && meshReg.size() == 1 &&
+                meshReg.begin()->second.targetPrimPaths.empty()) {
+                matched = &meshReg.begin()->second;
+                matchedNodeName = meshReg.begin()->first;
+                SLOG("SpectralRender: mesh '%s' using legacy size==1 fallback "
+                     "for MeshProperties '%s' (no targetPrimPaths populated)\n",
+                     meshPath.c_str(), matchedNodeName.c_str());
+            }
+
+            if (matched) {
+                meshSubdivOverride = matched->subdivLevel;
+                if (matched->subdivScheme > 0)
+                    meshSchemeOverride = matched->subdivScheme;
+                meshFlipNormals          = matched->flipNormals;
+                meshNormalMode           = matched->normalMode;
+                meshPropsUseDisplayColor = matched->useDisplayColor;
+                meshPropsDisplayColor    = GfVec3f(
+                    matched->displayColor[0],
+                    matched->displayColor[1],
+                    matched->displayColor[2]);
+                meshPropsDisplayOpacity  = matched->displayOpacity;
+                meshPropsVisible         = matched->visible;
+                meshPropsCastsShadows    = matched->castsShadows;
+                meshPropsReceivesShadows = matched->receivesShadows;
+                meshPropsHasEntry        = true;
+                SLOG("SpectralRender: mesh props for '%s' via node '%s' "
+                     "(level=%d scheme=%d flipN=%d normMode=%d visible=%d castsShadows=%d)\n",
+                     meshPath.c_str(), matchedNodeName.c_str(),
+                     meshSubdivOverride, meshSchemeOverride,
+                     (int)meshFlipNormals, meshNormalMode,
+                     (int)meshPropsVisible, (int)meshPropsCastsShadows);
+            } else if (!meshReg.empty()) {
+                SLOG("SpectralRender: mesh '%s' (leaf '%s') - no matching "
                      "SpectralMeshProperties entry (registry size=%zu)\n",
-                     meshPath.c_str(), meshReg.size());
+                     meshPath.c_str(), meshLeaf.c_str(), meshReg.size());
             }
         }
 
@@ -4313,6 +4365,17 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage,
                         }
                         mat.opacity *= meshPropsDisplayOpacity;
                         // visible=false handled at BVH build via data.visible below.
+                        // castsShadows=false: tag with temp key -1, the block
+                        // after AddMaterial remaps it to the assigned matId.
+                        if (!meshPropsCastsShadows) {
+                            _noShadowCastMatIds.insert(-1);
+                        }
+                        // receivesShadows=false: same tag/remap pattern on a
+                        // different set. Integrator skips shadow tests when
+                        // the shading material is in noShadowReceiveMatIds.
+                        if (!meshPropsReceivesShadows) {
+                            _noShadowReceiveMatIds.insert(-1);
+                        }
                     }
 
                     matId = _scene->AddMaterial(mat);
@@ -4338,6 +4401,11 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage,
                         _noShadowCastMatIds.erase(-1);
                         _noShadowCastMatIds.insert(matId);
                         SLOG("SpectralRender: castsShadows=false for material %d\n", matId);
+                    }
+                    if (_noShadowReceiveMatIds.count(-1)) {
+                        _noShadowReceiveMatIds.erase(-1);
+                        _noShadowReceiveMatIds.insert(matId);
+                        SLOG("SpectralRender: receivesShadows=false for material %d\n", matId);
                     }
 
                     SLOG("SpectralRender: material '%s' — color=(%.2f,%.2f,%.2f) metal=%.2f rough=%.2f opacity=%.2f\n",
@@ -4468,9 +4536,31 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage,
                             }
                             mat.opacity *= meshPropsDisplayOpacity;
                             // visible=false handled at BVH build via data.visible below.
+                            // castsShadows=false: tag with temp key -1 (remapped
+                            // just after AddMaterial).
+                            if (!meshPropsCastsShadows) {
+                                _noShadowCastMatIds.insert(-1);
+                            }
+                            if (!meshPropsReceivesShadows) {
+                                _noShadowReceiveMatIds.insert(-1);
+                            }
                         }
 
                         matId = _scene->AddMaterial(mat);
+
+                        // Remap no-shadow-cast temp key -1 -> assigned matId,
+                        // mirroring the USD path's AddMaterial site.
+                        if (_noShadowCastMatIds.count(-1)) {
+                            _noShadowCastMatIds.erase(-1);
+                            _noShadowCastMatIds.insert(matId);
+                            SLOG("SpectralRender: castsShadows=false for native material %d\n", matId);
+                        }
+                        if (_noShadowReceiveMatIds.count(-1)) {
+                            _noShadowReceiveMatIds.erase(-1);
+                            _noShadowReceiveMatIds.insert(matId);
+                            SLOG("SpectralRender: receivesShadows=false for native material %d\n", matId);
+                        }
+
                         SLOG("SpectralRender: native material '%s' from '%s' — "
                              "color=(%.2f,%.2f,%.2f) metal=%.2f rough=%.2f opacity=%.2f\n",
                              mat.name.c_str(), cur->node_name(),
@@ -4482,6 +4572,51 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage,
                     // Walk to first input that's not a camera
                     cur = (cur->inputs() > 0) ? cur->input(0) : nullptr;
                 }
+            }
+        }
+
+        // ----------------------------------------------------------
+        //   Default-material per-mesh materialisation.
+        //   If we got here with matId == kDefaultMaterialId AND the
+        //   mesh has a cast/receive override, create a fresh material
+        //   for just this mesh so the flag has a unique matId to attach
+        //   to. Without this, the shared default matId would get the
+        //   flag and affect every unbound mesh in the scene.
+        // ----------------------------------------------------------
+        if (matId == kDefaultMaterialId && meshPropsHasEntry
+            && (!meshPropsCastsShadows || !meshPropsReceivesShadows))
+        {
+            SpectralMaterial defMat;
+            defMat.name     = std::string("default_per_mesh_") + prim.GetName().GetString();
+            defMat.baseColor = meshPropsUseDisplayColor
+                               ? meshPropsDisplayColor
+                               : GfVec3f(0.8f, 0.8f, 0.8f);
+            defMat.opacity   = meshPropsDisplayOpacity;
+            defMat.roughness = 0.5f;
+            defMat.metallic  = 0.0f;
+
+            // Tag BEFORE AddMaterial, remap AFTER -- mirror the USD/native
+            // pattern so the integrator flags land on this matId specifically.
+            if (!meshPropsCastsShadows) {
+                _noShadowCastMatIds.insert(-1);
+            }
+            if (!meshPropsReceivesShadows) {
+                _noShadowReceiveMatIds.insert(-1);
+            }
+
+            matId = _scene->AddMaterial(defMat);
+
+            if (_noShadowCastMatIds.count(-1)) {
+                _noShadowCastMatIds.erase(-1);
+                _noShadowCastMatIds.insert(matId);
+                SLOG("SpectralRender: castsShadows=false for per-mesh default material %d (%s)\n",
+                     matId, prim.GetName().GetString().c_str());
+            }
+            if (_noShadowReceiveMatIds.count(-1)) {
+                _noShadowReceiveMatIds.erase(-1);
+                _noShadowReceiveMatIds.insert(matId);
+                SLOG("SpectralRender: receivesShadows=false for per-mesh default material %d (%s)\n",
+                     matId, prim.GetName().GetString().c_str());
             }
         }
 
@@ -4879,11 +5014,13 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage,
 
         pxr::SpectralMeshData data;
         data.id      = prim.GetPath();
-        // SpectralMeshProperties: visible=false gates the mesh out at BVH
-        // build time (SpectralBVH / SpectralIntegrator / SpectralGPU all
-        // check kv.second.visible when iterating meshes). Absent entry
-        // defaults to true.
-        data.visible = true;
+        // SpectralMeshProperties.visible: gates the mesh out at BVH build time
+        // (SpectralBVH / SpectralIntegrator / SpectralGPU all check
+        // kv.second.visible when iterating meshes). With prim-path
+        // registration in place, this only hides the targeted mesh(es),
+        // not every mesh as happened under the old size()==1 fallback.
+        // Absent-entry default is true.
+        data.visible = meshPropsHasEntry ? meshPropsVisible : true;
         data.objectId = _scene->NextObjectId();
 
         // Fan-triangulate each face
@@ -5532,6 +5669,18 @@ void SpectralRenderIop::append(Hash& hash)
             hash.append(kv.second.displayColor[2]);
             hash.append(kv.second.displayOpacity);
             hash.append(kv.second.visible ? 1 : 0);
+            hash.append(kv.second.castsShadows ? 1 : 0);
+            hash.append(kv.second.receivesShadows ? 1 : 0);
+            hash.append(kv.second.doubleSided ? 1 : 0);
+            hash.append(kv.second.orientation);
+            hash.append(kv.second.purpose);
+            // Hash targetPrimPaths so re-wiring the upstream chain (e.g.
+            // adding a GeoCube between the MeshProperties and GeoScene)
+            // properly invalidates the render cache.
+            hash.append((int)kv.second.targetPrimPaths.size());
+            for (const auto& t : kv.second.targetPrimPaths) {
+                hash.append(t.c_str());
+            }
         }
     }
     // Hash camera input (input 0) — re-render when camera moves or changes
@@ -8424,7 +8573,8 @@ void SpectralRenderIop::_EnsureFrameRendered()
     cam.wireNth = _wireNth;
     cam.wireStyle = _wireStyle;
     cam.shadowCatcherMatIds = _shadowCatcherMatIds;
-    cam.noShadowCastMatIds  = _noShadowCastMatIds;
+    cam.noShadowCastMatIds    = _noShadowCastMatIds;
+    cam.noShadowReceiveMatIds = _noShadowReceiveMatIds;
     cam.fStop = _fStop;
     cam.focusDistance = _focusDistance;
     cam.volumeSpp = _volumeSpp;

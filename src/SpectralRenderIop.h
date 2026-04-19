@@ -336,6 +336,7 @@ private:
     std::unordered_map<int, pxr::GfMatrix4d> _projCameraVP;  // matId → viewProjection
     std::unordered_set<int> _shadowCatcherMatIds;  // materials acting as shadow catchers
     std::unordered_set<int> _noShadowCastMatIds;   // materials with castsShadows=false
+    std::unordered_set<int> _noShadowReceiveMatIds;// materials with receivesShadows=false
     GLuint _glVolTempTex = 0;
     int    _glVolTexFrame = -1;
     int    _glVolTexResX = 0, _glVolTexResY = 0, _glVolTexResZ = 0;

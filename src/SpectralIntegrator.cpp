@@ -70,6 +70,12 @@ static bool s_scanlineCompat = false;
 // from any call-site. Same pattern as s_scanlineCompat.
 static const std::unordered_set<int>* s_noShadowCastMatIds = nullptr;
 
+// Pointer to the camera's noShadowReceiveMatIds. When a shading material
+// is in this set, the shadow-ray trace is skipped and the surface is
+// treated as fully illuminated. Mirrors s_noShadowCastMatIds but checked
+// at the shading-site (receiver) rather than the ray-hit site (blocker).
+static const std::unordered_set<int>* s_noShadowReceiveMatIds = nullptr;
+
 void SpectralIntegrator::RenderFrame(
     const SpectralScene&  scene,
     const SpectralCamera& camera,
@@ -88,7 +94,8 @@ void SpectralIntegrator::RenderFrame(
     int                   numVolumes)
 {
     s_scanlineCompat = camera.scanlineCompat;
-    s_noShadowCastMatIds = &camera.noShadowCastMatIds;
+    s_noShadowCastMatIds    = &camera.noShadowCastMatIds;
+    s_noShadowReceiveMatIds = &camera.noShadowReceiveMatIds;
 
     // Compute white balance correction for neutral rendering
     // The spectral round-trip (RGB→spectral→XYZ→RGB) introduces a colour tint.
@@ -511,6 +518,16 @@ void SpectralIntegrator::RenderFrame(
                                             int numShadowSamples = softShadow ? SOFT_SHADOW_SAMPLES_CPU : 1;
                                             float shadowAccum = 0.f;
 
+                                            // receivesShadows=false on this mesh: skip the shadow ray
+                                            // trace entirely, surface behaves as fully unoccluded for
+                                            // all lights. shadowAccum stays at 0, visibility = 1.
+                                            bool skipShadow = (s_noShadowReceiveMatIds &&
+                                                               hit.tri &&
+                                                               s_noShadowReceiveMatIds->count(hit.tri->materialId) > 0);
+                                            if (skipShadow) {
+                                                numShadowSamples = 0;  // loop body never executes
+                                            }
+
                                             // Build a tangent frame at L for jittering samples on the disc.
                                             GfVec3f Tu, Tv;
                                             if (softShadow) {
@@ -552,7 +569,9 @@ void SpectralIntegrator::RenderFrame(
                                                     if (!noCast) shadowAccum += 1.f;
                                                 }
                                             }
-                                            float visibility = 1.f - shadowAccum / float(numShadowSamples);
+                                            float visibility = (numShadowSamples > 0)
+                                                ? (1.f - shadowAccum / float(numShadowSamples))
+                                                : 1.f;  // skipShadow path: no samples taken, fully lit
                                             if (visibility < 1e-4f) continue;
 
                                             float contrib = NdotL * atten * intensity * float(1.0 / M_PI) * visibility;
@@ -588,6 +607,15 @@ void SpectralIntegrator::RenderFrame(
 
                                 // Shadow catcher: shadow-only alpha, no radiance
                                 if (camera.shadowCatcherMatIds.count(hit.tri->materialId) > 0) {
+                                    // DIAG2: fires when a hit is being treated as shadow catcher
+                                    {
+                                        static int _d2 = 0;
+                                        if (_d2 < 3) {
+                                            _d2++;
+                                            fprintf(stderr, "DIAG2 shadow-catcher branch hit: matId=%d objId=%d (scMask size=%zu)\n",
+                                                 hit.tri->materialId, hit.tri->objectId, camera.shadowCatcherMatIds.size());
+                                        }
+                                    }
                                     float bw = 1.f - float(hit.u) - float(hit.v);
                                     GfVec3f N = hit.tri->n0 * bw + hit.tri->n1 * float(hit.u) + hit.tri->n2 * float(hit.v);
                                     float nlen = N.GetLength();
@@ -1676,6 +1704,18 @@ float SpectralIntegrator::_ShadeSpectral(
     float gatherRadius,
     const SpectralVolume* const* volumes, int numVolumes)
 {
+    // DIAG1: confirm _ShadeSpectral is being called, show matId
+    {
+        static int _d1 = 0;
+        if (_d1 < 4) {
+            _d1++;
+            fprintf(stderr, "DIAG1 _ShadeSpectral call: matId=%d setSize=%zu inSet=%d\n",
+                 tri.materialId,
+                 s_noShadowReceiveMatIds ? s_noShadowReceiveMatIds->size() : (size_t)0,
+                 (s_noShadowReceiveMatIds && s_noShadowReceiveMatIds->count(tri.materialId) > 0) ? 1 : 0);
+        }
+    }
+
     // ScanlineRender compat: no lights = constant shader (full material colour)
     if (s_scanlineCompat && scene.GetLights().empty()) {
         // Resolve texture before returning constant colour
@@ -1775,7 +1815,11 @@ float SpectralIntegrator::_ShadeSpectral(
             bool inShadow = false;
             float shadowTransmit = 1.f;
             GfVec3f shadowOrigin = hitPos + N * 0.01f;
-            for (int sb = 0; sb < 8; ++sb) {
+            // receivesShadows=false on this mesh: skip the whole shadow
+            // loop, treat as fully lit.
+            bool skipShadow = (s_noShadowReceiveMatIds &&
+                               s_noShadowReceiveMatIds->count(tri.materialId) > 0);
+            for (int sb = 0; sb < 8 && !skipShadow; ++sb) {
                 GfRay shadowRay;
                 shadowRay.SetPointAndDirection(GfVec3d(shadowOrigin), GfVec3d(L));
                 SpectralBVH::Hit shadowHit = bvh.Intersect(shadowRay, rayTime);
@@ -2177,7 +2221,10 @@ float SpectralIntegrator::_ShadeSpectral(
                 bool inShadow = false;
                 float shadowTransmit = 1.f;
                 GfVec3f sOrig = bounceOrigin + bounceN * 0.01f;
-                for (int sb = 0; sb < 8; ++sb) {
+                // receivesShadows=false on the bounce surface: skip.
+                bool skipShadow = (s_noShadowReceiveMatIds &&
+                                   s_noShadowReceiveMatIds->count(hitTri.materialId) > 0);
+                for (int sb = 0; sb < 8 && !skipShadow; ++sb) {
                     GfRay shadowRay;
                     shadowRay.SetPointAndDirection(GfVec3d(sOrig), GfVec3d(L));
                     SpectralBVH::Hit shadowHit = bvh.Intersect(shadowRay, rayTime);

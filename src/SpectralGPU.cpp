@@ -968,6 +968,21 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
                         "mask range; their shadows will render normally\n", nscOverflow);
     }
 
+    // No-shadow-receive bitmask: matIds from SpectralMeshProperties where
+    // receivesShadows=false. Shading in the kernel will skip the shadow-ray
+    // trace at these surfaces, treating them as fully lit for every light.
+    unsigned int nsrMask = 0;
+    int nsrOverflow = 0;
+    for (int id : camera.noShadowReceiveMatIds) {
+        if (id >= 0 && id < 32) nsrMask |= (1u << id);
+        else if (id >= 32) nsrOverflow++;
+    }
+    launchParams.noShadowRecvMask = nsrMask;
+    if (nsrOverflow > 0) {
+        fprintf(stderr, "SpectralGPU: %d no-shadow-receive materials exceed 32-bit "
+                        "mask range; shadows on those surfaces will render normally\n", nsrOverflow);
+    }
+
     // UV projection lookup buffers
     if (_d_uvTriIndex) { cudaFree(reinterpret_cast<void*>(_d_uvTriIndex)); _d_uvTriIndex = 0; }
     if (_d_uvBaryU)    { cudaFree(reinterpret_cast<void*>(_d_uvBaryU));    _d_uvBaryU = 0; }

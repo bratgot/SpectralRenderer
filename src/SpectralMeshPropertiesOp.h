@@ -11,6 +11,7 @@
 #include <DDImage/Knobs.h>
 #include <unordered_map>
 #include <string>
+#include <vector>
 
 #include "HdSpectralApi.h"
 
@@ -57,6 +58,22 @@ public:
         int   purpose = 0;
         bool  visible = true;
         bool  castsShadows = true;
+        bool  receivesShadows = true;
+
+        // Names of upstream geometry-producing Nuke nodes whose output
+        // prims this MeshProperties should target. Populated in
+        // RegisterParams() by walking the input(0) chain upstream and
+        // collecting Op::node_name() of geometry-producer Ops (GeoCard,
+        // GeoCube, etc.) that flow through this node.
+        //
+        // SpectralRenderIop matches a USD mesh prim path against this
+        // list by checking whether the path's last component equals
+        // any entry here. E.g. targetPrimPaths contains "GeoCard1" ->
+        // mesh "/GeoCard1" matches.
+        //
+        // Empty vector means "match everything" (backwards-compat with
+        // scenes that pre-date prim-path registration).
+        std::vector<std::string> targetPrimPaths;
     };
     static std::unordered_map<std::string, MeshProps>& GetRegistry();
     void RegisterParams();
@@ -81,4 +98,5 @@ private:
     int   _purpose = 0;
     bool  _visible = true;
     bool  _castsShadows = true;
+    bool  _receivesShadows = true;
 };

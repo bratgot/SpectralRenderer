@@ -209,6 +209,11 @@ struct LaunchParams {
     // SpectralMeshProperties::castsShadows=false. Same 32-material cap
     // as shadowCatcherMask -- overflow is logged host-side.
     unsigned int       noShadowCastMask;
+    // Non-shadow-receiving materials: surfaces with these matIds skip
+    // the shadow-ray trace at their shade point, behaving as fully lit.
+    // Set via SpectralMeshProperties::receivesShadows=false. Same 32-material
+    // cap as noShadowCastMask.
+    unsigned int       noShadowRecvMask;
 
     // UV projection lookup (one entry per pixel, built CPU-side)
     int*               uvTriIndex;      // triangle index per pixel (-1 = empty)

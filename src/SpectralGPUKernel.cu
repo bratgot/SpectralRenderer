@@ -619,7 +619,7 @@ static __forceinline__ __device__ float3 sampleLightDir(
 // ---------------------------------------------------------------------------
 static __forceinline__ __device__ float shadeHit(
     const GPUMaterial& mat, float3 N, float3 V, float3 hitPos, float lambda,
-    unsigned int& rngSeed)
+    unsigned int& rngSeed, int matId)
 {
     float radiance = 0.f;
 
@@ -639,7 +639,13 @@ static __forceinline__ __device__ float shadeHit(
             float shadowTransmit = 1.f;
             float3 sOrig = make_float3(hitPos.x+N.x*0.01f, hitPos.y+N.y*0.01f, hitPos.z+N.z*0.01f);
 
-            for (int sb = 0; sb < 8; ++sb) {
+            // receivesShadows=false on this surface: skip the whole shadow-ray
+            // loop, leave inShadow=false / shadowTransmit=1.0, behave as fully
+            // lit. Mirror of the CPU spectral-site treatment.
+            bool skipShadow = (matId >= 0 && matId < 32 &&
+                               (params.noShadowRecvMask & (1u << matId)));
+
+            for (int sb = 0; sb < 8 && !skipShadow; ++sb) {
                 unsigned int sp0=0,sp1=0,sp2=0,sp3=__float_as_uint(1e30f),sp4=0,sp5=0,sp6=0;
                 optixTrace(params.traversable, sOrig, L,
                            1e-4f, 1e30f, 0.f, OptixVisibilityMask(0xFF),
@@ -1718,7 +1724,7 @@ extern "C" __global__ void __raygen__spectral()
                 if (params.scanlineCompat && params.lightCount == 0) {
                     radiance = spectralReflectance(mat, lambda);
                 } else {
-                    radiance = shadeHit(mat, N, V, hitPos, lambda, seed);
+                    radiance = shadeHit(mat, N, V, hitPos, lambda, seed, matId);
                 }
                 radiance *= mat.opacity;
 
@@ -2086,7 +2092,7 @@ extern "C" __global__ void __raygen__spectral()
 
                 // Direct lighting at primary hit (scaled by opacity for premultiplied alpha)
                 unsigned int shadowSeed = seed + 50u;
-                radiance = shadeHit(mat, N, V, hitPos, lambda, shadowSeed) * mat.opacity;
+                radiance = shadeHit(mat, N, V, hitPos, lambda, shadowSeed, matId) * mat.opacity;
 
                 // Bounce rays with refraction support
                 float throughput = 1.f;
@@ -2205,7 +2211,7 @@ extern "C" __global__ void __raygen__spectral()
                     // Skip direct lighting inside transparent objects
                     bool insideGlass = (!isEntering && bMat->opacity < 0.99f);
                     if (!insideGlass)
-                        radiance += throughput * shadeHit(*bMat, bN, bV, bOrigin, lambda, bSeed);
+                        radiance += throughput * shadeHit(*bMat, bN, bV, bOrigin, lambda, bSeed, bMatId);
                 }
             } else {
             spectral_miss:
