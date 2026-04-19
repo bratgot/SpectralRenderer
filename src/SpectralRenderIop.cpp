@@ -5,6 +5,8 @@
 #include "SpectralMeshPropertiesOp.h"
 #include <chrono>
 #include <cstdlib>
+#include <unordered_set>
+#include <vector>
 
 // Debug logging — suppress during scrub for performance
 static bool s_spectralLogEnabled = true;
@@ -1884,6 +1886,63 @@ int SpectralRenderIop::knob_changed(Knob* k)
 // ---------------------------------------------------------------------------
 void SpectralRenderIop::_validate(bool forReal)
 {
+    // --------------------------------------------------------------------
+    // Registry cleanup: walk upstream Ops, collect live node names,
+    // erase stale entries from the four Spectral*Op static registries.
+    //
+    // Why: Nuke's Delete key does NOT call the Op destructor -- the Op
+    // stays alive on the undo stack. Destructor-based cleanup (which
+    // exists) only fires on session-exit / rare reload paths, so
+    // registries accumulate stale entries between Delete / rename /
+    // undo / redo cycles.
+    //
+    // Walk is iterative BFS via a stack, so no recursion-depth concerns
+    // and no need for <functional>. The live-names set doubles as the
+    // visited guard (cycles self-terminate via insert's .second flag).
+    //
+    // Scope: only upstream of THIS SpectralRender is considered live.
+    // A second SpectralRender with a disjoint chain will transiently
+    // erase its entries here; its own _validate re-adds them. No
+    // rendering correctness issue, just redundant work for the rare
+    // multi-SpectralRender script.
+    // --------------------------------------------------------------------
+    {
+        std::unordered_set<std::string> liveNames;
+        std::vector<Op*> toVisit;
+        toVisit.push_back(this);
+        while (!toVisit.empty()) {
+            Op* op = toVisit.back();
+            toVisit.pop_back();
+            if (!op) continue;
+            const std::string nm = op->node_name();
+            if (!liveNames.insert(nm).second) continue;
+            for (int i = 0; i < op->inputs(); ++i) {
+                toVisit.push_back(op->input(i));
+            }
+        }
+
+        auto prune = [&liveNames](auto& reg) {
+            int erased = 0;
+            for (auto it = reg.begin(); it != reg.end(); ) {
+                if (liveNames.find(it->first) == liveNames.end()) {
+                    it = reg.erase(it);
+                    ++erased;
+                } else {
+                    ++it;
+                }
+            }
+            return erased;
+        };
+        int e = 0;
+        e += prune(SpectralSurfaceOp::GetRegistry());
+        e += prune(SpectralDraftingOp::GetRegistry());
+        e += prune(SpectralShadowCatcherOp::GetRegistry());
+        e += prune(SpectralMeshPropertiesOp::GetRegistry());
+        if (e > 0) {
+            SLOG("SpectralRender: pruned %d stale registry entries\n", e);
+        }
+    }
+
     // Read current frame from Nuke's timeline
     int currentFrame = static_cast<int>(outputContext().frame());
     if (currentFrame != _frame) {

@@ -118,15 +118,16 @@ void SpectralMeshPropertiesOp::knobs(Knob_Callback f)
         );
         Divider(f);
         Int_knob(f, &_subdivLevel, "subdiv_level", "level");
-        SetRange(f, 0, 6);
+        SetRange(f, 0, 4);
         KnobModifiesAttribValues(f);
         Tooltip(f, "Subdivision iterations at render time.\n"
                    "0 = use SpectralRender node's global setting\n"
                    "1 = light (4x faces)\n"
                    "2 = medium (16x faces) -- good default\n"
                    "3 = high (64x faces) -- hero assets\n"
-                   "4+ = very high -- close-up detail\n\n"
-                   "Each level quadruples the face count.");
+                   "4 = very high (256x faces) -- close-up detail\n\n"
+                   "Each level quadruples the face count. OpenSubdiv\n"
+                   "clamps internally at 4; higher values render the same.");
         Enumeration_knob(f, &_subdivScheme, kSubdivSchemeNames, "subdiv_scheme", "scheme");
         KnobModifiesAttribValues(f);
         Tooltip(f, "Subdivision algorithm:\n\n"
