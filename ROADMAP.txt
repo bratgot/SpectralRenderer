@@ -10,7 +10,7 @@ rather than rewrite -- context rot beats missing context.
 
 ## Current status (April 2026)
 
-Phase 17 + infrastructure complete. The renderer has:
+Phase 17 + 30 + infrastructure complete. The renderer has:
 - Spectral path tracing (hero wavelength, 380-780nm, CIE 1931 2deg observer)
 - CPU path via Embree 4, GPU path via OptiX 9 / CUDA 12.6
 - UsdPreviewSurface materials with spectral extensions (dispersion, thin-film,
@@ -18,11 +18,16 @@ Phase 17 + infrastructure complete. The renderer has:
 - Volumes via OpenVDB / NanoVDB, multi-volume support, fire & explosions
 - HDRI / studio / sun+sky lighting
 - Shadow catcher material (AOV-style compositing surface)
-- Artistic wireframe overlay (6 styles incl. pencil sketch & topographic)
+- Artistic drafting overlay (6 styles incl. pencil sketch & topographic)
 - SpectralRenderIop frontend for Nuke 17 node graph
 - Hydra render delegate stub for Hydra viewer path (Phase 1 only)
 - OpenSubdiv Catmull-Clark for displacement and smooth surfaces
 - SpectralMeshProperties per-mesh override node
+- GPU object motion blur (Phase 30) via OptiX 2-keyframe motion GAS
+- ScanlineRender compatibility mode with correct env lighting, double-sided
+  shading, hard + soft shadows
+- Per-mesh overrides via prim-path registration: visible, castsShadows
+  (2026-04-19)
 
 Stack: Windows 11 + VS2022, Nuke 17, CUDA 12.6, OptiX 9.0, RTX 5060 Ti.
 
@@ -51,17 +56,21 @@ rather than priority. Treat them as labels.
 | 24    | Shadow catcher (all 4 render paths) | Done |
 | 26    | Bidirectional volume/geometry shadows | Done |
 | 27    | Volume self-shadow improvements | Done |
+| 30    | Object motion blur (GPU motion GAS + CPU keyframe) | Done |
+| 30.1  | SpectralMeshProperties prim-path registration      | Done |
+| 30.2  | castsShadows + visible wiring (per-mesh overrides) | Done |
 | **18**| Prebuilt materials & shader library | Pending |
 | **19**| Out-of-core rendering (scene larger than VRAM) | Pending |
 | **20**| Extended light types (mesh lights, portal lights) | Pending |
 | **21**| SpectralSurface Metal/PBR expansion | Pending |
 | **23**| Multi-GPU rendering | Pending |
+| **24.1**| Shadow Catcher v2 (reflection/indirect catch + AOVs) | Pending |
 | **25**| Validation suite & showcase assets | Pending |
 | **28**| Gravitational lensing, Einstein ring | Future |
 | **29**| Hydra render delegate (HdSpectral) full | Future |
-| **30**| Object motion blur (CPU+GPU) | Done |
 | **31**| Linux build (GCC/Clang) | Pending |
 | **32**| Marketing website / product page | Pending |
+| **33**| SpectralVelocity node (vertex-velocity motion blur) | Pending |
 
 ---
 
@@ -69,57 +78,98 @@ rather than priority. Treat them as labels.
 
 Ordered roughly by value. Nothing here is committed; reorder as needed.
 
-### SpectralVelocity node (deformation motion blur)
+### DAG-walk registry cleanup
 
-Currently we capture motion from transform chains (GeoTransform animation) but
-not from vertex-level deformation -- animated geometry where individual points
-move relative to the object (cloth sim, morph targets, rigged characters,
-procedural deformation). For true per-vertex motion blur we need an explicit
-velocity attribute.
+Destructors on SpectralSurfaceOp / SpectralDraftingOp / SpectralShadowCatcherOp
+/ SpectralMeshPropertiesOp DON'T fire when the user deletes the node in Nuke
+-- Nuke keeps the Op alive on the undo stack. Registry entries persist.
 
-A `SpectralVelocity` GeomOp would:
-- Sample mesh points at frame t and t+1 (or t-0.5 / t+0.5 for centered).
-- Compute per-vertex velocity = (pt_close - pt_open) * fps, stored as a
-  float3 primvar (Houdini names it `v`, same convention works here).
-- Write it onto the USD mesh as a `primvars:velocities` attribute so it
-  survives the scene graph into `_LoadFromPxrStage`.
+Fix: in SpectralRenderIop::_validate, walk the live Op tree, collect all
+names, erase registry entries whose key is not in that set. O(N*M) but N
+and M are small. Belt-and-braces: the existing destructors are kept for
+session-exit and rare reload paths.
 
-SpectralRenderIop changes:
-- Read the velocity primvar alongside points when building SpectralTriangles.
-  If present and object motion blur is on, set each triangle's `v*_close`
-  from `point + v * shutterInterval` rather than from the chain-walk xform.
-  Per-triangle `hasMotion` flag becomes true when any of its vertices has
-  nonzero velocity, OR the transform chain has motion (both paths compose
-  -- rigid xform motion multiplies through velocity).
-- Existing chain-walk path continues to drive rigid-body motion for static
-  meshes; velocity path drives deformation on top.
+### SpectralVelocity node (Phase 33) [REPLACES CHAIN-WALK OBJECT MBLUR]
 
-GPU side: no kernel changes -- the motion GAS already takes arbitrary
-per-vertex close positions, so cloth / rigged characters "just work" once
-the close vertices carry the deformed positions.
+Houdini-style per-vertex velocity attribute (`v` or `primvars:velocities`)
+as the signal for object motion blur, instead of the chain-walk transform
+inference that we shelved in session 2026-04-19. Benefits:
 
-Reference: Houdini's Trail SOP in velocity mode, or the `v` attribute
-convention in Alembic / USD / VDB point caches. The node should accept
-either "compute from animation" (needs a 2-frame sample) or "passthrough
-existing v attribute" (for sim caches that already carry velocity).
+- Explicit input, no ambiguous transform inference
+- Composes naturally with deformation (cloth sim, morphs, rigs)
+- Simpler to reason about and test
+- Survives more complex scene topologies
+
+New Op: `SpectralVelocity` -- takes geometry input, generates per-vertex
+velocity vectors from a connected image (2D velocity channel) or from
+a knob-driven analytic function. Writes `primvars:velocities` onto the
+prim. SpectralRenderIop consumes that primvar when building the close-
+time mesh, producing deformation blur on top of any existing transform
+blur.
+
+### Shadow Catcher v2 (Phase 24.1)
+
+Current `SpectralShadowCatcherOp` exposes three knobs: `shadow_intensity`,
+`shadow_color`, `self_shadow`. That's enough for basic compositing but is
+behind Arnold/Redshift/Cycles feature-for-feature, and several common
+user requests go unserved.
+
+Research (2026-04-19 session) collected feature inventory across Arnold
+shadow_matte, Redshift Matte object-tag, Cycles 3.0+ object flag, and
+ProRender. Synthesis of user requests on Blender devtalk, Octane forums,
+SideFX forums, and VFX workflow articles. Priority-ordered plan:
+
+**Phase A - AOV plumbing (foundational).** Add a dedicated shadow-alpha
+AOV output channel filled at shadow-catcher hits. At each hit, accumulate
+`1 - visibility` into a separate buffer exposed as an extra channel in
+the output. Also add a reflection-catch AOV at same time: same hit point
+but accumulating the specular contribution that would have lit the
+catcher. Single most valuable comp-side addition. Mostly plumbing --
+AOV buffer infrastructure already exists for other channels.
+
+**Phase B - Per-knob granularity on the node.** Split the existing knob
+set to match Arnold/Redshift patterns:
+- existing: `shadow_intensity`, `shadow_color`, `self_shadow`
+- new: `catch_reflections` (bool), `reflection_intensity` (float),
+  `catch_indirect` (bool), `indirect_intensity` (float),
+  `background_mode` (enum: transparent / scene_env / explicit)
+
+Half-day UI plumbing once Phase A lands.
+
+**Phase C - Indirect participation (the Cycles-3.0 upgrade).** Let the
+catcher's real material participate in secondary rays: a chrome car
+above a green shadow-catcher ground should reflect green in its
+underside. Changes what "hitting a shadow catcher" means at the
+integrator level -- surface behaves like a normal surface except for
+primary-camera-ray visibility. Biggest change of the three, but the
+feature that separates "works OK for obvious shots" from "holds up in
+a 4K A/B against a plate." Both CPU and GPU.
+
+**Phase D - Per-light shadow AOVs.** One float channel per light for
+shadow density, enabled via knob (disabled by default -- adds buffer
+memory cost). Most-requested feature from VFX compositors: lets them
+rebalance key-to-fill ratio or push a rim light in comp without a
+re-render. Requires Phase A infrastructure.
+
+**Phase E - Reflection catcher as separate flag.** Following ProRender,
+allow the node to toggle between catching shadows, reflections, or
+both. Requires Phases A + C.
 
 ### Finish SpectralMeshProperties wiring
 
-Currently registered but unused knobs:
-- `doubleSided` -- should control backface culling. Hook into material
-  `isShadowCatcher`-style flag that GPU kernel and CPU integrator honour.
-- `castsShadows` -- per-mesh shadow-ray opacity. Requires a flag in
-  `SpectralTriangle` (or per-material) that shadow rays check before
-  accumulating occlusion.
-- `visible` -- gate mesh-loading loop early. One line.
-- `orientation` -- winding-order flip. Already implicitly supported via
-  `flipNormals`; consider merging concepts or making `orientation` override.
-- `purpose` -- USD "render" vs "proxy" vs "guide". Affects inclusion in
-  render / viewport / bbox-only.
+Prim-path registration landed (session 2026-04-19). Now the following
+registered-but-unused knobs can be wired safely without cross-mesh
+leakage:
 
-Architectural prerequisite: replace substring matching in SpectralRenderIop
-with prim-path registration inside `processScenegraph`. See CLAUDE.md for
-why the current approach is brittle with multiple modifier nodes.
+- `doubleSided` -- backface culling flag per mesh. CPU integrator and GPU
+  kernel both need to check this before rejecting a back-facing hit.
+- `receivesShadows` -- per-mesh flag for skipping shadow tests when
+  shading this surface (mirrors castsShadows but on the receiver side).
+  Useful for CG reflections of set pieces that shouldn't be shadowed.
+- `orientation` -- winding-order flip. Already implicitly supported via
+  `flipNormals`; merge the concepts or make `orientation` override.
+- `purpose` -- USD render/proxy/guide. Affects inclusion in render vs
+  viewport vs bbox.
 
 ### Volumetric refraction
 
@@ -162,43 +212,29 @@ Curated spectral material presets as a picker menu:
 
 Tracked here so we don't forget. Each line is roughly the shape of an issue.
 
-- **SpectralDrafting doesn't motion blur**: the overlay is a post-process
-  pass applied per-pixel after primary hit, using current-frame geometry.
-  With object motion blur on, primary hits are temporally jittered across
-  the shutter but the drafting overlay is stamped once using static screen-
-  space coordinates -- lines stay crisp while the underlying shaded surface
-  smears beneath them. Fix needs either (a) sampling the overlay per
-  rayTime sample in the kernel (expensive -- re-evaluating edge distances
-  per sample), or (b) computing an overlay motion mask and applying a
-  directional blur to the overlay output correlated with the scene's pixel
-  velocity. (b) is cheaper and closer to how 2D post-process line-art
-  typically works in compositing.
 - **SpectralMeshProperties path matching**: `size() == 1` fallback is brittle;
-  breaks with >1 modifier node. Fix in `processScenegraph` via prim-path
-  registration. Tagged with `TODO` in `SpectralRenderIop.cpp`.
-- **Registry cleanup on node rename**: node deletion is now handled by
-  destructors in the four registry-owning Ops (Surface, Drafting,
-  ShadowCatcher, MeshProperties). Rename is NOT handled: Nuke doesn't
-  destroy the Op on rename, so `RegisterParams` inserts a second entry
-  under the new name while the old one lingers. Fix would store previous
-  name in the Op and erase the old entry when `RegisterParams` sees a
-  change. Harmless in typical workflows (you rename before you hook things
-  up); annoying for Ops that are already affecting a render.
-- **Iop::append(hash)**: *done 2026-04-18*. Now called at the top of
-  SpectralRenderIop::append, auto-hashing every knob declared in knobs().
-  Individual knob hashes removed; Drafting registry hash expanded to cover
-  every DraftingParams field (was previously only 4 of 30+).
+  breaks with >1 modifier node. See "Prim-path registration" above -- this is
+  the blocker for several other features.
+- **SpectralDrafting motion blur**: drafting overlay is a post-process pass,
+  not integrated into the motion-blur time sampling. Wireframes on moving
+  objects won't smear with the blur. Acceptable for current scope.
+- **PointInstancer + MeshProperties**: PointInstancer path doesn't consult
+  the MeshProperties registry at all. Separate fix once prim-path reg lands.
 - **Subdivision level clamping**: knob range is 0-6 but OpenSubdiv clamps
   internally to `[1, 4]`. Tooltip implies 6 works. Either raise the internal
   cap or lower the knob max.
-- **Static log string bug**: fixed in recent patch, but the pattern (hardcoded
-  values in diagnostic strings) probably exists elsewhere. Audit when time
-  permits.
 - **Volume compositing on CPU**: volumes currently render behind geometry
   on the CPU path. GPU is correct. Fix the CPU path to match.
 - **Neutral white balance**: only applied in non-scanlineCompat spectral mode.
   Tooltip says so but this is a quirk, not a feature. Consider a dedicated
   white-balance handling that works in all modes.
+- **Compat shadow noise**: soft shadows use N=4 samples per pixel per light.
+  Sufficient for still frames but noisy in sequences with high-softness
+  settings. Promote SOFT_SHADOW_SAMPLES_* to a knob when someone complains.
+- **32-material cap on noShadowCastMask / shadowCatcherMask**: bitmask
+  limits us to 32 unique materials for each flag. Scenes with hero characters
+  + dozens of props could brush this limit. Log warning exists; upgrade to
+  wider type (uint64_t or a proper per-material flag) when needed.
 
 ---
 
@@ -268,6 +304,10 @@ Keeping these explicit prevents scope creep conversations.
 - **Full BSSRDF / volumetric SSS**: the current MPFR-less Christensen-Burley
   SSS is good enough for VFX work. Exact BSSRDF is research territory.
 - **A denoiser of our own**: OIDN and OptiX denoiser cover the need.
+- **Chain-walk object motion blur**: shelved this session in favour of
+  SpectralVelocity (Phase 33). The chain-walk approach requires inferring
+  transforms from the Op tree, which doesn't compose with deformation and
+  had too many edge cases.
 
 ---
 
@@ -276,8 +316,8 @@ Keeping these explicit prevents scope creep conversations.
 No hard timeline, but rough phases:
 
 ### Private beta
-Complete: Phase 18 (materials library) + SpectralMeshProperties polish +
-Phase 31 (Linux). Phase 30 (object motion blur) landed 2026-04-18.
+Complete: Phase 18 (materials library) + Phase 33 (SpectralVelocity) +
+SpectralMeshProperties polish (prim-path reg + wiring) + Phase 31 (Linux).
 
 Ship to a handful of trusted VFX users for feedback.
 
@@ -303,47 +343,37 @@ screenshots, zero production need. Save for when the fundamentals are solid.
 One-line-per-session record of what happened. Add to the top. Serves as a
 memory aid for "what did I work on last week?"
 
-- **2026-04-18 (late pm)** -- Iop::append(hash) cleanup. Replaced 25+ lines
-  of manual per-knob hashing with a single Iop::append(hash) call at the
-  top of SpectralRenderIop::append -- every knob declared in knobs() is
-  now auto-hashed, preempting the entire "I toggle X and nothing happens
-  until I scrub" class of bugs. Drafting registry hash expanded from 4
-  fields to all 30+ DraftingParams fields (including new aaMode/aaWidth,
-  and the arch/pencil/topo sections that were previously only hashed via
-  stale local-member copies).
-- **2026-04-18 (pm)** -- Housekeeping. (1) Registry cleanup on node
-  destruction: added `~SpectralSurfaceOp`, `~SpectralWireframeOp`,
-  `~SpectralShadowCatcherOp`, `~SpectralMeshPropertiesOp` destructors
-  that erase `node_name()` from each class's static registry. Fixes the
-  phantom-override leak on node delete / script close. Rename remains a
-  known-leak (Nuke doesn't destroy Op on rename); tracked in tech debt.
-  (2) Rename SpectralWireframe -> SpectralDrafting. Files:
-  `SpectralWireframeOp.{h,cpp}` -> `SpectralDraftingOp.{h,cpp}`. Class,
-  nested struct (`WireframeParams` -> `DraftingParams`), `CLASS` string,
-  help text, UI heading, error log prefix all updated. Consumer changes
-  in `SpectralRenderIop.cpp` (include + 2 call sites + comment + SLOG),
-  `menu.py`, `CMakeLists.txt`. Kept internal names unchanged: knob group
-  IDs (`wireframe_*_grp` preserve .nk twirl state), `_wireframeEnable` /
-  `_wireThickness` and friends (the underlying rendering feature is
-  still wireframe; the node is Drafting because it does more than wires).
-  Backwards compatibility: .nk files saved with the old `SpectralWireframe`
-  class will not load cleanly -- users need to search/replace in saved
-  scripts, or we add a Python class-alias in menu.py later.
-- **2026-04-18** -- Object motion blur Phase 30 full: (1) chain-walk fix for
-  GeoTransform animation (USG bridge bakes stage at global frame and ignores
-  sampleTime; workaround reads knobs directly via `get_value_at` and composes
-  SRT matrix with ZXY rotation order). (2) Motion Blur tab consolidation --
-  removed latent duplicate `shutter_open`/`shutter_close` knob declarations
-  (line 531-538 + 1378-1381), single canonical declaration under new
-  Motion Blur tab. (3) Shutter defaults corrected from 360 deg to 180 deg
-  (-0.25/+0.25) matching industry standard; `shutter_preset` enum wired into
-  `knob_changed`. (4) GPU motion blur: `usesMotionBlur=true` in pipeline
-  options (always-on, no per-frame recompile), 2-keyframe motion GAS built
-  conditionally on `anyTriHasMotion`, `OptixMotionOptions` with timeBegin=0,
-  timeEnd=1 matching host-side [0,1] normalization; `rayTime` threaded
-  through all 8 trace sites (6 `optixTrace` + 2 `optixTraverse`), through
-  `shadeHit` / `marchVolume` / `marchSingleVolume` signatures, sampled once
-  per primary ray so shadow and bounce rays share time with the primary.
+- **2026-04-19b** -- Prim-path registration for SpectralMeshProperties
+  shipped. Walk-upstream collects Geo* node names from the input chain
+  via Op::input(0) recursion (depth cap 8, stops at another
+  MeshProperties). RenderIop matches by mesh-path last-component against
+  entry.targetPrimPaths; falls back to size()==1 only when targets empty.
+  Fixes Tests 4 and 4b: `visible` and `castsShadows` now apply only to
+  the targeted mesh. Test 5 initial failure diagnosed as missing tag-
+  before-AddMaterial for `_noShadowCastMatIds` at both USD + native
+  material paths; fixed via separate apply_castsshadows_tag_remap patch.
+  Registry hash extended with targetPrimPaths, castsShadows, doubleSided,
+  orientation, purpose. Also: Shadow Catcher v2 research pass (Arnold
+  shadow_matte, Redshift Matte, Cycles 3.0+ refactor, ProRender), feature
+  gap inventory compiled, Phase 24.1 added to roadmap with A-E phasing.
+- **2026-04-19** -- Big session. GPU object motion blur Phase 30 shipped
+  (2-keyframe motion GAS, rayTime threading, 8 trace sites patched).
+  SpectralWireframe renamed to SpectralDrafting (node covers wireframe
+  + arch + pencil + topo). `Iop::append(hash)` base call replaces 25+
+  lines of manual knob hashing. Drafting registry hash expanded from
+  4 to 30+ fields. Registry-cleanup destructors on 4 Op classes (note:
+  do NOT fire on Nuke's Delete key per undo-stack quirk). castsShadows
+  infrastructure CPU+GPU (mask bitmask on GPU, s_noShadowCastMatIds
+  file-scope pointer on CPU). `visible` knob renamed to `spec_visible`
+  to avoid `:nuke:link:visib` Tcl collision with DD::Image built-in.
+  Scanline-compat: auto-disables built-in sun/sky/studio; env lights
+  still contribute. Compat shader rewritten: type-aware Distant/Dome/
+  Sphere handling (was 1/r^2 on everything, broke SpectralEnvLight),
+  double-sided shading (abs NdotL), direct shadow rays, and soft
+  shadows for Sphere lights via N=4 disc samples. MSVC Most Vexing
+  Parse bug hit and fixed (brace-init on GfRay). Tests 2/4/5 deferred
+  to prim-path registration work next session. Chain-walk object mblur
+  shelved in favour of SpectralVelocity (new Phase 33).
 - **2026-04-17** -- SpectralMeshProperties subdivision bug fixes (4 patches),
   normal mode (auto/smooth/faceted/vertex), flip-normals, scanline constant
   shader fix (fallback dome skipped when scanlineCompat on), hash invalidation
