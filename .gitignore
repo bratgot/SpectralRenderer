@@ -7,3 +7,6 @@ echo CMakeCache.txt
 echo CMakeFiles/
 echo *.vcxproj.user
 ) > .gitignore
+# Build artifacts
+build/
+build.log
