@@ -10,3 +10,5 @@ echo *.vcxproj.user
 # Build artifacts
 build/
 build.log
+
+PythonFixes/
