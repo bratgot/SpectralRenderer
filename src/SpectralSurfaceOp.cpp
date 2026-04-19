@@ -644,6 +644,11 @@ SpectralSurfaceOp::GetRegistry()
 
 void SpectralSurfaceOp::RegisterParams()
 {
+    if (node_disabled()) {
+        GetRegistry().erase(node_name());
+        return;
+    }
+
     SpectralParams p;
     p.abbeNumber        = _abbeNumber;
     p.thinFilmThickness = _thinFilmThickness;

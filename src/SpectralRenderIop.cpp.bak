@@ -5,8 +5,6 @@
 #include "SpectralMeshPropertiesOp.h"
 #include <chrono>
 #include <cstdlib>
-#include <unordered_set>
-#include <vector>
 
 // Debug logging — suppress during scrub for performance
 static bool s_spectralLogEnabled = true;
@@ -1446,30 +1444,22 @@ int SpectralRenderIop::knob_changed(Knob* k)
         _progressiveSppDone = 0;
     }
 
-    // Update DAG node tile colour based on device mode OR scanline compat.
+    // Update DAG node tile colour based on device mode.
     // (The CPU/GPU/AUTO text label was dropped at user request — the
     // device is still visible via tile colour alone.)
-    // Scanline compat mode overrides to grey so the inline-RGB render
-    // path is visually obvious in the DAG -- avoids confusion between
-    // compat and spectral paths which behave differently in subtle ways.
-    if (k->is("device_mode") || k->is("showPanel") || k->is("scanline_compat")) {
+    if (k->is("device_mode") || k->is("showPanel")) {
         int idx = std::max(0, std::min(_deviceMode, 2));
 
-        // Tile color: CPU=blue tint, GPU=green tint, Auto=amber tint.
-        // Compat override: neutral grey so it stands out clearly.
+        // Tile color: CPU=blue tint, GPU=green tint, Auto=amber tint
         unsigned int tileColors[] = { 0x1a3a5aFF, 0x1a4a2aFF, 0x3a3a1aFF };
-        unsigned int color = _scanlineCompat ? 0x606060FFu : tileColors[idx];
         std::string nm(node_name());
         std::string cmd = "import nuke; n = nuke.toNode('" + nm + "')\n"
-                          "if n: n['tile_color'].setValue(" + std::to_string(color) + ")";
+                          "if n: n['tile_color'].setValue(" + std::to_string(tileColors[idx]) + ")";
         script_command(cmd.c_str(), true, false);
 
         // Clear any label that a previous version of the node may have set.
         if (Knob* lk = knob("label")) lk->set_text("");
         if (k->is("device_mode")) return 1;
-        // scanline_compat intentionally falls through -- the later
-        // knob_changed block at k->is("scanline_compat") handles the
-        // built-in-light enable/disable toggle AND returns 1 there.
     }
 
     // Shutter preset -> apply 180-degree shutter values (0.5-frame exposure)
@@ -1544,13 +1534,6 @@ int SpectralRenderIop::knob_changed(Knob* k)
     if (k->is("scanline_compat") || k->is("vdb_3d_preview") || k->is("vdb_show_points") || k->is("vdb_shaded") || k->is("vdb_viewport_res") || k->is("vdb_point_density") || k->is("vdb_point_size") || k->is("vdb_show_bbox") || k->is("vdb_fast_scrub") || k->is("vp_shadow_pcf") || k->is("vp_vol_shadow") || k->is("vp_env_reflections") || k->is("vp_geo_reflections") || k->is("vp_vol_reflections") || k->is("vp_refl_steps")) {
         _vdbPreviewDirty = true; _vdbPreviewPoints.clear();
         if (k->is("vdb_fast_scrub") || k->is("vdb_viewport_res")) _vdbLoadedPath.clear();
-        // Grey out built-in-light knob in compat mode so users see why their
-        // sun/sky/studio settings aren't contributing. Value is preserved --
-        // toggling compat off restores their setting as-was.
-        if (k->is("scanline_compat")) {
-            if (Knob* bl = knob("use_builtin_light"))
-                bl->enable(!_scanlineCompat);
-        }
         return 1;
     }
     if (k->is("vdb_cache_clear")) {
@@ -1886,69 +1869,6 @@ int SpectralRenderIop::knob_changed(Knob* k)
 // ---------------------------------------------------------------------------
 void SpectralRenderIop::_validate(bool forReal)
 {
-    // --------------------------------------------------------------------
-    // Registry cleanup: walk upstream Ops, collect live node names,
-    // erase stale entries from the four Spectral*Op static registries.
-    //
-    // Why: Nuke's Delete key does NOT call the Op destructor -- the Op
-    // stays alive on the undo stack. Destructor-based cleanup (which
-    // exists) only fires on session-exit / rare reload paths, so
-    // registries accumulate stale entries between Delete / rename /
-    // undo / redo cycles.
-    //
-    // Walk is iterative BFS via a stack, so no recursion-depth concerns
-    // and no need for <functional>. The live-names set doubles as the
-    // visited guard (cycles self-terminate via insert's .second flag).
-    //
-    // Scope: only upstream of THIS SpectralRender is considered live.
-    // A second SpectralRender with a disjoint chain will transiently
-    // erase its entries here; its own _validate re-adds them. No
-    // rendering correctness issue, just redundant work for the rare
-    // multi-SpectralRender script.
-    // --------------------------------------------------------------------
-    {
-        std::unordered_set<std::string> liveNames;
-        std::vector<Op*> toVisit;
-        toVisit.push_back(this);
-        while (!toVisit.empty()) {
-            Op* op = toVisit.back();
-            toVisit.pop_back();
-            if (!op) continue;
-            const std::string nm = op->node_name();
-            if (!liveNames.insert(nm).second) continue;
-            for (int i = 0; i < op->inputs(); ++i) {
-                toVisit.push_back(op->input(i));
-            }
-        }
-
-        auto prune = [&liveNames](auto& reg) {
-            int erased = 0;
-            for (auto it = reg.begin(); it != reg.end(); ) {
-                if (liveNames.find(it->first) == liveNames.end()) {
-                    it = reg.erase(it);
-                    ++erased;
-                } else {
-                    ++it;
-                }
-            }
-            return erased;
-        };
-        int e = 0;
-        e += prune(SpectralSurfaceOp::GetRegistry());
-        e += prune(SpectralDraftingOp::GetRegistry());
-        e += prune(SpectralShadowCatcherOp::GetRegistry());
-        e += prune(SpectralMeshPropertiesOp::GetRegistry());
-        if (e > 0) {
-            SLOG("SpectralRender: pruned %d stale registry entries\n", e);
-        }
-    }
-
-    // Reset the wireframe-overlay sticky flag. It gets re-enabled inside
-    // the material-processing loop when a live Drafting material is found.
-    // Without this reset, disabling or deleting the Drafting node would
-    // still leave the overlay pass running from a previous validate.
-    _wireframeEnable = false;
-
     // Read current frame from Nuke's timeline
     int currentFrame = static_cast<int>(outputContext().frame());
     if (currentFrame != _frame) {
@@ -2345,8 +2265,6 @@ void SpectralRenderIop::_LoadStage()
     _scene = std::make_unique<pxr::SpectralScene>();
     _projCameraVP.clear();
     _shadowCatcherMatIds.clear();
-    _noShadowCastMatIds.clear();
-    _noShadowReceiveMatIds.clear();
     _camera = SpectralCamera();
     _vdbHasSceneXform = false;
     _volumeXforms.clear();
@@ -3145,8 +3063,6 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage,
         GfVec3f meshPropsDisplayColor    (0.8f, 0.8f, 0.8f);
         float   meshPropsDisplayOpacity  = 1.0f;
         bool    meshPropsVisible         = true;
-        bool    meshPropsCastsShadows    = true;
-        bool    meshPropsReceivesShadows = true;
         bool    meshPropsHasEntry        = false;
 
         // TODO: replace substring / size==1 matching with prim-path
@@ -3155,77 +3071,34 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage,
         {
             std::string meshPath = prim.GetPath().GetString();
             const auto& meshReg = SpectralMeshPropertiesOp::GetRegistry();
-
-            // Last path component: "/GeoCard1" -> "GeoCard1", "/parent/GeoCard1"
-            // -> "GeoCard1". This is the component we match against the names
-            // in entry.second.targetPrimPaths (which are Nuke Op node_name()
-            // values, e.g. "GeoCard1").
-            std::string meshLeaf;
-            {
-                size_t slash = meshPath.rfind('/');
-                meshLeaf = (slash == std::string::npos) ? meshPath
-                                                        : meshPath.substr(slash + 1);
-            }
-
-            // Two-pass matching:
-            //   1. Preferred: entry.targetPrimPaths contains meshLeaf (exact).
-            //      Populated by SpectralMeshPropertiesOp's upstream walk of
-            //      Geo* source nodes.
-            //   2. Legacy fallback: targetPrimPaths empty AND only one entry
-            //      in the registry. This preserves single-MeshProperties
-            //      single-mesh-scene behaviour for very old setups; new
-            //      scenes should never hit this path.
-            const SpectralMeshPropertiesOp::MeshProps* matched = nullptr;
-            std::string matchedNodeName;
             for (const auto& entry : meshReg) {
-                const auto& targets = entry.second.targetPrimPaths;
-                if (!targets.empty()) {
-                    bool hit = false;
-                    for (const auto& t : targets) {
-                        if (t == meshLeaf) { hit = true; break; }
-                    }
-                    if (hit) {
-                        matched = &entry.second;
-                        matchedNodeName = entry.first;
-                        break;
-                    }
+                if (meshPath.find(entry.first) != std::string::npos
+                    || meshReg.size() == 1) {
+                    meshSubdivOverride = entry.second.subdivLevel;
+                    if (entry.second.subdivScheme > 0)
+                        meshSchemeOverride = entry.second.subdivScheme;
+                    meshFlipNormals          = entry.second.flipNormals;
+                    meshNormalMode           = entry.second.normalMode;
+                    meshPropsUseDisplayColor = entry.second.useDisplayColor;
+                    meshPropsDisplayColor    = GfVec3f(
+                        entry.second.displayColor[0],
+                        entry.second.displayColor[1],
+                        entry.second.displayColor[2]);
+                    meshPropsDisplayOpacity  = entry.second.displayOpacity;
+                    meshPropsVisible         = entry.second.visible;
+                    meshPropsHasEntry        = true;
+                    SLOG("SpectralRender: mesh props for '%s' via node '%s' "
+                         "(level=%d scheme=%d flipN=%d normMode=%d)\n",
+                         meshPath.c_str(), entry.first.c_str(),
+                         meshSubdivOverride, meshSchemeOverride,
+                         (int)meshFlipNormals, meshNormalMode);
+                    break;
                 }
             }
-            if (!matched && meshReg.size() == 1 &&
-                meshReg.begin()->second.targetPrimPaths.empty()) {
-                matched = &meshReg.begin()->second;
-                matchedNodeName = meshReg.begin()->first;
-                SLOG("SpectralRender: mesh '%s' using legacy size==1 fallback "
-                     "for MeshProperties '%s' (no targetPrimPaths populated)\n",
-                     meshPath.c_str(), matchedNodeName.c_str());
-            }
-
-            if (matched) {
-                meshSubdivOverride = matched->subdivLevel;
-                if (matched->subdivScheme > 0)
-                    meshSchemeOverride = matched->subdivScheme;
-                meshFlipNormals          = matched->flipNormals;
-                meshNormalMode           = matched->normalMode;
-                meshPropsUseDisplayColor = matched->useDisplayColor;
-                meshPropsDisplayColor    = GfVec3f(
-                    matched->displayColor[0],
-                    matched->displayColor[1],
-                    matched->displayColor[2]);
-                meshPropsDisplayOpacity  = matched->displayOpacity;
-                meshPropsVisible         = matched->visible;
-                meshPropsCastsShadows    = matched->castsShadows;
-                meshPropsReceivesShadows = matched->receivesShadows;
-                meshPropsHasEntry        = true;
-                SLOG("SpectralRender: mesh props for '%s' via node '%s' "
-                     "(level=%d scheme=%d flipN=%d normMode=%d visible=%d castsShadows=%d)\n",
-                     meshPath.c_str(), matchedNodeName.c_str(),
-                     meshSubdivOverride, meshSchemeOverride,
-                     (int)meshFlipNormals, meshNormalMode,
-                     (int)meshPropsVisible, (int)meshPropsCastsShadows);
-            } else if (!meshReg.empty()) {
-                SLOG("SpectralRender: mesh '%s' (leaf '%s') - no matching "
+            if (!meshPropsHasEntry && !meshReg.empty()) {
+                SLOG("SpectralRender: mesh '%s' - no matching "
                      "SpectralMeshProperties entry (registry size=%zu)\n",
-                     meshPath.c_str(), meshLeaf.c_str(), meshReg.size());
+                     meshPath.c_str(), meshReg.size());
             }
         }
 
@@ -4429,18 +4302,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage,
                             mat.baseColor = meshPropsDisplayColor;
                         }
                         mat.opacity *= meshPropsDisplayOpacity;
-                        // visible=false handled at BVH build via data.visible below.
-                        // castsShadows=false: tag with temp key -1, the block
-                        // after AddMaterial remaps it to the assigned matId.
-                        if (!meshPropsCastsShadows) {
-                            _noShadowCastMatIds.insert(-1);
-                        }
-                        // receivesShadows=false: same tag/remap pattern on a
-                        // different set. Integrator skips shadow tests when
-                        // the shading material is in noShadowReceiveMatIds.
-                        if (!meshPropsReceivesShadows) {
-                            _noShadowReceiveMatIds.insert(-1);
-                        }
+                        if (!meshPropsVisible) mat.opacity = 0.f;
                     }
 
                     matId = _scene->AddMaterial(mat);
@@ -4457,20 +4319,6 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage,
                         _shadowCatcherMatIds.erase(-1);
                         _shadowCatcherMatIds.insert(matId);
                         SLOG("SpectralRender: shadow catcher assigned to material %d\n", matId);
-                    }
-
-                    // Remap no-shadow-cast from temp key to actual matId.
-                    // Temp-key insert done just before AddMaterial; see the
-                    // block that tags meshPropsCastsShadows earlier in this function.
-                    if (_noShadowCastMatIds.count(-1)) {
-                        _noShadowCastMatIds.erase(-1);
-                        _noShadowCastMatIds.insert(matId);
-                        SLOG("SpectralRender: castsShadows=false for material %d\n", matId);
-                    }
-                    if (_noShadowReceiveMatIds.count(-1)) {
-                        _noShadowReceiveMatIds.erase(-1);
-                        _noShadowReceiveMatIds.insert(matId);
-                        SLOG("SpectralRender: receivesShadows=false for material %d\n", matId);
                     }
 
                     SLOG("SpectralRender: material '%s' — color=(%.2f,%.2f,%.2f) metal=%.2f rough=%.2f opacity=%.2f\n",
@@ -4600,32 +4448,10 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage,
                                 mat.baseColor = meshPropsDisplayColor;
                             }
                             mat.opacity *= meshPropsDisplayOpacity;
-                            // visible=false handled at BVH build via data.visible below.
-                            // castsShadows=false: tag with temp key -1 (remapped
-                            // just after AddMaterial).
-                            if (!meshPropsCastsShadows) {
-                                _noShadowCastMatIds.insert(-1);
-                            }
-                            if (!meshPropsReceivesShadows) {
-                                _noShadowReceiveMatIds.insert(-1);
-                            }
+                            if (!meshPropsVisible) mat.opacity = 0.f;
                         }
 
                         matId = _scene->AddMaterial(mat);
-
-                        // Remap no-shadow-cast temp key -1 -> assigned matId,
-                        // mirroring the USD path's AddMaterial site.
-                        if (_noShadowCastMatIds.count(-1)) {
-                            _noShadowCastMatIds.erase(-1);
-                            _noShadowCastMatIds.insert(matId);
-                            SLOG("SpectralRender: castsShadows=false for native material %d\n", matId);
-                        }
-                        if (_noShadowReceiveMatIds.count(-1)) {
-                            _noShadowReceiveMatIds.erase(-1);
-                            _noShadowReceiveMatIds.insert(matId);
-                            SLOG("SpectralRender: receivesShadows=false for native material %d\n", matId);
-                        }
-
                         SLOG("SpectralRender: native material '%s' from '%s' — "
                              "color=(%.2f,%.2f,%.2f) metal=%.2f rough=%.2f opacity=%.2f\n",
                              mat.name.c_str(), cur->node_name(),
@@ -4637,51 +4463,6 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage,
                     // Walk to first input that's not a camera
                     cur = (cur->inputs() > 0) ? cur->input(0) : nullptr;
                 }
-            }
-        }
-
-        // ----------------------------------------------------------
-        //   Default-material per-mesh materialisation.
-        //   If we got here with matId == kDefaultMaterialId AND the
-        //   mesh has a cast/receive override, create a fresh material
-        //   for just this mesh so the flag has a unique matId to attach
-        //   to. Without this, the shared default matId would get the
-        //   flag and affect every unbound mesh in the scene.
-        // ----------------------------------------------------------
-        if (matId == kDefaultMaterialId && meshPropsHasEntry
-            && (!meshPropsCastsShadows || !meshPropsReceivesShadows))
-        {
-            SpectralMaterial defMat;
-            defMat.name     = std::string("default_per_mesh_") + prim.GetName().GetString();
-            defMat.baseColor = meshPropsUseDisplayColor
-                               ? meshPropsDisplayColor
-                               : GfVec3f(0.8f, 0.8f, 0.8f);
-            defMat.opacity   = meshPropsDisplayOpacity;
-            defMat.roughness = 0.5f;
-            defMat.metallic  = 0.0f;
-
-            // Tag BEFORE AddMaterial, remap AFTER -- mirror the USD/native
-            // pattern so the integrator flags land on this matId specifically.
-            if (!meshPropsCastsShadows) {
-                _noShadowCastMatIds.insert(-1);
-            }
-            if (!meshPropsReceivesShadows) {
-                _noShadowReceiveMatIds.insert(-1);
-            }
-
-            matId = _scene->AddMaterial(defMat);
-
-            if (_noShadowCastMatIds.count(-1)) {
-                _noShadowCastMatIds.erase(-1);
-                _noShadowCastMatIds.insert(matId);
-                SLOG("SpectralRender: castsShadows=false for per-mesh default material %d (%s)\n",
-                     matId, prim.GetName().GetString().c_str());
-            }
-            if (_noShadowReceiveMatIds.count(-1)) {
-                _noShadowReceiveMatIds.erase(-1);
-                _noShadowReceiveMatIds.insert(matId);
-                SLOG("SpectralRender: receivesShadows=false for per-mesh default material %d (%s)\n",
-                     matId, prim.GetName().GetString().c_str());
             }
         }
 
@@ -5079,13 +4860,7 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage,
 
         pxr::SpectralMeshData data;
         data.id      = prim.GetPath();
-        // SpectralMeshProperties.visible: gates the mesh out at BVH build time
-        // (SpectralBVH / SpectralIntegrator / SpectralGPU all check
-        // kv.second.visible when iterating meshes). With prim-path
-        // registration in place, this only hides the targeted mesh(es),
-        // not every mesh as happened under the old size()==1 fallback.
-        // Absent-entry default is true.
-        data.visible = meshPropsHasEntry ? meshPropsVisible : true;
+        data.visible = true;
         data.objectId = _scene->NextObjectId();
 
         // Fan-triangulate each face
@@ -5734,18 +5509,6 @@ void SpectralRenderIop::append(Hash& hash)
             hash.append(kv.second.displayColor[2]);
             hash.append(kv.second.displayOpacity);
             hash.append(kv.second.visible ? 1 : 0);
-            hash.append(kv.second.castsShadows ? 1 : 0);
-            hash.append(kv.second.receivesShadows ? 1 : 0);
-            hash.append(kv.second.doubleSided ? 1 : 0);
-            hash.append(kv.second.orientation);
-            hash.append(kv.second.purpose);
-            // Hash targetPrimPaths so re-wiring the upstream chain (e.g.
-            // adding a GeoCube between the MeshProperties and GeoScene)
-            // properly invalidates the render cache.
-            hash.append((int)kv.second.targetPrimPaths.size());
-            for (const auto& t : kv.second.targetPrimPaths) {
-                hash.append(t.c_str());
-            }
         }
     }
     // Hash camera input (input 0) — re-render when camera moves or changes
@@ -8370,14 +8133,7 @@ void SpectralRenderIop::_BuildLightRig()
     }
 
     // ---- Fallback: use SpectralRender's own lighting knobs if no light nodes connected ----
-    // ScanlineRender-compat mode mimics Nuke's native renderer, which only uses
-    // lights that are explicitly wired into the scene. Injecting built-in sun/
-    // sky or studio lights here would make compat mode render noticeably
-    // brighter than the reference ScanlineRender output -- confusing users who
-    // expect the modes to match. Keep the knob value intact; the matching UI
-    // disable in knob_changed just greys it out.
-    if (_useBuiltinLight && !_scanlineCompat
-        && _allEnvLights.empty() && _allStudioLights.empty()) {
+    if (_useBuiltinLight && _allEnvLights.empty() && _allStudioLights.empty()) {
         // Sun/sky from local knobs
         if (_skyPreset > 0 && _skyMix > 0.001) {
             double m = _skyMix;
@@ -8589,7 +8345,7 @@ void SpectralRenderIop::_EnsureFrameRendered()
         _normalBuffer.assign(size_t(W) * H * 3, 0.f); else _normalBuffer.clear();
     if (_aovPosition || wireTopoNeedsPos)
         _posBuffer.assign(size_t(W) * H * 3, 0.f);    else _posBuffer.clear();
-    if (_aovPRef || _wireframeEnable)     _pRefBuffer.assign(size_t(W) * H * 3, 0.f);   else _pRefBuffer.clear();
+    if (_aovPRef)     _pRefBuffer.assign(size_t(W) * H * 3, 0.f);   else _pRefBuffer.clear();
     if (_aovUV || _wireframeEnable)
         _uvBuffer.assign(size_t(W) * H * 2, 0.f);     else _uvBuffer.clear();
     if (_aovAlbedo)   _albedoBuffer.assign(size_t(W) * H * 3, 0.f); else _albedoBuffer.clear();
@@ -8638,8 +8394,6 @@ void SpectralRenderIop::_EnsureFrameRendered()
     cam.wireNth = _wireNth;
     cam.wireStyle = _wireStyle;
     cam.shadowCatcherMatIds = _shadowCatcherMatIds;
-    cam.noShadowCastMatIds    = _noShadowCastMatIds;
-    cam.noShadowReceiveMatIds = _noShadowReceiveMatIds;
     cam.fStop = _fStop;
     cam.focusDistance = _focusDistance;
     cam.volumeSpp = _volumeSpp;
@@ -8935,7 +8689,7 @@ void SpectralRenderIop::_RenderStrip(int stripIdx)
                                              (_topoDirection == 0 || _topoDirection == 1);
             aovBufs.normal   = (_aovNormals || _wireframeEnable) ? _normalBuffer.data() : nullptr;
             aovBufs.position = (_aovPosition || wireTopoNeedsPosCpu) ? _posBuffer.data() : nullptr;
-            aovBufs.pRef     = (_aovPRef || _wireframeEnable) ? _pRefBuffer.data() : nullptr;
+            aovBufs.pRef     = _aovPRef     ? _pRefBuffer.data()     : nullptr;
             aovBufs.uv       = (_aovUV || _wireframeEnable) ? _uvBuffer.data() : nullptr;
             aovBufs.albedo   = _aovAlbedo   ? _albedoBuffer.data()   : nullptr;
             aovBufs.direct   = _aovDirect   ? _directBuffer.data()   : nullptr;
@@ -8987,7 +8741,7 @@ void SpectralRenderIop::_RenderStrip(int stripIdx)
                     *_scene, _renderCam,
                     (_aovNormals || _wireframeEnable) ? _normalBuffer.data() : nullptr,
                     (_aovPosition || wireTopoNeedsPosGeom) ? _posBuffer.data() : nullptr,
-                    (_aovPRef || _wireframeEnable) ? _pRefBuffer.data() : nullptr,
+                    _aovPRef     ? _pRefBuffer.data()   : nullptr,
                     (_aovUV || _wireframeEnable) ? _uvBuffer.data() : nullptr,
                     _aovAlbedo   ? _albedoBuffer.data() : nullptr,
                     _objectIdBuffer.data(), _materialIdBuffer.data(),
@@ -9070,7 +8824,6 @@ void SpectralRenderIop::_RenderStrip(int stripIdx)
             const float gridFreq = float(nth);
             const bool  hasNormals = !_normalBuffer.empty();
             const bool  hasPosition = !_posBuffer.empty();
-            const bool  hasPRef     = !_pRefBuffer.empty();
 
             // Antialiasing: the overlay runs once after the integrator, so
             // render samples do nothing for it. The previous falloff was a
@@ -9291,15 +9044,9 @@ void SpectralRenderIop::_RenderStrip(int stripIdx)
                             float cov = coverage(pixelDist, lineThick);
                             if (cov <= 0.f) continue;
                             lineAlpha = opacity * 0.6f * cov;
-                            // Dash ALONG the edge: pick the UV axis the edge
-                            // lies on (whichever distN is smaller) and use
-                            // the OTHER axis as the parameter that varies
-                            // along the line. Divide by pixelUVSize so the
-                            // dash knobs stay in pixel-equivalent units.
-                            float alongUV = (distU < distV) ? v : u;
-                            float dashUnit = alongUV / pixelUVSize;
-                            float period = float(_wireDashLength) + float(_wireGapLength);
-                            float dashPos = std::fmod(std::abs(dashUnit), period);
+                            // Dash pattern
+                            float dashPos = std::fmod(float(x + y) * 0.7071f,
+                                                     float(_wireDashLength) + float(_wireGapLength));
                             if (dashPos > float(_wireDashLength)) continue;
                         }
 
@@ -9412,20 +9159,10 @@ void SpectralRenderIop::_RenderStrip(int stripIdx)
                         }
                     }
 
-                    // Dashed override (applies to solid style when checkbox is on).
-                    // Dash runs ALONG the edge: whichever UV axis the edge
-                    // lies on picks the OTHER as the along-line parameter.
-                    // distU/distV from the inner UV-grid block went out of
-                    // scope when that block closed, so recompute locally.
+                    // Dashed override (applies to solid style when checkbox is on)
                     if (_wireDashed && (style == 0 || style == 3)) {
-                        float _gu = u * gridFreq;
-                        float _gv = v * gridFreq;
-                        float _dU = std::abs(_gu - std::round(_gu)) / gridFreq;
-                        float _dV = std::abs(_gv - std::round(_gv)) / gridFreq;
-                        float alongUV = (_dU < _dV) ? v : u;
-                        float dashUnit = alongUV / pixelUVSize;
-                        float period = float(_wireDashLength) + float(_wireGapLength);
-                        float dashPos = std::fmod(std::abs(dashUnit), period);
+                        float dashPos = std::fmod(float(x + y) * 0.7071f,
+                                                 float(_wireDashLength) + float(_wireGapLength));
                         if (dashPos > float(_wireDashLength)) continue;
                     }
 

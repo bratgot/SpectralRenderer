@@ -69,6 +69,11 @@ SpectralShadowCatcherOp::GetRegistry()
 
 void SpectralShadowCatcherOp::RegisterParams()
 {
+    if (node_disabled()) {
+        GetRegistry().erase(node_name());
+        return;
+    }
+
     ShadowCatcherParams p;
     p.shadowIntensity = _shadowIntensity;
     p.shadowColor[0]  = _shadowColor[0];

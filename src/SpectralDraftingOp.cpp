@@ -264,6 +264,11 @@ SpectralDraftingOp::GetRegistry()
 
 void SpectralDraftingOp::RegisterParams()
 {
+    if (node_disabled()) {
+        GetRegistry().erase(node_name());
+        return;
+    }
+
     DraftingParams p;
     p.thickness     = _wireThickness;
     p.opacity       = _wireOpacity;
