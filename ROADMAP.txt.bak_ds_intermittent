@@ -235,6 +235,20 @@ Tracked here so we don't forget. Each line is roughly the shape of an issue.
   limits us to 32 unique materials for each flag. Scenes with hero characters
   + dozens of props could brush this limit. Log warning exists; upgrade to
   wider type (uint64_t or a proper per-material flag) when needed.
+- **SpectralMeshProperties purpose menu needs validation** (new, 2026-04-20).
+  apply_meshprops_fields wired up doubleSided / orientation / purpose, but
+  purpose (default / render / proxy / guide) hasn't been tested end-to-end.
+  The intended behaviour: when purpose=proxy or purpose=guide, the mesh is
+  skipped from the ray-traced render (still shows in the 3D viewer). The
+  mesh-skip `continue` is in SpectralRenderIop.cpp around line 3286 guarded
+  by `meshPropsHasEntry && (meshPropsPurpose == 2 || meshPropsPurpose == 3)`.
+  To validate: (1) confirm the 'mesh props for ...' log shows the purpose
+  value flipping when you toggle the enum; (2) confirm 'SpectralRender:
+  skipping mesh X (purpose=proxy)' logs when set to proxy; (3) confirm the
+  mesh visually disappears from the rendered frame but remains in the
+  viewer. Also: decide whether purpose=1 (render) should imply anything
+  different from purpose=0 (default). USD treats 'render' as 'always
+  include', 'default' as 'parent decides', so currently both render.
 - **HDRI "visible in background" checkbox does not render the BG** (new,
   2026-04-20). apply_hdri_visible patch added the knob on SpectralEnvLight
   plus the full plumbing: host member, SpectralLight.visibleInPrimary field,

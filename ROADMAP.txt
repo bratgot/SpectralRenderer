@@ -249,6 +249,37 @@ Tracked here so we don't forget. Each line is roughly the shape of an issue.
   viewer. Also: decide whether purpose=1 (render) should imply anything
   different from purpose=0 (default). USD treats 'render' as 'always
   include', 'default' as 'parent decides', so currently both render.
+- **SpectralMeshProperties doubleSided intermittent** (new, 2026-04-20).
+  After apply_ds_gpu_fix landed the GPUParams struct field + both upload
+  sites + matCheck coverage, doubleSided works in some scenes and not
+  others. When it works: backfaces of a single-sided mesh disappear when
+  the camera is interior (or primary rays otherwise hit backfaces). When
+  it doesn't: toggling the knob produces no visible change, often on the
+  same scene where it did work moments earlier. Suspects in priority
+  order:
+  (1) Stamping races against validate. Our stamp writes via const_cast
+      into scene._materials after the triangulation pass but within the
+      same _validate. If GPU.cpp computes matCheck from an earlier
+      snapshot (e.g. cached vector address) the XOR won't see the flag.
+      Triage: extend the MPDiag matCheck logger with the material's
+      memory address + tid to confirm single-validate ordering.
+  (2) Material sharing hidden by the Iop's material-resolution step.
+      Two meshes with the same SpectralSurface produce one shared
+      material ID. If one mesh is doubleSided and the other isn't, the
+      stamp's last-write-wins overwrites the previous mesh's intent.
+      User may be observing whichever mesh's stamp ran last in the
+      iteration order, which can flip between validates if the USD
+      Traverse() order isn't stable.
+  (3) Kernel normal-flip condition. The gate lives inside the primary
+      shade block. If the back-face hit is being handled by a DIFFERENT
+      code path (transmission / clearcoat / etc.) the gate never fires.
+      Might manifest as "doubleSided works on matte surfaces, fails on
+      glass" or similar.
+  Next action: add a per-material doubleSided tracer at kernel shade
+  entry (cheap: one fprintf from host-side comparison of expected-vs-
+  what-was-uploaded). Confirm matCheck XOR is actually being computed
+  over the flipped flag. Only after that can we nail which of the three
+  suspects is live.
 - **HDRI "visible in background" checkbox does not render the BG** (new,
   2026-04-20). apply_hdri_visible patch added the knob on SpectralEnvLight
   plus the full plumbing: host member, SpectralLight.visibleInPrimary field,

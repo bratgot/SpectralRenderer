@@ -405,10 +405,6 @@ static __forceinline__ __device__ float smithG1(float a, float NdX)
 static __forceinline__ __device__ float evalBSDF(
     const GPUMaterial& mat, float3 N, float3 V, float3 L, float lambda)
 {
-    // Pure analytical BSDF: diff + spec + clearcoat. SSS is handled
-    // separately at shade point via evalSSSWalk (random-walk port of
-    // CPU path) -- it doesn't belong in the BSDF eval because the
-    // random walk needs scene traversal.
     float NdL=dot3(N,L); float NdV=dot3(N,V);
     if (NdL<=0.f||NdV<=0.f) return 0.f;
     float3 H=normalize3(make_float3(V.x+L.x,V.y+L.y,V.z+L.z));
@@ -424,6 +420,8 @@ static __forceinline__ __device__ float evalBSDF(
     float F;
     if (mat.metallic > 0.5f && mat.metalType > 0) {
         // Measured metal: per-wavelength Fresnel tinted by base colour.
+        // Matches SpectralBSDF's CPU path so gold/copper/silver etc.
+        // look correct on GPU instead of identical Schlick silver.
         F = fresnelMetal(mat.metalType, lambda, VdH) * baseR;
     } else {
         float iorR=(ior-1.f)/(ior+1.f); float iorF0=iorR*iorR;
@@ -440,8 +438,33 @@ static __forceinline__ __device__ float evalBSDF(
     float FD90=0.5f+2.f*VdH*VdH*rough;
     float diff=(1.f-mat.metallic)*mat.opacity*baseR*(1.f+(FD90-1.f)*schlickW(NdL))*(1.f+(FD90-1.f)*schlickW(NdV))/3.14159f;
 
-    // Clearcoat (Disney 2012 / UsdPreviewSurface). F0 fixed at 0.04
-    // (IOR=1.5), Smith G alpha fixed at 0.25 per Disney.
+    // Subsurface scattering (wrap-diffuse approximation).
+    // The CPU path random-walks 16 steps per pixel; here we approximate
+    // with wavelength-tinted wrap-around diffuse -- visually close for
+    // skin/wax/marble at typical sssRadius values, zero cost when
+    // sssRadius is 0.
+    float sss = 0.f;
+    if (mat.sssRadius > 0.f) {
+        float sssSum = mat.sssColor.x + mat.sssColor.y + mat.sssColor.z;
+        if (sssSum > 0.001f) {
+            float rB = spectralGauss(lambda, 630.f, 30.f);
+            float gB = spectralGauss(lambda, 532.f, 30.f);
+            float bB = spectralGauss(lambda, 460.f, 25.f);
+            float scatterAtLambda = mat.sssColor.x*rB + mat.sssColor.y*gB + mat.sssColor.z*bB;
+            scatterAtLambda = fmaxf(0.01f, scatterAtLambda);
+            float wrap = fminf(0.5f, mat.sssRadius * 0.5f);
+            float wrappedNdL = (NdL + wrap) / ((1.f + wrap) * (1.f + wrap));
+            if (wrappedNdL > 0.f) {
+                float sssStrength = fminf(1.f, mat.sssRadius);
+                sss = (1.f - mat.metallic) * mat.opacity * baseR
+                    * scatterAtLambda * wrappedNdL * sssStrength / 3.14159f;
+            }
+        }
+    }
+
+    // Clearcoat (Disney 2012 / UsdPreviewSurface). Mirrors the CPU path
+    // in SpectralBSDF::Evaluate. F0 fixed at 0.04 (IOR=1.5), Smith G
+    // alpha fixed at 0.25 per Disney (keeps coat bright at grazing).
     float clearcoatLobe = 0.f;
     float clearcoatAttn = 1.f;
     if (mat.clearcoat > 0.f) {
@@ -455,7 +478,10 @@ static __forceinline__ __device__ float evalBSDF(
         clearcoatAttn = 1.f - Fc * mat.clearcoat;
     }
 
-    return ((diff + spec) * NdL) * clearcoatAttn + clearcoatLobe * NdL;
+    // Base (diff + spec) and sss are attenuated by the coat; the coat
+    // adds its specular on top. When clearcoat==0 this reduces exactly
+    // to the pre-clearcoat formula (attn=1, lobe=0).
+    return ((diff + spec) * NdL + sss) * clearcoatAttn + clearcoatLobe * NdL;
 }
 
 
@@ -773,99 +799,6 @@ static __forceinline__ __device__ float3 sampleLightDir(
 // ---------------------------------------------------------------------------
 // Shade one hit — direct lights with soft shadows
 // ---------------------------------------------------------------------------
-// Subsurface scattering: spectral random walk (port of CPU path in
-// SpectralIntegrator.cpp at ~line 2016). Light enters the surface,
-// scatters isotropically with exponentially-distributed step size,
-// exits through the nearest surface within mfp*0.5 of the walk point.
-// Wavelength-dependent mean free path means red penetrates further
-// than blue (skin, wax, jade look).
-//
-// 16 steps like CPU; throughput attenuated 0.85/step. Early-exits when
-// sssRadius<=0 or sssColor==black so non-SSS scenes pay nothing.
-// ---------------------------------------------------------------------------
-static __device__ float evalSSSWalk(
-    const GPUMaterial& mat, float3 hitPos, float3 N, float lambda,
-    unsigned int& rngSeed)
-{
-    if (mat.sssRadius <= 0.f) return 0.f;
-    float sssSum = mat.sssColor.x + mat.sssColor.y + mat.sssColor.z;
-    if (sssSum <= 0.001f) return 0.f;
-
-    // Spectral mean free path (wavelength-dependent scatter distance).
-    // Same Gaussian basis as CPU so the look matches exactly.
-    float rB = spectralGauss(lambda, 630.f, 30.f);
-    float gB = spectralGauss(lambda, 532.f, 30.f);
-    float bB = spectralGauss(lambda, 460.f, 25.f);
-    float scatterAtLambda = mat.sssColor.x*rB + mat.sssColor.y*gB + mat.sssColor.z*bB;
-    scatterAtLambda = fmaxf(0.01f, scatterAtLambda);
-    float mfp = mat.sssRadius * scatterAtLambda;
-
-    float3 walkPos = hitPos;
-    float throughput = 1.f;
-    float radiance = 0.f;
-    const int maxWalkSteps = 16;
-
-    #pragma unroll 1
-    for (int step = 0; step < maxWalkSteps; ++step) {
-        // Isotropic random direction on unit sphere.
-        float wu1 = hashRNG(rngSeed++);
-        float wu2 = hashRNG(rngSeed++);
-        float wz = 1.f - 2.f * wu1;
-        float wr = sqrtf(fmaxf(0.f, 1.f - wz*wz));
-        float wphi = 6.28318f * wu2;
-        float3 walkDir = make_float3(wr*cosf(wphi), wr*sinf(wphi), wz);
-
-        // Exponential step: d = -mfp * ln(xi). Matches CPU exactly.
-        float wu3 = hashRNG(rngSeed++);
-        float stepDist = -mfp * logf(fmaxf(1e-8f, wu3));
-        walkPos = make_float3(walkPos.x + walkDir.x*stepDist,
-                              walkPos.y + walkDir.y*stepDist,
-                              walkPos.z + walkDir.z*stepDist);
-
-        // Trace an exit ray along N (matches CPU which uses the
-        // shading normal, not the walk direction, so the walk finds
-        // the nearest surface in the "outward" sense).
-        unsigned int ep0=0, ep1=0, ep2=0;
-        unsigned int ep3=__float_as_uint(1e30f);
-        unsigned int ep4=0, ep5=0, ep6=0;
-        optixTrace(params.traversable, walkPos, N,
-                   1e-4f, 1e30f, 0.f, OptixVisibilityMask(0xFF),
-                   OPTIX_RAY_FLAG_NONE,
-                   0, 1, 0, ep0, ep1, ep2, ep3, ep4, ep5, ep6);
-
-        float exitT = __uint_as_float(ep3);
-        bool exited = (ep4 == 0u) || (exitT > mfp * 0.5f);
-
-        if (exited) {
-            // Exited surface -- accumulate light contributions at the
-            // walk position. Matches CPU's post-walk light loop.
-            if (params.lightCount > 0) {
-                for (unsigned int li = 0; li < params.lightCount; ++li) {
-                    const GPULight& light = params.lights[li];
-                    float su1 = hashRNG(rngSeed++);
-                    float su2 = hashRNG(rngSeed++);
-                    float3 L = sampleLightDir(light, walkPos, su1, su2, N);
-                    float NdL = fmaxf(0.f, N.x*L.x + N.y*L.y + N.z*L.z);
-                    if (NdL > 0.f) {
-                        float lightRad = lightEmission(light, lambda);
-                        float atten = lightAttenuation(light, walkPos);
-                        radiance += throughput * NdL * lightRad * atten / 3.14159f;
-                    }
-                }
-            }
-            break;
-        }
-
-        // Didn't exit -- attenuate and keep walking.
-        throughput *= 0.85f;
-        if (throughput < 0.01f) break;
-    }
-
-    return radiance;
-}
-
-
-// ---------------------------------------------------------------------------
 static __forceinline__ __device__ float shadeHit(
     const GPUMaterial& mat, float3 N, float3 V, float3 hitPos, float lambda,
     unsigned int& rngSeed, int matId)
@@ -1037,10 +970,6 @@ static __forceinline__ __device__ float shadeHit(
             radiance += fluorContrib * lightRad * atten;
         }
     }
-
-    // Subsurface scattering (spectral random walk, matches CPU path).
-    // Early-exits when sssRadius<=0 so non-SSS surfaces pay nothing.
-    radiance += evalSSSWalk(mat, hitPos, N, lambda, rngSeed);
 
     return radiance;
 }
