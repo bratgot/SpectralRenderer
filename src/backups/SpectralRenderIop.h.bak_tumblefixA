@@ -315,11 +315,6 @@ private:
     bool   _vpEnvReflections = true;
     bool   _vpGeoReflections = true;
     bool   _vpVolReflections = true;
-    // Viewport shadow-map pass. Dominates cost on dense geometry
-    // (rebuilds a 1024-res shadow map every frame with immediate-mode
-    // GL calls over all triangles). OFF by default; users can enable
-    // for still-frame lighting review.
-    bool   _vpEnableShadows = false;
     int    _vpReflSteps = 1;        // 0=8, 1=16, 2=32, 3=64
     GLuint _glVolProg = 0;
     GLuint _glShadowProg = 0;
@@ -336,27 +331,6 @@ private:
     int    _glReflW = 0, _glReflH = 0;
     GLuint _glVolDensityTex = 0;
     GLuint _glBaseColorTex = 0;   // viewport base color texture
-
-    // Cached geometry VBO for 3D viewport draw_handle. Previously we
-    // iterated all triangles in immediate mode on every tumble frame,
-    // which dominated cost at 120k+ tris. The VBO uploads once per
-    // scene change and every frame just issues glDrawArrays.
-    // Layout: interleaved { float3 position, float3 normal, float2 uv }
-    // stride = 32 bytes, 3 verts per triangle.
-    GLuint _glGeoVBO = 0;
-    size_t _glGeoVBOTriCount = 0;   // number of tris uploaded
-    bool   _glGeoVBODirty = true;   // force rebuild on next draw_handle
-    // Per-mesh offsets (in TRIANGLES, not verts) for material-aware draws.
-    // Parallel to _scene->GetMeshes() iteration order. Rebuilt with VBO.
-    struct GeoMeshRange { int firstTri; int triCount; int matId; };
-    std::vector<GeoMeshRange> _glGeoMeshRanges;
-    // Cached scene bounds, updated during VBO rebuild.
-    float _glSceneMin[3] = { 0.f, 0.f, 0.f };
-    float _glSceneMax[3] = { 0.f, 0.f, 0.f };
-    bool  _glSceneBoundsValid = false;
-
-    // Helpers. Defined in SpectralRenderIop.cpp.
-    void _EnsureGeoVBO();
 
     // Project3D: per-material projection camera matrices
     std::unordered_map<int, pxr::GfMatrix4d> _projCameraVP;  // matId → viewProjection
@@ -438,6 +412,7 @@ private:
     bool  _aovVolShadow = false;
     bool  _aovVolLights = false;
     bool  _aovVolDepth = false;
+    bool  _aovMotion = false;
     bool  _aovDenoiseAlbedo = false;
     bool  _aovDenoiseNormal = false;
 
@@ -445,7 +420,9 @@ private:
     int   _deepSamples = 0;  // 0=disabled, 16-128
 
     // Motion blur
+    bool  _motionBlur = false;
     int   _shutterPreset = 1;  // 0=Start,1=Centre,2=End,3=Custom
+    int   _motionSamples = 3;
     // Camera motion blur
     bool  _cameraMblur = false;
     int   _cameraMblurQuality = 4;  // extra samples for camera blur

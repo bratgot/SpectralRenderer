@@ -462,26 +462,9 @@ static __forceinline__ __device__ float evalBSDF(
         }
     }
 
-    // Clearcoat (Disney 2012 / UsdPreviewSurface). Mirrors the CPU path
-    // in SpectralBSDF::Evaluate. F0 fixed at 0.04 (IOR=1.5), Smith G
-    // alpha fixed at 0.25 per Disney (keeps coat bright at grazing).
-    float clearcoatLobe = 0.f;
-    float clearcoatAttn = 1.f;
-    if (mat.clearcoat > 0.f) {
-        float Fc = 0.04f + (1.f - 0.04f) * schlickW(VdH);
-        float ccRough = fmaxf(0.01f, mat.clearcoatRoughness);
-        float ccAlpha = ccRough * ccRough;
-        float Dc = ggxD(ccAlpha, NdH);
-        float Gc = smithG1(0.25f, NdV) * smithG1(0.25f, NdL);
-        clearcoatLobe = (Dc * Gc * Fc) / (4.f * NdV * NdL + 1e-7f);
-        clearcoatLobe *= mat.clearcoat;
-        clearcoatAttn = 1.f - Fc * mat.clearcoat;
-    }
-
-    // Base (diff + spec) and sss are attenuated by the coat; the coat
-    // adds its specular on top. When clearcoat==0 this reduces exactly
-    // to the pre-clearcoat formula (attn=1, lobe=0).
-    return ((diff + spec) * NdL + sss) * clearcoatAttn + clearcoatLobe * NdL;
+    // SSS is added on top of the direct diffuse with NdL factor applied
+    // here. For non-SSS (radius==0) this is unchanged from before.
+    return (diff + spec) * NdL + sss;
 }
 
 

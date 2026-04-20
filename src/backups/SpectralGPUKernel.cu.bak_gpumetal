@@ -313,72 +313,6 @@ static __forceinline__ __device__ float dispersedIOR(float ior_d, float abbe, fl
     return sqrtf(n2);
 }
 
-// ---------------------------------------------------------------------------
-//  Metal Fresnel -- per-wavelength measured n,k
-//  Tabulated at 380,430,480,530,580,630,680,730,780 nm. Matches the table
-//  in SpectralBSDF.h::_GetMetalIOR so CPU and GPU render metals identically.
-//  Sources: Palik's Handbook of Optical Constants.
-//  Indexed: 0=none, 1=gold, 2=copper, 3=silver, 4=aluminium, 5=iron, 6=titanium
-// ---------------------------------------------------------------------------
-__device__ static const float kMetalN[7][9] = {
-    {1.f,1.f,1.f,1.f,1.f,1.f,1.f,1.f,1.f},                                     // 0: none
-    {1.66f,1.47f,1.29f,0.64f,0.28f,0.17f,0.16f,0.16f,0.17f},                   // 1: gold
-    {1.27f,1.21f,1.14f,1.08f,0.47f,0.23f,0.21f,0.21f,0.24f},                   // 2: copper
-    {0.05f,0.04f,0.04f,0.04f,0.05f,0.06f,0.07f,0.10f,0.12f},                   // 3: silver
-    {0.51f,0.57f,0.63f,0.72f,0.96f,1.24f,1.55f,1.80f,2.08f},                   // 4: aluminium
-    {1.72f,1.86f,2.01f,2.18f,2.39f,2.56f,2.68f,2.78f,2.86f},                   // 5: iron
-    {1.60f,1.72f,1.86f,2.00f,2.14f,2.30f,2.48f,2.64f,2.76f},                   // 6: titanium
-};
-__device__ static const float kMetalK[7][9] = {
-    {0.f,0.f,0.f,0.f,0.f,0.f,0.f,0.f,0.f},                                     // 0
-    {1.94f,1.95f,1.85f,2.20f,2.81f,3.24f,3.62f,4.00f,4.38f},                   // 1: gold
-    {2.14f,2.37f,2.56f,2.60f,2.65f,2.98f,3.32f,3.67f,4.01f},                   // 2: copper
-    {1.95f,2.35f,2.82f,3.29f,3.59f,3.92f,4.25f,4.58f,4.90f},                   // 3: silver
-    {4.40f,4.84f,5.30f,5.74f,6.18f,6.62f,7.04f,7.48f,7.90f},                   // 4: aluminium
-    {2.88f,2.94f,3.01f,3.08f,3.16f,3.27f,3.39f,3.50f,3.60f},                   // 5: iron
-    {2.37f,2.48f,2.58f,2.68f,2.78f,2.90f,3.03f,3.14f,3.24f},                   // 6: titanium
-};
-
-// Lookup per-wavelength n,k with linear interpolation across the 9 samples.
-static __forceinline__ __device__ void metalNK(int metalType, float lambda,
-                                               float& n, float& k)
-{
-    if (metalType <= 0 || metalType >= 7) { n = 1.f; k = 0.f; return; }
-    float t = (lambda - 380.f) / 50.f;
-    if (t < 0.f) t = 0.f;
-    if (t > 7.99f) t = 7.99f;
-    int i = int(t);
-    float frac = t - float(i);
-    n = kMetalN[metalType][i] * (1.f - frac) + kMetalN[metalType][i+1] * frac;
-    k = kMetalK[metalType][i] * (1.f - frac) + kMetalK[metalType][i+1] * frac;
-}
-
-// Unpolarised Fresnel reflectance for conductor (n + ik) at angle cosI.
-// Returns [0,1] reflectance weighted by the base colour's spectral
-// reflectance (kept outside this function so callers can tint).
-static __forceinline__ __device__ float fresnelMetal(int metalType,
-                                                     float lambda, float cosI)
-{
-    if (metalType <= 0) return 0.f;
-    float n, k;
-    metalNK(metalType, lambda, n, k);
-    float cosI2 = cosI * cosI;
-    float n2k2  = n*n + k*k;
-    float twoNc = 2.f * n * cosI;
-    float Rs_num = n2k2 - twoNc + cosI2;
-    float Rs_den = n2k2 + twoNc + cosI2;
-    float Rs = Rs_num / fmaxf(1e-8f, Rs_den);
-    float twoNcI = 2.f * n * cosI;
-    float n2k2c2 = n2k2 * cosI2;
-    float Rp_num = n2k2c2 - twoNcI + 1.f;
-    float Rp_den = n2k2c2 + twoNcI + 1.f;
-    float Rp = Rp_num / fmaxf(1e-8f, Rp_den);
-    float F = 0.5f * (Rs + Rp);
-    if (F < 0.f) F = 0.f;
-    if (F > 1.f) F = 1.f;
-    return F;
-}
-
 static __forceinline__ __device__ float thinFilmFresnel(float F, float ior, float thick, float lambda, float cosT)
 {
     const float nf = 1.5f;
@@ -417,17 +351,9 @@ static __forceinline__ __device__ float evalBSDF(
     float ior = mat.ior;
     if (mat.abbeNumber > 0.f) ior = dispersedIOR(mat.ior, mat.abbeNumber, lambda);
 
-    float F;
-    if (mat.metallic > 0.5f && mat.metalType > 0) {
-        // Measured metal: per-wavelength Fresnel tinted by base colour.
-        // Matches SpectralBSDF's CPU path so gold/copper/silver etc.
-        // look correct on GPU instead of identical Schlick silver.
-        F = fresnelMetal(mat.metalType, lambda, VdH) * baseR;
-    } else {
-        float iorR=(ior-1.f)/(ior+1.f); float iorF0=iorR*iorR;
-        float F0=iorF0+(baseR-iorF0)*mat.metallic;
-        F=F0+(1.f-F0)*schlickW(VdH);
-    }
+    float iorR=(ior-1.f)/(ior+1.f); float iorF0=iorR*iorR;
+    float F0=iorF0+(baseR-iorF0)*mat.metallic;
+    float F=F0+(1.f-F0)*schlickW(VdH);
 
     // Thin-film
     if (mat.thinFilmThickness > 0.f)
@@ -437,51 +363,7 @@ static __forceinline__ __device__ float evalBSDF(
     float spec=(D*G*F)/(4.f*NdV*NdL+1e-7f);
     float FD90=0.5f+2.f*VdH*VdH*rough;
     float diff=(1.f-mat.metallic)*mat.opacity*baseR*(1.f+(FD90-1.f)*schlickW(NdL))*(1.f+(FD90-1.f)*schlickW(NdV))/3.14159f;
-
-    // Subsurface scattering (wrap-diffuse approximation).
-    // The CPU path random-walks 16 steps per pixel; here we approximate
-    // with wavelength-tinted wrap-around diffuse -- visually close for
-    // skin/wax/marble at typical sssRadius values, zero cost when
-    // sssRadius is 0.
-    float sss = 0.f;
-    if (mat.sssRadius > 0.f) {
-        float sssSum = mat.sssColor.x + mat.sssColor.y + mat.sssColor.z;
-        if (sssSum > 0.001f) {
-            float rB = spectralGauss(lambda, 630.f, 30.f);
-            float gB = spectralGauss(lambda, 532.f, 30.f);
-            float bB = spectralGauss(lambda, 460.f, 25.f);
-            float scatterAtLambda = mat.sssColor.x*rB + mat.sssColor.y*gB + mat.sssColor.z*bB;
-            scatterAtLambda = fmaxf(0.01f, scatterAtLambda);
-            float wrap = fminf(0.5f, mat.sssRadius * 0.5f);
-            float wrappedNdL = (NdL + wrap) / ((1.f + wrap) * (1.f + wrap));
-            if (wrappedNdL > 0.f) {
-                float sssStrength = fminf(1.f, mat.sssRadius);
-                sss = (1.f - mat.metallic) * mat.opacity * baseR
-                    * scatterAtLambda * wrappedNdL * sssStrength / 3.14159f;
-            }
-        }
-    }
-
-    // Clearcoat (Disney 2012 / UsdPreviewSurface). Mirrors the CPU path
-    // in SpectralBSDF::Evaluate. F0 fixed at 0.04 (IOR=1.5), Smith G
-    // alpha fixed at 0.25 per Disney (keeps coat bright at grazing).
-    float clearcoatLobe = 0.f;
-    float clearcoatAttn = 1.f;
-    if (mat.clearcoat > 0.f) {
-        float Fc = 0.04f + (1.f - 0.04f) * schlickW(VdH);
-        float ccRough = fmaxf(0.01f, mat.clearcoatRoughness);
-        float ccAlpha = ccRough * ccRough;
-        float Dc = ggxD(ccAlpha, NdH);
-        float Gc = smithG1(0.25f, NdV) * smithG1(0.25f, NdL);
-        clearcoatLobe = (Dc * Gc * Fc) / (4.f * NdV * NdL + 1e-7f);
-        clearcoatLobe *= mat.clearcoat;
-        clearcoatAttn = 1.f - Fc * mat.clearcoat;
-    }
-
-    // Base (diff + spec) and sss are attenuated by the coat; the coat
-    // adds its specular on top. When clearcoat==0 this reduces exactly
-    // to the pre-clearcoat formula (attn=1, lobe=0).
-    return ((diff + spec) * NdL + sss) * clearcoatAttn + clearcoatLobe * NdL;
+    return (diff+spec)*NdL;
 }
 
 

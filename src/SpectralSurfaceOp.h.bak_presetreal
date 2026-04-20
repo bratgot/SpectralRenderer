@@ -76,7 +76,6 @@ private:
 
     // Spectral-specific knobs
     int   _spectralPreset   = 0;   // 0=custom, 1=glass, 2=diamond, 3=copper, 4=gold, 5=silver, 6=aluminium
-    int   _lastAppliedPreset = 0;  // tracker -- see notes in knob_changed
     float _abbeNumber       = 0.0f;   // dispersion (0=no dispersion, ~60=crown glass, ~30=flint glass)
     float _thinFilmThickness = 0.0f;  // nm (0=disabled, 200-800nm for interference)
     float _displacementScale = 0.0f;    // world units (0=disabled)
@@ -95,25 +94,6 @@ private:
     float _fluorStrength = 0.f;
     float _sssColor[3] = {0.f, 0.f, 0.f};
     float _sssRadius = 0.f;
-
-    // Per-category preset selectors (new split UI). Each is an index
-    // into the category's small preset list. 0 = "(none)". Legacy
-    // _spectralPreset kept for backward compatibility with old .nk
-    // files.
-    int _presetDielectric = 0;
-    int _presetMetal      = 0;
-    int _presetOrganic    = 0;
-    int _presetSpectral   = 0;
-    int _presetCreative   = 0;
-    int _presetMetalRgl   = 0;
-    int _presetFabric     = 0;
-    int _presetCoating    = 0;
-
-    // _ApplyPresetV2 replaces the old _ApplyPreset for the new split
-    // UI. Key difference: it writes through Knob::set_value ONLY,
-    // never assigning members directly. This ensures Nuke's change
-    // detection sees the value change and refreshes the panel widget.
-    void _ApplyPresetV2(int category, int preset);
     const char* _displacementFile = "";  // displacement map path
 
     void _ApplyPreset(int preset);

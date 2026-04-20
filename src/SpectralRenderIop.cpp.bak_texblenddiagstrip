@@ -4194,8 +4194,14 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage,
                         std::string shaderPath = surfaceShader.GetPath().GetString();
                         // Try each registered SpectralSurface node name
                         const auto& registry = SpectralSurfaceOp::GetRegistry();
+                        fprintf(stderr, "TexBlendDiag: looking up shaderPath='%s' in %zu registry entries\n",
+                            shaderPath.c_str(), registry.size());
                         for (const auto& entry : registry) {
+                            fprintf(stderr, "TexBlendDiag:   registry key='%s' textureBlend=%.3f\n",
+                                entry.first.c_str(), entry.second.textureBlend);
                             if (shaderPath.find(entry.first) != std::string::npos) {
+                                fprintf(stderr, "TexBlendDiag:   HIT '%s' -> mat.textureBlend <- %.3f\n",
+                                    entry.first.c_str(), entry.second.textureBlend);
                                 mat.abbeNumber        = entry.second.abbeNumber;
                                 mat.thinFilmThickness = entry.second.thinFilmThickness;
                                 mat.displacementScale = entry.second.displacementScale;
@@ -4463,6 +4469,8 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage,
                         }
                     }
 
+                    fprintf(stderr, "TexBlendDiag: AddMaterial mat.textureBlend=%.3f mat.baseColorTexId=%d\n",
+                        mat.textureBlend, mat.baseColorTexId);
                     matId = _scene->AddMaterial(mat);
 
                     // Remap Project3D projection matrix from temp key to actual matId

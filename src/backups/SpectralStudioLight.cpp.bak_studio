@@ -153,37 +153,29 @@ void SpectralStudioLight::draw_handle(ViewerContext* ctx)
     glDisable(GL_LIGHTING); glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glEnable(GL_LINE_SMOOTH);
-    // Gizmo visibility is independent of mix. Previously every alpha was
-    // multiplied by `mix`, so dialling back the contribution hid the
-    // preview entirely -- frustrating when aiming lights. Use a floor so
-    // the gizmo stays legible even at mix=0, with a gentle dim as a hint.
-    float b = 0.6f + 0.4f * std::min(1.f, float(mix));
+    float b=float(mix);
 
-    // Floor circle (rig radius)
-    glColor4f(0.45f,0.45f,0.5f,0.45f); glLineWidth(1.5f);
+    glColor4f(0.3f,0.3f,0.35f,0.2f); glLineWidth(1.f);
     glBegin(GL_LINE_LOOP);
     for(int i=0;i<48;++i){float a=float(i)/48.f*2.f*float(kPi);glVertex3f(R*std::cos(a),0,R*std::sin(a));}
     glEnd();
 
     if (showLights) {
-        // Key: brightest, thickest line to origin
-        glColor4f(keyColor[0],keyColor[1],keyColor[2],1.0f*b);
-        glPointSize(16.f); glBegin(GL_POINTS);glVertex3f(kx,ky,kz);glEnd();
-        glColor4f(keyColor[0],keyColor[1],keyColor[2],0.5f*b);
-        glPointSize(28.f); glBegin(GL_POINTS);glVertex3f(kx,ky,kz);glEnd();
-        glColor4f(keyColor[0],keyColor[1],keyColor[2],0.75f*b); glLineWidth(3.f);
+        glColor4f(keyColor[0],keyColor[1],keyColor[2],0.8f*b);
+        glPointSize(14.f); glBegin(GL_POINTS);glVertex3f(kx,ky,kz);glEnd();
+        glColor4f(keyColor[0],keyColor[1],keyColor[2],0.25f*b);
+        glPointSize(24.f); glBegin(GL_POINTS);glVertex3f(kx,ky,kz);glEnd();
+        glColor4f(keyColor[0],keyColor[1],keyColor[2],0.3f*b); glLineWidth(2.f);
         glBegin(GL_LINES);glVertex3f(kx,ky,kz);glVertex3f(0,0,0);glEnd();
 
-        // Fill: medium
-        glColor4f(fillColor[0],fillColor[1],fillColor[2],0.9f*b);
-        glPointSize(12.f); glBegin(GL_POINTS);glVertex3f(fx,fy,fz);glEnd();
-        glColor4f(fillColor[0],fillColor[1],fillColor[2],0.55f*b); glLineWidth(2.f);
+        glColor4f(fillColor[0],fillColor[1],fillColor[2],0.6f*b);
+        glPointSize(10.f); glBegin(GL_POINTS);glVertex3f(fx,fy,fz);glEnd();
+        glColor4f(fillColor[0],fillColor[1],fillColor[2],0.2f*b); glLineWidth(1.f);
         glBegin(GL_LINES);glVertex3f(fx,fy,fz);glVertex3f(0,0,0);glEnd();
 
-        // Rim: backlight, slightly more subtle than key
-        glColor4f(rimColor[0],rimColor[1],rimColor[2],0.95f*b);
-        glPointSize(12.f); glBegin(GL_POINTS);glVertex3f(rx,ry,rz);glEnd();
-        glColor4f(rimColor[0],rimColor[1],rimColor[2],0.5f*b); glLineWidth(2.f);
+        glColor4f(rimColor[0],rimColor[1],rimColor[2],0.7f*b);
+        glPointSize(10.f); glBegin(GL_POINTS);glVertex3f(rx,ry,rz);glEnd();
+        glColor4f(rimColor[0],rimColor[1],rimColor[2],0.15f*b); glLineWidth(1.f);
         glBegin(GL_LINES);glVertex3f(rx,ry,rz);glVertex3f(0,0,0);glEnd();
     }
 
@@ -199,9 +191,9 @@ void SpectralStudioLight::draw_handle(ViewerContext* ctx)
             if(std::abs(dy)<0.9f){px=-dz;py=0;pz=dx;}else{px=1;py=0;pz=0;}
             float pl=std::sqrt(px*px+py*py+pz*pz);if(pl>1e-6f){px/=pl;py/=pl;pz/=pl;}
             float qx=dy*pz-dz*py,qy=dz*px-dx*pz,qz=dx*py-dy*px;
-            glColor4f(cr,cg,cb,al); glLineWidth(1.5f);
-            for(int i=0;i<10;++i){
-                float a=float(i)/10.f*2.f*float(kPi);
+            glColor4f(cr,cg,cb,al); glLineWidth(1.f);
+            for(int i=0;i<8;++i){
+                float a=float(i)/8.f*2.f*float(kPi);
                 glBegin(GL_LINES);glVertex3f(ox,oy,oz);
                 glVertex3f(bx+br*(px*std::cos(a)+qx*std::sin(a)),
                            by+br*(py*std::cos(a)+qy*std::sin(a)),
@@ -209,16 +201,13 @@ void SpectralStudioLight::draw_handle(ViewerContext* ctx)
                 glEnd();
             }
         };
-        // Brighter cones. Key stays strongest; fill/rim dimmer as before
-        // but now visible. 10 rays instead of 8 to feel more like a cone.
-        cone(kx,ky,kz,keyColor[0],keyColor[1],keyColor[2],0.30f*b);
-        cone(fx,fy,fz,fillColor[0],fillColor[1],fillColor[2],0.18f*b);
-        cone(rx,ry,rz,rimColor[0],rimColor[1],rimColor[2],0.20f*b);
+        cone(kx,ky,kz,keyColor[0],keyColor[1],keyColor[2],0.12f*b);
+        cone(fx,fy,fz,fillColor[0],fillColor[1],fillColor[2],0.06f*b);
+        cone(rx,ry,rz,rimColor[0],rimColor[1],rimColor[2],0.06f*b);
     }
 
-    // Origin crosshair: brighter so you can see where "subject" is
-    float cm=R*0.04f;
-    glColor4f(0.9f,0.9f,0.9f,0.75f); glLineWidth(2.f);
+    float cm=R*0.03f;
+    glColor4f(0.7f,0.7f,0.7f,0.4f); glLineWidth(1.f);
     glBegin(GL_LINES);
     glVertex3f(-cm,0,0);glVertex3f(cm,0,0);
     glVertex3f(0,-cm,0);glVertex3f(0,cm,0);

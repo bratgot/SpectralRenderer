@@ -50,18 +50,6 @@ struct GPUMaterial {
     // uses a per-wavelength n,k table for proper metal Fresnel -- without
     // this, all metals looked identical on GPU.
     int    metalType;
-    // Subsurface scattering: the kernel uses a wrap-diffuse approximation
-    // because porting the CPU random walk (16 steps with ray-exit tests)
-    // would thrash memory per-pixel. sssColor drives wavelength-dependent
-    // scatter; sssRadius drives overall strength and wrap width.
-    float3 sssColor;
-    float  sssRadius;
-    // Clearcoat (Disney 2012 / UsdPreviewSurface). Thin dielectric layer
-    // on top of the base material. IOR fixed at 1.5 (F0 = 0.04) in the
-    // kernel. `clearcoat` scales the lobe strength [0, 1]; when 0 the
-    // lobe and attenuation skip entirely.
-    float  clearcoat;
-    float  clearcoatRoughness;
 };
 
 // GPU-side texture (header only — pixel data is a separate device buffer)

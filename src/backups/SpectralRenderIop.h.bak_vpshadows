@@ -315,11 +315,6 @@ private:
     bool   _vpEnvReflections = true;
     bool   _vpGeoReflections = true;
     bool   _vpVolReflections = true;
-    // Viewport shadow-map pass. Dominates cost on dense geometry
-    // (rebuilds a 1024-res shadow map every frame with immediate-mode
-    // GL calls over all triangles). OFF by default; users can enable
-    // for still-frame lighting review.
-    bool   _vpEnableShadows = false;
     int    _vpReflSteps = 1;        // 0=8, 1=16, 2=32, 3=64
     GLuint _glVolProg = 0;
     GLuint _glShadowProg = 0;
@@ -438,6 +433,7 @@ private:
     bool  _aovVolShadow = false;
     bool  _aovVolLights = false;
     bool  _aovVolDepth = false;
+    bool  _aovMotion = false;
     bool  _aovDenoiseAlbedo = false;
     bool  _aovDenoiseNormal = false;
 
@@ -445,7 +441,9 @@ private:
     int   _deepSamples = 0;  // 0=disabled, 16-128
 
     // Motion blur
+    bool  _motionBlur = false;
     int   _shutterPreset = 1;  // 0=Start,1=Centre,2=End,3=Custom
+    int   _motionSamples = 3;
     // Camera motion blur
     bool  _cameraMblur = false;
     int   _cameraMblurQuality = 4;  // extra samples for camera blur

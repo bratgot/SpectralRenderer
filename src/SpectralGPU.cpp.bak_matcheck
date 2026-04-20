@@ -421,32 +421,6 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
             p.f = mats[i].gratingSpacing; matCheck ^= p.u * 25165843u;
             p.f = mats[i].fluorStrength; matCheck ^= p.u * 50331653u;
             matCheck ^= static_cast<unsigned int>(mats[i].metalType) * 7u;
-            // --- Comprehensive audit (all fields that flow to GPU) ---
-            // Missing from the original checksum; changing any of these
-            // knobs silently did nothing on GPU because the material
-            // buffer was never re-uploaded. Each uses a distinct large
-            // prime multiplier so field values can't collide with each
-            // other under XOR.
-            p.f = mats[i].emissiveColor[0]; matCheck ^= p.u * 5449u;
-            p.f = mats[i].emissiveColor[1]; matCheck ^= p.u * 8369u;
-            p.f = mats[i].emissiveColor[2]; matCheck ^= p.u * 11329u;
-            matCheck ^= static_cast<unsigned int>(mats[i].baseColorTexId + 1) * 14561u;
-            p.f = mats[i].textureBlend;     matCheck ^= p.u * 17401u;
-            matCheck ^= static_cast<unsigned int>(mats[i].bumpMapTexId + 1) * 20149u;
-            p.f = mats[i].bumpStrength;     matCheck ^= p.u * 23071u;
-            p.f = mats[i].absorptionColor[0]; matCheck ^= p.u * 26153u;
-            p.f = mats[i].absorptionColor[1]; matCheck ^= p.u * 29339u;
-            p.f = mats[i].absorptionColor[2]; matCheck ^= p.u * 32687u;
-            p.f = mats[i].gratingStrength;  matCheck ^= p.u * 35993u;
-            p.f = mats[i].fluorAbsorb;      matCheck ^= p.u * 39239u;
-            p.f = mats[i].fluorEmit;        matCheck ^= p.u * 42577u;
-            // Phase 2 (SSS) and Phase 3 (clearcoat) fields.
-            p.f = mats[i].sssColor[0];      matCheck ^= p.u * 100663319u;
-            p.f = mats[i].sssColor[1];      matCheck ^= p.u * 201326611u;
-            p.f = mats[i].sssColor[2];      matCheck ^= p.u * 402653189u;
-            p.f = mats[i].sssRadius;        matCheck ^= p.u * 805306457u;
-            p.f = mats[i].clearcoat;          matCheck ^= p.u * 1610612741u;
-            p.f = mats[i].clearcoatRoughness; matCheck ^= p.u * 46051u;
         }
 
         bool lightsChanged = (lightCheck != _cachedLightChecksum);

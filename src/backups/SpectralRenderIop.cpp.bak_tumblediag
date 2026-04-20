@@ -1065,16 +1065,6 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                    "to control penumbra width in the viewport.");
     }
     {
-        Bool_knob(f, &_vpEnableShadows, "vp_enable_shadows", "shadows");
-        ClearFlags(f, Knob::STARTLINE);
-        Tooltip(f, "Enable the viewport shadow-map pass.\n\n"
-                   "OFF by default because the shadow pass iterates all\n"
-                   "triangles through OpenGL immediate mode every frame,\n"
-                   "causing tumble stutter on dense geometry (e.g. subdivided\n"
-                   "meshes, character rigs). Turn ON for still-frame lighting\n"
-                   "review, OFF for interactive viewport navigation.");
-    }
-    {
         static const char* const volShadOpts[] = {
             "off", "4", "8", "16", nullptr
         };
@@ -1201,6 +1191,12 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         Tooltip(f, "Shutter close time relative to frame, in frames.\n"
                    "0.25 = one quarter frame after current (default, 180 shutter centred).\n"
                    "0.5  = one half   frame after current (360 shutter centred, full blur).");
+        Int_knob(f, &_motionSamples, "motion_samples", "samples"); SetRange(f, 2, 8);
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Volume-velocity time samples across the shutter.\n"
+                   "2 = fast. 3 = good. 5 = smooth. 8 = overkill.\n"
+                   "Object motion blur doesn't use this -- it samples time\n"
+                   "once per spp, so raise the main spp for smoother blur.");
     }
 
     Divider(f, "Object motion blur");
@@ -1221,6 +1217,23 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                    "CPU: fully supported.\n"
                    "GPU: currently falls back to CPU when active\n"
                    "(OptiX motion GAS support landing in next patch).");
+    }
+
+    Divider(f, "Volume velocity blur");
+    {
+        Text_knob(f,
+            "<font color='#777' size='-1'>"
+            "VDB velocity grids (vel/v) drive volume sample motion across the shutter."
+            "</font>"
+        );
+        Newline(f);
+        Bool_knob(f, &_motionBlur, "motion_blur", "enable");
+        Tooltip(f, "Render volume motion blur from VDB velocity grids.\n"
+                   "Offsets volume samples across the shutter interval.\n"
+                   "Requires a velocity grid to be loaded.\n"
+                   "\n"
+                   "This is NOT the same as object motion blur above --\n"
+                   "this is purely for volumes that carry per-voxel velocity data.");
     }
 
     // Camera motion blur kept INVISIBLE until the axis-chain evaluation is wired.
@@ -1374,6 +1387,11 @@ void SpectralRenderIop::knobs(Knob_Callback f)
     Tooltip(f, "First-hit depth as vol_depth (single channel).\n"
                "Distance from camera to first dense voxel.\n"
                "Use for depth-of-field, fog cards, or Z-compositing.");
+    Bool_knob(f, &_aovMotion, "aov_motion", "motion vectors");
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "Screen-space motion vectors as vol_motion (RG).\n"
+               "Pixels/frame displacement. Requires velocity grid.\n"
+               "Feed to VectorBlur or MotionBlur nodes in comp.");
 
     // ─── Denoiser ───────────────────────────────────────────────────
     Divider(f, "Denoiser auxiliary");
@@ -1868,7 +1886,6 @@ int SpectralRenderIop::knob_changed(Knob* k)
 // ---------------------------------------------------------------------------
 void SpectralRenderIop::_validate(bool forReal)
 {
-    fprintf(stderr, "TumbleDiag: _validate enter, forReal=%d\n", forReal ? 1 : 0);
     // --------------------------------------------------------------------
     // Registry cleanup: walk upstream Ops, collect live node names,
     // erase stale entries from the four Spectral*Op static registries.
@@ -5648,7 +5665,6 @@ std::string SpectralRenderIop::_resolveFramePath(int frame) const
 // ---------------------------------------------------------------------------
 void SpectralRenderIop::append(Hash& hash)
 {
-    fprintf(stderr, "TumbleDiag: append enter\n");
     // Iop::append auto-hashes every registered knob on this node plus the
     // output context (frame, view, proxy scale). This single line pre-empts
     // the entire class of "I toggle a knob but the frame doesn't refresh
@@ -5683,7 +5699,6 @@ void SpectralRenderIop::append(Hash& hash)
     hash.append(_scanlineCompat ? 1 : 0);
     hash.append(_useBuiltinLight ? 1 : 0);
     hash.append(_deviceMode);
-    hash.append(_vpEnableShadows ? 1 : 0);
     if (_vdbFile) hash.append(_vdbFile);
     hash.append((int)_volumes.size());
     hash.append(_edgeSamples);
@@ -6595,125 +6610,8 @@ void SpectralRenderIop::_DrawVolumeShaded(ViewerContext* ctx, bool writeDepth)
     glPopAttrib();
 }
 
-// ---------------------------------------------------------------------------
-//  _EnsureGeoVBO -- build or rebuild the viewport geometry VBO.
-//  Called at the top of draw_handle when the scene has changed.
-//  Also recomputes cached scene bounds in the same pass so we avoid a
-//  second 120k-triangle iteration later in the frame.
-// ---------------------------------------------------------------------------
-void SpectralRenderIop::_EnsureGeoVBO()
-{
-    const size_t totalTris = _scene ? _scene->TotalTriangles() : 0;
-
-    // Nothing to upload? Release any existing VBO and bail.
-    if (totalTris == 0) {
-        if (_glGeoVBO) { glDeleteBuffers(1, &_glGeoVBO); _glGeoVBO = 0; }
-        _glGeoVBOTriCount = 0;
-        _glGeoMeshRanges.clear();
-        _glSceneBoundsValid = false;
-        _glGeoVBODirty = false;
-        return;
-    }
-
-    // Only rebuild if the triangle count changed or something explicitly
-    // dirtied us. For now triangle count is the only signal -- if meshes
-    // deform but keep the same count we'd miss it. That matches the rest
-    // of the viewport path (shadow map also doesn't re-detect deform).
-    if (!_glGeoVBODirty && _glGeoVBOTriCount == totalTris && _glGeoVBO != 0) {
-        return;
-    }
-
-    // Build interleaved buffer: { float3 pos, float3 norm, float2 uv }
-    // stride 32 bytes, 3 verts per tri.
-    const size_t vertCount  = totalTris * 3;
-    const size_t floatsPerV = 8;   // 3 + 3 + 2
-    std::vector<float> interleaved;
-    interleaved.reserve(vertCount * floatsPerV);
-
-    _glGeoMeshRanges.clear();
-    float mn[3] = {  1e30f,  1e30f,  1e30f };
-    float mx[3] = { -1e30f, -1e30f, -1e30f };
-
-    int firstTri = 0;
-    for (const auto& kv : _scene->GetMeshes()) {
-        const auto& meshData = kv.second;
-        if (!meshData.visible || meshData.triangles.empty()) continue;
-        int matId = meshData.triangles[0].materialId;
-        GeoMeshRange r{ firstTri, (int)meshData.triangles.size(), matId };
-        _glGeoMeshRanges.push_back(r);
-        firstTri += (int)meshData.triangles.size();
-
-        for (const auto& tri : meshData.triangles) {
-            // Flat face normal (matches the non-scanline_compat path)
-            pxr::GfVec3f e1 = tri.v1 - tri.v0;
-            pxr::GfVec3f e2 = tri.v2 - tri.v0;
-            pxr::GfVec3f fn(e1[1]*e2[2]-e1[2]*e2[1],
-                            e1[2]*e2[0]-e1[0]*e2[2],
-                            e1[0]*e2[1]-e1[1]*e2[0]);
-            // Choose vertex vs face normal. We upload vertex normals when
-            // the triangles have them (scanline_compat smooth-shaded
-            // viewport), else face normal.
-            bool hasVN = !_scanlineCompat
-                ? false
-                : (tri.n0[0]!=0 || tri.n0[1]!=0 || tri.n0[2]!=0);
-            const pxr::GfVec3f& n0 = hasVN ? tri.n0 : fn;
-            const pxr::GfVec3f& n1 = hasVN ? tri.n1 : fn;
-            const pxr::GfVec3f& n2 = hasVN ? tri.n2 : fn;
-
-            // Bounds
-            for (int a = 0; a < 3; ++a) {
-                if (tri.v0[a] < mn[a]) mn[a] = tri.v0[a];
-                if (tri.v1[a] < mn[a]) mn[a] = tri.v1[a];
-                if (tri.v2[a] < mn[a]) mn[a] = tri.v2[a];
-                if (tri.v0[a] > mx[a]) mx[a] = tri.v0[a];
-                if (tri.v1[a] > mx[a]) mx[a] = tri.v1[a];
-                if (tri.v2[a] > mx[a]) mx[a] = tri.v2[a];
-            }
-
-            // v0
-            interleaved.push_back(tri.v0[0]); interleaved.push_back(tri.v0[1]); interleaved.push_back(tri.v0[2]);
-            interleaved.push_back(n0[0]);      interleaved.push_back(n0[1]);      interleaved.push_back(n0[2]);
-            interleaved.push_back(tri.uv0[0]); interleaved.push_back(1.f - tri.uv0[1]);
-            // v1
-            interleaved.push_back(tri.v1[0]); interleaved.push_back(tri.v1[1]); interleaved.push_back(tri.v1[2]);
-            interleaved.push_back(n1[0]);      interleaved.push_back(n1[1]);      interleaved.push_back(n1[2]);
-            interleaved.push_back(tri.uv1[0]); interleaved.push_back(1.f - tri.uv1[1]);
-            // v2
-            interleaved.push_back(tri.v2[0]); interleaved.push_back(tri.v2[1]); interleaved.push_back(tri.v2[2]);
-            interleaved.push_back(n2[0]);      interleaved.push_back(n2[1]);      interleaved.push_back(n2[2]);
-            interleaved.push_back(tri.uv2[0]); interleaved.push_back(1.f - tri.uv2[1]);
-        }
-    }
-
-    // Upload
-    if (!_glGeoVBO) glGenBuffers(1, &_glGeoVBO);
-    glBindBuffer(GL_ARRAY_BUFFER, _glGeoVBO);
-    glBufferData(GL_ARRAY_BUFFER,
-                 interleaved.size() * sizeof(float),
-                 interleaved.data(),
-                 GL_STATIC_DRAW);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-
-    _glGeoVBOTriCount = totalTris;
-    _glSceneMin[0]=mn[0]; _glSceneMin[1]=mn[1]; _glSceneMin[2]=mn[2];
-    _glSceneMax[0]=mx[0]; _glSceneMax[1]=mx[1]; _glSceneMax[2]=mx[2];
-    _glSceneBoundsValid = true;
-    _glGeoVBODirty = false;
-    SLOG("SpectralRender: viewport VBO rebuilt, %zu tris\n", totalTris);
-}
-
-// Note: _IsInteractiveDraw (detect tumble for skipping shadow pass) lives
-// in Part B of this fix. We need to verify the correct Nuke NDK event
-// enum before shipping; guessing risks a worse bug than the one we're
-// fixing. For Part A we only add VBO infrastructure.
-
-
 void SpectralRenderIop::draw_handle(ViewerContext* ctx)
 {
-    static int s_drawHandleCallCount = 0;
-    if ((++s_drawHandleCallCount % 30) == 1) {
-        fprintf(stderr, "TumbleDiag: draw_handle call #%d\n", s_drawHandleCallCount);
-    }
     glPushAttrib(GL_CURRENT_BIT | GL_LINE_BIT | GL_ENABLE_BIT | GL_POINT_BIT);
     glDisable(GL_LIGHTING);
     glEnable(GL_BLEND);
@@ -7158,13 +7056,9 @@ void SpectralRenderIop::draw_handle(ViewerContext* ctx)
             }
 
             // ─── Shadow map pass: render geometry from light POV ───
-            // Gated on _vpEnableShadows; when off we skip the entire pass
-            // for interactive viewport performance. See vp_enable_shadows
-            // knob and related notes in SpectralRenderIop.h.
             float lightVP[16] = {};
             bool hasShadowMap = false;
-            if (_vpEnableShadows
-                && _glShadowFBO && _glShadowDepthProg && _glShadowDepthTex && gHasLight) {
+            if (_glShadowFBO && _glShadowDepthProg && _glShadowDepthTex && gHasLight) {
                 // Compute scene bounds from all meshes
                 float scnMin[3] = {1e30f, 1e30f, 1e30f};
                 float scnMax[3] = {-1e30f, -1e30f, -1e30f};

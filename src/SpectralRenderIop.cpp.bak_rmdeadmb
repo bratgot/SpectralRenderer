@@ -1201,6 +1201,12 @@ void SpectralRenderIop::knobs(Knob_Callback f)
         Tooltip(f, "Shutter close time relative to frame, in frames.\n"
                    "0.25 = one quarter frame after current (default, 180 shutter centred).\n"
                    "0.5  = one half   frame after current (360 shutter centred, full blur).");
+        Int_knob(f, &_motionSamples, "motion_samples", "samples"); SetRange(f, 2, 8);
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Volume-velocity time samples across the shutter.\n"
+                   "2 = fast. 3 = good. 5 = smooth. 8 = overkill.\n"
+                   "Object motion blur doesn't use this -- it samples time\n"
+                   "once per spp, so raise the main spp for smoother blur.");
     }
 
     Divider(f, "Object motion blur");
@@ -1221,6 +1227,23 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                    "CPU: fully supported.\n"
                    "GPU: currently falls back to CPU when active\n"
                    "(OptiX motion GAS support landing in next patch).");
+    }
+
+    Divider(f, "Volume velocity blur");
+    {
+        Text_knob(f,
+            "<font color='#777' size='-1'>"
+            "VDB velocity grids (vel/v) drive volume sample motion across the shutter."
+            "</font>"
+        );
+        Newline(f);
+        Bool_knob(f, &_motionBlur, "motion_blur", "enable");
+        Tooltip(f, "Render volume motion blur from VDB velocity grids.\n"
+                   "Offsets volume samples across the shutter interval.\n"
+                   "Requires a velocity grid to be loaded.\n"
+                   "\n"
+                   "This is NOT the same as object motion blur above --\n"
+                   "this is purely for volumes that carry per-voxel velocity data.");
     }
 
     // Camera motion blur kept INVISIBLE until the axis-chain evaluation is wired.
@@ -1374,6 +1397,11 @@ void SpectralRenderIop::knobs(Knob_Callback f)
     Tooltip(f, "First-hit depth as vol_depth (single channel).\n"
                "Distance from camera to first dense voxel.\n"
                "Use for depth-of-field, fog cards, or Z-compositing.");
+    Bool_knob(f, &_aovMotion, "aov_motion", "motion vectors");
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "Screen-space motion vectors as vol_motion (RG).\n"
+               "Pixels/frame displacement. Requires velocity grid.\n"
+               "Feed to VectorBlur or MotionBlur nodes in comp.");
 
     // ─── Denoiser ───────────────────────────────────────────────────
     Divider(f, "Denoiser auxiliary");

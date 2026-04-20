@@ -16,13 +16,7 @@ public:
     ~SpectralDraftingOp() override;
 
     int minimum_inputs() const override { return 0; }
-    int maximum_inputs() const override { return 1; }
-
-    // Accept one optional upstream ShaderOp for pass-through stacking.
-    // When connected, Drafting delegates material generation to the
-    // upstream shader and just registers its own wireframe params.
-    bool test_input(int idx, Op* op) const override;
-    const char* input_label(int n, char* buffer) const override;
+    int maximum_inputs() const override { return 0; }
 
     const char* Class()     const override { return CLASS; }
     const char* node_help() const override;
@@ -109,11 +103,6 @@ public:
         // Antialiasing
         int    aaMode = 1;
         float  aaWidth = 1.5f;
-        // Pass-through: set to upstream ShaderOp's node_name() when the
-        // user has chained another shader into Drafting's input. Empty
-        // when Drafting is standalone. Consumer matches material prim
-        // path against this too.
-        std::string upstreamName;
     };
     static std::unordered_map<std::string, DraftingParams>& GetRegistry();
     void RegisterParams();

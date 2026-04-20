@@ -249,18 +249,6 @@ void SpectralDraftingOp::knobs(Knob_Callback f)
     EndGroup(f);
 }
 
-bool SpectralDraftingOp::test_input(int idx, Op* op) const
-{
-    // Accept only ShaderOp-derived ops at input 0.
-    if (idx != 0 || !op) return false;
-    return dynamic_cast<ShaderOp*>(op) != nullptr;
-}
-
-const char* SpectralDraftingOp::input_label(int n, char* /*buffer*/) const
-{
-    return (n == 0) ? "shader" : nullptr;
-}
-
 int SpectralDraftingOp::knob_changed(Knob* k)
 {
     RegisterParams();
@@ -318,15 +306,6 @@ void SpectralDraftingOp::RegisterParams()
     // Antialiasing
     p.aaMode               = _aaMode;
     p.aaWidth              = _aaWidth;
-
-    // Pass-through: capture upstream ShaderOp's node_name so the consumer
-    // (SpectralRenderIop) can match the bound material by the upstream's
-    // path substring instead of our own.
-    if (inputs() > 0 && input(0)) {
-        if (ShaderOp* up = dynamic_cast<ShaderOp*>(input(0)))
-            p.upstreamName = up->node_name();
-    }
-
     GetRegistry()[node_name()] = p;
 }
 
@@ -342,21 +321,6 @@ usg::ShaderDesc* SpectralDraftingOp::createShaderGraph(
     const MaterialContext& rtx,
     usg::ShaderDescGroup&  shaderGroup)
 {
-    // Pass-through mode: if an upstream ShaderOp is connected, delegate
-    // material generation to it so the mesh binds to the base shader's
-    // material. We still register our own wireframe params; the overlay
-    // pass matches the upstream shader's name at render time.
-    if (inputs() > 0 && input(0)) {
-        if (ShaderOp* up = dynamic_cast<ShaderOp*>(input(0))) {
-            usg::ShaderDesc* delegated =
-                up->createShaderGraph(outputType, rtx, shaderGroup);
-            RegisterParams();
-            return delegated;
-        }
-    }
-
-    // Standalone mode (original behaviour): produce the transparent
-    // stub material so the wireframe overlay has a surface to sit on.
     std::string shaderName = getShaderNodeName(rtx.shaderFamily);
     usg::ShaderDesc* existing = shaderGroup.getShaderNode(shaderName);
     if (existing) return existing;
@@ -378,16 +342,6 @@ void SpectralDraftingOp::updateShaderGraphOverrides(
     const MaterialContext& rtx,
     usg::ShaderDescGroup&  shaderGroup)
 {
-    // Delegate to upstream when chained -- don't clobber the base shader's
-    // overrides with our stub values.
-    if (inputs() > 0 && input(0)) {
-        if (ShaderOp* up = dynamic_cast<ShaderOp*>(input(0))) {
-            up->updateShaderGraphOverrides(outputType, rtx, shaderGroup);
-            RegisterParams();
-            return;
-        }
-    }
-
     std::string shaderName = getShaderNodeName(rtx.shaderFamily);
     usg::ShaderDesc* desc = shaderGroup.getShaderNode(shaderName);
     if (desc) {

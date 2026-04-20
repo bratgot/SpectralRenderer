@@ -143,37 +143,7 @@ public:
         // Transparent materials (opacity < 1) reduce diffuse proportionally
         float diffuse = (1.f - mat.metallic) * mat.opacity * baseRefl * diffuseFactor / 3.14159f;
 
-        // ----------------------------------------------------------
-        // Clearcoat (Disney 2012 / UsdPreviewSurface)
-        //
-        //   A thin dielectric layer on top of the base material.
-        //   Fixed IOR = 1.5 (F0 = 0.04), fixed Smith G alpha = 0.25
-        //   (Disney's choice -- keeps the coat bright at grazing
-        //   rather than vanishing, which is what we want for car
-        //   paint / lacquer). Own GGX roughness (clearcoatRoughness).
-        //
-        //   Added on top of (diffuse + specular). To keep energy
-        //   honest, the base is scaled by (1 - F_c * clearcoat):
-        //   the coat takes a fraction of the incoming light.
-        // ----------------------------------------------------------
-        float clearcoatLobe = 0.f;
-        float clearcoatAttn = 1.f;
-        if (mat.clearcoat > 0.f) {
-            const float ccF0 = 0.04f;   // Fresnel at normal, IOR 1.5
-            float Fc = ccF0 + (1.f - ccF0) * _SchlickWeight(VdotH);
-            float ccRough = std::max(0.01f, mat.clearcoatRoughness);
-            float ccAlpha = ccRough * ccRough;
-            float Dc = _GGX_D(ccAlpha, NdotH);
-            // Disney uses a Smith G with alpha = 0.25 regardless of
-            // clearcoat roughness -- intentional, prevents the coat
-            // disappearing at grazing angles.
-            float Gc = _Smith_G(0.25f, NdotV, NdotL);
-            clearcoatLobe = (Dc * Gc * Fc) / (4.f * NdotV * NdotL + 1e-7f);
-            clearcoatLobe *= mat.clearcoat;
-            clearcoatAttn = 1.f - Fc * mat.clearcoat;
-        }
-
-        return ((diffuse + specular) * clearcoatAttn + clearcoatLobe) * NdotL;
+        return (diffuse + specular) * NdotL;
     }
 
     // ------------------------------------------------------------------
