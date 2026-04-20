@@ -96,24 +96,10 @@ private:
     float _sssColor[3] = {0.f, 0.f, 0.f};
     float _sssRadius = 0.f;
 
-    // Per-category preset selectors (new split UI). Each is an index
-    // into the category's small preset list. 0 = "(none)". Legacy
-    // _spectralPreset kept for backward compatibility with old .nk
-    // files.
-    int _presetDielectric = 0;
-    int _presetMetal      = 0;
-    int _presetOrganic    = 0;
-    int _presetSpectral   = 0;
-    int _presetCreative   = 0;
-    int _presetMetalRgl   = 0;
-    int _presetFabric     = 0;
-    int _presetCoating    = 0;
-
-    // _ApplyPresetV2 replaces the old _ApplyPreset for the new split
-    // UI. Key difference: it writes through Knob::set_value ONLY,
-    // never assigning members directly. This ensures Nuke's change
-    // detection sees the value change and refreshes the panel widget.
-    void _ApplyPresetV2(int category, int preset);
+    // 2026-04-20: unified back to a single master preset dropdown
+    // mirroring SpectralVolumeMaterial. The earlier 8-category split
+    // had re-entrant callback issues that caused some presets (jade,
+    // spectral category) to fail after a few selections.
     const char* _displacementFile = "";  // displacement map path
 
     void _ApplyPreset(int preset);

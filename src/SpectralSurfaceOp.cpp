@@ -127,195 +127,39 @@ void SpectralSurfaceOp::knobs(Knob_Callback f)
     );
     Divider(f);
 
-    // Legacy single-preset enum, kept INVISIBLE so old .nk files load
-    // without knob warnings. All new work goes through the per-category
-    // enums below.
-    Enumeration_knob(f, &_spectralPreset, kSpectralPresetNames, "preset", "Preset");
-    SetFlags(f, Knob::INVISIBLE);
-
+    // Master preset dropdown. 42 entries with 8 header dividers
+    // (kSpectralPresetNames). Headers are handled as no-ops in
+    // _ApplyPreset. Mirrors the SpectralVolumeMaterial approach.
     BeginClosedGroup(f, "preset_grp", "Preset");
     {
-        Text_knob(f,
-            "<font color='#999' size='-1'>"
-            "Pick one preset. Picking a preset in any category auto-resets the others,"
-            "<br>so the panel always shows one active preset (or all '(none)' for custom)."
-            "</font>"
+        Enumeration_knob(f, &_spectralPreset, kSpectralPresetNames,
+                         "preset", "material");
+        Tooltip(f,
+            "Physically-accurate material presets.\n"
+            "\n"
+            "Dielectrics:  glass, diamond, water, ruby\n"
+            "Metals:       copper, gold, silver, aluminium (spectral n,k)\n"
+            "Organic:      skin, wood, paper, concrete, rubber, jade\n"
+            "Spectral:     CD/DVD, soap bubble, highlighter\n"
+            "Creative:     kryptonite, bioluminescence, plasma\n"
+            "RGL metals:   chrome, nickel, brass, tungsten, anodized blue\n"
+            "Fabrics:      silk, velvet, satin, denim, leather\n"
+            "Coatings:     car paint, pearl white, porcelain\n"
+            "\n"
+            "Dielectrics set opacity ~0.002 to enable refraction. Set\n"
+            "refraction bounces to 8+ in SpectralRender for clean glass.\n"
+            "\n"
+            "Metals in the first category use per-wavelength complex IOR\n"
+            "tables (Palik's Handbook). RGL metals use tuned metallic=1\n"
+            "+ IOR + roughness approximations -- cheaper, slightly less\n"
+            "accurate.\n"
+            "\n"
+            "Presets reset all material properties. Tweak sliders after\n"
+            "selecting to fine-tune."
         );
-        Newline(f);
-
-        {
-            static const char* const kDielectric[] = {
-                "(none)", "glass", "diamond", "water", "ruby", nullptr
-            };
-            Enumeration_knob(f, &_presetDielectric, kDielectric,
-                             "preset_dielectric", "dielectrics");
-            Tooltip(f,
-                "Transparent / refractive dielectrics.\n"
-                "\n"
-                "  glass    -- n=1.52, Abbe 58 (crown glass)\n"
-                "  diamond  -- n=2.42, Abbe 55, strong dispersion\n"
-                "  water    -- n=1.333, tinted volume absorption\n"
-                "  ruby     -- n=1.77, red volume, fluorescence\n"
-                "\n"
-                "These presets set opacity very low (~0.002) to enable\n"
-                "refraction. The renderer treats opacity < 1 as transmissive.\n"
-                "\n"
-                "TIP: set refraction bounces to 8+ in SpectralRender for\n"
-                "clean glass. Dispersion (Abbe) controls the rainbow spread --\n"
-                "raise it to 60+ for visible prism effects."
-            );
-        }
-        {
-            static const char* const kMetal[] = {
-                "(none)", "copper", "gold", "silver", "aluminium", nullptr
-            };
-            Enumeration_knob(f, &_presetMetal, kMetal,
-                             "preset_metal", "metals");
-            ClearFlags(f, Knob::STARTLINE);
-            Tooltip(f,
-                "Measured metals -- spectral complex IOR (n,k) tables.\n"
-                "\n"
-                "  copper    -- warm red-orange Fresnel\n"
-                "  gold      -- characteristic yellow reflectance\n"
-                "  silver    -- nearly flat high reflectance\n"
-                "  aluminium -- broad-spectrum, slight blue at grazing\n"
-                "\n"
-                "Uses per-wavelength n,k values at 5 bands (380-780nm in\n"
-                "100nm steps) rather than a single IOR. Both CPU and GPU\n"
-                "paths support this. Visually correct even at low spp\n"
-                "because the wavelength-tinted Fresnel is deterministic."
-            );
-        }
-        {
-            static const char* const kMetalRgl[] = {
-                "(none)", "chrome steel", "brushed nickel", "brass", "tungsten",
-                "anodized blue", nullptr
-            };
-            Enumeration_knob(f, &_presetMetalRgl, kMetalRgl,
-                             "preset_metal_rgl", "metals (measured)");
-            Tooltip(f,
-                "Measured-BRDF approximations (RGL database).\n"
-                "\n"
-                "  chrome steel    -- very low roughness, high IOR\n"
-                "  brushed nickel  -- elongated anisotropy (approximated)\n"
-                "  brass           -- warm yellow metal\n"
-                "  tungsten        -- high IOR, dense metal look\n"
-                "  anodized blue   -- aluminium base + 250nm thin-film\n"
-                "\n"
-                "These use tuned metallic=1 + IOR + roughness rather than\n"
-                "the full complex-IOR table. Cheaper to evaluate, less\n"
-                "physically exact than the 'metals' category above."
-            );
-        }
-        {
-            static const char* const kOrganic[] = {
-                "(none)", "skin", "wood", "white paper", "concrete", "rubber", "jade", nullptr
-            };
-            Enumeration_knob(f, &_presetOrganic, kOrganic,
-                             "preset_organic", "organic");
-            ClearFlags(f, Knob::STARTLINE);
-            Tooltip(f,
-                "Everyday surfaces.\n"
-                "\n"
-                "  skin         -- warm SSS (radius 0.5), Disney diffuse\n"
-                "  wood         -- diffuse with brown base, no SSS\n"
-                "  white paper  -- high diffuse (0.73), rough\n"
-                "  concrete     -- mid-grey, very rough (0.95)\n"
-                "  rubber       -- near-black, rough, low IOR\n"
-                "  jade         -- green SSS (radius 0.3), smooth\n"
-                "\n"
-                "SSS note: CPU uses a 16-step random walk for accuracy;\n"
-                "GPU uses a wrap-diffuse approximation (see subsurface\n"
-                "scattering section below for details). Both look\n"
-                "reasonable at typical render settings."
-            );
-        }
-        {
-            static const char* const kSpectral[] = {
-                "(none)", "CD/DVD", "soap bubble", "highlighter", nullptr
-            };
-            Enumeration_knob(f, &_presetSpectral, kSpectral,
-                             "preset_spectral", "spectral");
-            Tooltip(f,
-                "Effects that only exist in a spectral renderer.\n"
-                "\n"
-                "  CD/DVD      -- 0.46um grating, rainbow diffraction\n"
-                "  soap bubble -- 350nm thin-film interference\n"
-                "  highlighter -- UV-to-green fluorescence (Stokes shift)\n"
-                "\n"
-                "Diffraction: the grating spacing in um determines rainbow\n"
-                "angular spread. CD is 1.6um (but pre-reduced here), DVD is\n"
-                "0.74um, butterfly iridescence is ~0.5um.\n"
-                "\n"
-                "Fluorescence: absorb in UV (350nm) -> emit in visible\n"
-                "(520nm green). Needs UV content in the lighting; HDRIs\n"
-                "and daylight provide it, pure-RGB lights do not."
-            );
-        }
-        {
-            static const char* const kCreative[] = {
-                "(none)", "kryptonite", "bioluminescence", "plasma", nullptr
-            };
-            Enumeration_knob(f, &_presetCreative, kCreative,
-                             "preset_creative", "creative");
-            ClearFlags(f, Knob::STARTLINE);
-            Tooltip(f,
-                "Fictional materials combining multiple effects.\n"
-                "\n"
-                "  kryptonite      -- green fluorescence + volume absorption\n"
-                "  bioluminescence -- blue-cyan emission + fluorescence\n"
-                "  plasma          -- magenta emission, low opacity + refraction\n"
-                "\n"
-                "All three combine emissiveColor with fluorescence for\n"
-                "self-illuminating materials that also glow under UV light.\n"
-                "Good starting points for motion graphics / stylised looks."
-            );
-        }
-        {
-            static const char* const kFabric[] = {
-                "(none)", "silk", "velvet", "satin", "denim", "leather", nullptr
-            };
-            Enumeration_knob(f, &_presetFabric, kFabric,
-                             "preset_fabric", "fabrics");
-            Tooltip(f,
-                "Cloth and soft-goods approximations (RGL-inspired).\n"
-                "\n"
-                "  silk    -- warm tan, clearcoat 0.3 for subtle sheen\n"
-                "  velvet  -- deep wine red, very rough, no clearcoat\n"
-                "  satin   -- off-white, clearcoat 0.5\n"
-                "  denim   -- dark navy, rough, no clearcoat\n"
-                "  leather -- brown, slight clearcoat for grain\n"
-                "\n"
-                "Note: true fabric BRDFs have anisotropic fibre structure\n"
-                "not modelled here. For closer matches, use textures with\n"
-                "these presets as the base."
-            );
-        }
-        {
-            static const char* const kCoating[] = {
-                "(none)", "car paint red", "car paint black", "pearl white",
-                "porcelain", nullptr
-            };
-            Enumeration_knob(f, &_presetCoating, kCoating,
-                             "preset_coating", "coatings");
-            ClearFlags(f, Knob::STARTLINE);
-            Tooltip(f,
-                "Layered coatings with strong clearcoat.\n"
-                "\n"
-                "  car paint red   -- red base, clearcoat=1, ccRough=0.02\n"
-                "  car paint black -- near-black, clearcoat=1, ccRough=0.01\n"
-                "  pearl white     -- warm white, clearcoat + thin-film\n"
-                "  porcelain       -- creamy SSS + smooth clearcoat\n"
-                "\n"
-                "Clearcoat is a physically-based Disney lobe on top of the\n"
-                "base material. Pearl uses thin-film interference (180nm)\n"
-                "for the characteristic iridescent shift."
-            );
-        }
-
         Text_knob(f,
             "<font color='#888' size='-1'>"
-            "Presets reset all material properties. Tweak sliders afterwards."
+            "Picking a preset resets all properties. Tweak sliders after."
             "</font>"
         );
     }
@@ -424,7 +268,7 @@ void SpectralSurfaceOp::knobs(Knob_Callback f)
     }
     EndGroup(f);
 
-    BeginClosedGroup(f, "sss_grp", "Subsurface scattering (CPU)");
+    BeginClosedGroup(f, "sss_grp", "Subsurface scattering");
     {
         Color_knob(f, _sssColor, "sss_color", "scatter color");
         Tooltip(f, "Black=off. Red=skin/wax. White=milk/marble. Green=jade.");
@@ -499,7 +343,7 @@ void SpectralSurfaceOp::knobs(Knob_Callback f)
             "Gaussian absorption (30nm) and emission (40nm) bands.<br>"
             "Impossible in RGB renderers -- requires spectral wavelength tracking.<br>"
             "<br>"
-            "<b>Subsurface scattering (CPU, GPU planned)</b><br>"
+            "<b>Subsurface scattering (GPU + CPU)</b><br>"
             "Light enters the surface and scatters inside before exiting nearby.<br>"
             "Spectral MFP: each wavelength scatters a different distance.<br>"
             "Red penetrates further in skin, blue is absorbed quickly.<br>"
@@ -512,7 +356,7 @@ void SpectralSurfaceOp::knobs(Knob_Callback f)
     Text_knob(f,
         "<font color='#666' size='-1'>"
         "SpectralSurface v1.1 \xc2\xb7 Physically-based spectral material<br>"
-        "Diffraction + Fluorescence on GPU + CPU \xc2\xb7 SSS on CPU<br>"
+        "Diffraction + Fluorescence on GPU + CPU \xc2\xb7 SSS on GPU + CPU<br>"
         "Created by Marten Blumen"
         "</font>"
     );
@@ -521,42 +365,23 @@ void SpectralSurfaceOp::knobs(Knob_Callback f)
 // ---------------------------------------------------------------------------
 int SpectralSurfaceOp::knob_changed(Knob* k)
 {
-    // Legacy single-preset enum -- drift-detection path kept for
-    // backward compatibility. The new per-category enums below
-    // dispatch explicitly via k->is().
-    if (_spectralPreset != _lastAppliedPreset) {
+    // Single master preset dropdown. Apply only when the value has
+    // actually changed from the last applied one; this prevents
+    // re-entrant panel-widget callbacks from re-applying the same
+    // preset during set_value push.
+    //
+    // CRITICAL: return 1 after preset apply, matching SpectralVolume-
+    // Material. Without this Nuke's default ShaderOp handling rebuilds
+    // the Op mid-callback and subsequent preset picks never reach the
+    // current instance. Combined with member-first writes in the push
+    // block (so set_value becomes a no-op that doesn't fire further
+    // callbacks), this is what makes the preset panel behave reliably.
+    if (k->is("preset") && _spectralPreset != _lastAppliedPreset) {
         _ApplyPreset(_spectralPreset);
         _lastAppliedPreset = _spectralPreset;
-        asapUpdate();
-    }
-
-    // New per-category preset enums. Each dispatches _ApplyPresetV2
-    // with a category tag and the preset index within that category.
-    // Picking "(none)" (index 0) does nothing, so a fresh graph with
-    // all enums at 0 preserves the SpectralMaterial defaults.
-    if (k->is("preset_dielectric") && _presetDielectric > 0) {
-        _ApplyPresetV2(0, _presetDielectric);
-    }
-    else if (k->is("preset_metal") && _presetMetal > 0) {
-        _ApplyPresetV2(1, _presetMetal);
-    }
-    else if (k->is("preset_organic") && _presetOrganic > 0) {
-        _ApplyPresetV2(2, _presetOrganic);
-    }
-    else if (k->is("preset_spectral") && _presetSpectral > 0) {
-        _ApplyPresetV2(3, _presetSpectral);
-    }
-    else if (k->is("preset_creative") && _presetCreative > 0) {
-        _ApplyPresetV2(4, _presetCreative);
-    }
-    else if (k->is("preset_metal_rgl") && _presetMetalRgl > 0) {
-        _ApplyPresetV2(5, _presetMetalRgl);
-    }
-    else if (k->is("preset_fabric") && _presetFabric > 0) {
-        _ApplyPresetV2(6, _presetFabric);
-    }
-    else if (k->is("preset_coating") && _presetCoating > 0) {
-        _ApplyPresetV2(7, _presetCoating);
+        RegisterParams();
+        s_spectralSurfaceVersion.fetch_add(1);
+        return 1;
     }
 
     // Always update registry + bump global version so SpectralRender detects changes
@@ -566,306 +391,22 @@ int SpectralSurfaceOp::knob_changed(Knob* k)
 }
 
 // ---------------------------------------------------------------------------
+// 2026-04-20 rewrite: mirrors SpectralVolumeMaterial's approach. Populate
+// LOCAL variables from the preset table, then push to knobs via
+// Knob::set_value. This is critical -- writing to members first then
+// calling set_value is a no-op because Nuke's change detection sees the
+// bound value already matches. Local-first-then-push makes the panel
+// update reliably, and avoids the re-entrant callback storms that
+// plagued the old 8-dropdown V2 design.
+// ---------------------------------------------------------------------------
 void SpectralSurfaceOp::_ApplyPreset(int preset)
 {
-    if (preset == 0) return;  // custom — don't change anything
-    // Header entries — do nothing
+    if (preset == 0) return;  // custom -- don't change anything
+    // Header entries (dividers in the enum list) -- do nothing
     if (preset == 1 || preset == 6 || preset == 11 || preset == 18 || preset == 22
         || preset == 26 || preset == 32 || preset == 38) return;
 
-    // Reset all advanced features to defaults
-    _abbeNumber = 0.f; _thinFilmThickness = 0.f; _metalType = 0;
-    _absorptionColor[0]=1.f; _absorptionColor[1]=1.f; _absorptionColor[2]=1.f;
-    _absorptionDensity = 0.f;
-    _gratingSpacing = 0.f; _gratingStrength = 1.f;
-    _fluorAbsorb = 0.f; _fluorEmit = 0.f; _fluorStrength = 0.f;
-    _sssColor[0]=0.f; _sssColor[1]=0.f; _sssColor[2]=0.f; _sssRadius = 0.f;
-    _emissiveColor[0]=0.f; _emissiveColor[1]=0.f; _emissiveColor[2]=0.f;
-    _clearcoat = 0.f; _clearcoatRoughness = 0.f;
-
-    switch (preset) {
-        // ── dielectrics ──
-        case 2: // glass
-            _diffuseColor[0] = _diffuseColor[1] = _diffuseColor[2] = 0.95f;
-            _metallic = 0.0f; _roughness = 0.0f; _ior = 1.52f;
-            _opacity = 0.002f; _abbeNumber = 58.f;
-            break;
-        case 3: // diamond
-            _diffuseColor[0] = _diffuseColor[1] = _diffuseColor[2] = 0.97f;
-            _metallic = 0.0f; _roughness = 0.0f; _ior = 2.42f;
-            _opacity = 0.002f; _abbeNumber = 55.f;
-            break;
-        case 4: // water
-            _diffuseColor[0] = 0.95f; _diffuseColor[1] = 0.95f; _diffuseColor[2] = 0.98f;
-            _metallic = 0.0f; _roughness = 0.0f; _ior = 1.333f;
-            _opacity = 0.15f; _abbeNumber = 55.f;
-            _absorptionColor[0]=0.4f; _absorptionColor[1]=0.75f; _absorptionColor[2]=0.9f; _absorptionDensity=1.0f;
-            break;
-        case 5: // ruby
-            _diffuseColor[0]=0.8f; _diffuseColor[1]=0.05f; _diffuseColor[2]=0.1f;
-            _metallic=0.0f; _roughness=0.05f; _ior=1.77f; _opacity=0.3f;
-            _absorptionColor[0]=0.9f; _absorptionColor[1]=0.05f; _absorptionColor[2]=0.1f;
-            _absorptionDensity=3.f; _abbeNumber=45.f;
-            _fluorAbsorb=410.f; _fluorEmit=694.f; _fluorStrength=1.5f;
-            break;
-
-        // ── metals ──
-        case 7: // copper
-            _diffuseColor[0] = 0.95f; _diffuseColor[1] = 0.64f; _diffuseColor[2] = 0.54f;
-            _metallic = 1.0f; _roughness = 0.2f; _ior = 1.1f; _opacity = 1.0f;
-            _metalType = 2;
-            break;
-        case 8: // gold
-            _diffuseColor[0] = 1.0f; _diffuseColor[1] = 0.76f; _diffuseColor[2] = 0.33f;
-            _metallic = 1.0f; _roughness = 0.1f; _ior = 0.47f; _opacity = 1.0f;
-            _metalType = 1;
-            break;
-        case 9: // silver
-            _diffuseColor[0] = 0.97f; _diffuseColor[1] = 0.96f; _diffuseColor[2] = 0.91f;
-            _metallic = 1.0f; _roughness = 0.05f; _ior = 0.18f; _opacity = 1.0f;
-            _metalType = 3;
-            break;
-        case 10: // aluminium
-            _diffuseColor[0] = 0.91f; _diffuseColor[1] = 0.92f; _diffuseColor[2] = 0.92f;
-            _metallic = 1.0f; _roughness = 0.15f; _ior = 1.39f; _opacity = 1.0f;
-            _metalType = 4;
-            break;
-
-        // ── organic ──
-        case 12: // skin
-            _diffuseColor[0] = 0.76f; _diffuseColor[1] = 0.57f; _diffuseColor[2] = 0.45f;
-            _metallic = 0.0f; _roughness = 0.5f; _ior = 1.4f; _opacity = 1.0f;
-            _sssColor[0] = 0.9f; _sssColor[1] = 0.4f; _sssColor[2] = 0.2f;
-            _sssRadius = 0.5f;
-            break;
-        case 13: // wood
-            _diffuseColor[0] = 0.43f; _diffuseColor[1] = 0.30f; _diffuseColor[2] = 0.18f;
-            _metallic = 0.0f; _roughness = 0.7f; _ior = 1.5f; _opacity = 1.0f;
-            break;
-        case 14: // white paper
-            _diffuseColor[0] = 0.75f; _diffuseColor[1] = 0.73f; _diffuseColor[2] = 0.70f;
-            _metallic = 0.0f; _roughness = 0.9f; _ior = 1.5f; _opacity = 1.0f;
-            break;
-        case 15: // concrete
-            _diffuseColor[0] = 0.55f; _diffuseColor[1] = 0.53f; _diffuseColor[2] = 0.50f;
-            _metallic = 0.0f; _roughness = 0.95f; _ior = 1.5f; _opacity = 1.0f;
-            break;
-        case 16: // rubber
-            _diffuseColor[0] = 0.05f; _diffuseColor[1] = 0.05f; _diffuseColor[2] = 0.05f;
-            _metallic = 0.0f; _roughness = 0.85f; _ior = 1.5f; _opacity = 1.0f;
-            break;
-        case 17: // jade
-            _diffuseColor[0]=0.15f; _diffuseColor[1]=0.5f; _diffuseColor[2]=0.2f;
-            _metallic=0.0f; _roughness=0.3f; _ior=1.66f; _opacity=1.0f;
-            _sssColor[0]=0.2f; _sssColor[1]=0.7f; _sssColor[2]=0.25f;
-            _sssRadius=0.3f;
-            break;
-
-        // ── spectral ──
-        case 19: // CD/DVD
-            _diffuseColor[0]=0.1f; _diffuseColor[1]=0.1f; _diffuseColor[2]=0.12f;
-            _metallic=0.8f; _roughness=0.05f; _ior=1.5f; _opacity=1.0f;
-            _gratingSpacing=0.46f; _gratingStrength=0.25f;
-            break;
-        case 20: // soap bubble
-            _diffuseColor[0]=0.95f; _diffuseColor[1]=0.95f; _diffuseColor[2]=0.98f;
-            _metallic=0.0f; _roughness=0.0f; _ior=1.33f; _opacity=0.05f;
-            _thinFilmThickness=350.f;
-            break;
-        case 21: // highlighter
-            _diffuseColor[0]=0.8f; _diffuseColor[1]=1.0f; _diffuseColor[2]=0.1f;
-            _metallic=0.0f; _roughness=0.8f; _ior=1.5f; _opacity=1.0f;
-            _fluorAbsorb=350.f; _fluorEmit=520.f; _fluorStrength=3.f;
-            break;
-
-        // ── creative ──
-        case 23: // kryptonite
-            _diffuseColor[0]=0.1f; _diffuseColor[1]=0.9f; _diffuseColor[2]=0.15f;
-            _metallic=0.0f; _roughness=0.3f; _ior=1.8f; _opacity=0.4f;
-            _fluorAbsorb=380.f; _fluorEmit=540.f; _fluorStrength=4.f;
-            _absorptionColor[0]=0.2f; _absorptionColor[1]=0.95f; _absorptionColor[2]=0.3f;
-            _absorptionDensity=1.5f;
-            break;
-        case 24: // bioluminescence
-            _diffuseColor[0]=0.05f; _diffuseColor[1]=0.15f; _diffuseColor[2]=0.2f;
-            _metallic=0.0f; _roughness=0.6f; _ior=1.4f; _opacity=1.0f;
-            _emissiveColor[0]=0.0f; _emissiveColor[1]=0.5f; _emissiveColor[2]=0.8f;
-            _fluorAbsorb=400.f; _fluorEmit=480.f; _fluorStrength=2.f;
-            break;
-        case 25: // plasma
-            _diffuseColor[0]=0.02f; _diffuseColor[1]=0.02f; _diffuseColor[2]=0.05f;
-            _metallic=0.0f; _roughness=0.0f; _ior=1.0f; _opacity=0.1f;
-            _emissiveColor[0]=0.6f; _emissiveColor[1]=0.2f; _emissiveColor[2]=1.0f;
-            _fluorAbsorb=350.f; _fluorEmit=450.f; _fluorStrength=3.f;
-            break;
-
-        // ── measured metals (RGL/MERL approximations) ──
-        case 27: // chrome steel
-            _diffuseColor[0]=0.55f; _diffuseColor[1]=0.56f; _diffuseColor[2]=0.56f;
-            _metallic=1.0f; _roughness=0.03f; _ior=2.75f; _opacity=1.0f;
-            _metalType=0;
-            break;
-        case 28: // brushed nickel
-            _diffuseColor[0]=0.66f; _diffuseColor[1]=0.64f; _diffuseColor[2]=0.58f;
-            _metallic=1.0f; _roughness=0.25f; _ior=1.85f; _opacity=1.0f;
-            _metalType=0;
-            break;
-        case 29: // brass
-            _diffuseColor[0]=0.89f; _diffuseColor[1]=0.74f; _diffuseColor[2]=0.42f;
-            _metallic=1.0f; _roughness=0.15f; _ior=1.18f; _opacity=1.0f;
-            _metalType=0;
-            break;
-        case 30: // tungsten
-            _diffuseColor[0]=0.52f; _diffuseColor[1]=0.50f; _diffuseColor[2]=0.47f;
-            _metallic=1.0f; _roughness=0.1f; _ior=3.5f; _opacity=1.0f;
-            _metalType=0;
-            break;
-        case 31: // anodized blue
-            _diffuseColor[0]=0.12f; _diffuseColor[1]=0.25f; _diffuseColor[2]=0.55f;
-            _metallic=0.7f; _roughness=0.2f; _ior=1.8f; _opacity=1.0f;
-            _metalType=4; // aluminium base
-            _thinFilmThickness=250.f;
-            break;
-
-        // ── measured fabrics (RGL approximations) ──
-        case 33: // silk
-            _diffuseColor[0]=0.85f; _diffuseColor[1]=0.78f; _diffuseColor[2]=0.72f;
-            _metallic=0.0f; _roughness=0.35f; _ior=1.55f; _opacity=1.0f;
-            _clearcoat=0.3f; _clearcoatRoughness=0.1f;
-            break;
-        case 34: // velvet
-            _diffuseColor[0]=0.25f; _diffuseColor[1]=0.05f; _diffuseColor[2]=0.08f;
-            _metallic=0.0f; _roughness=0.95f; _ior=1.5f; _opacity=1.0f;
-            break;
-        case 35: // satin
-            _diffuseColor[0]=0.82f; _diffuseColor[1]=0.80f; _diffuseColor[2]=0.75f;
-            _metallic=0.0f; _roughness=0.45f; _ior=1.5f; _opacity=1.0f;
-            _clearcoat=0.5f; _clearcoatRoughness=0.15f;
-            break;
-        case 36: // denim
-            _diffuseColor[0]=0.10f; _diffuseColor[1]=0.15f; _diffuseColor[2]=0.30f;
-            _metallic=0.0f; _roughness=0.85f; _ior=1.5f; _opacity=1.0f;
-            break;
-        case 37: // leather
-            _diffuseColor[0]=0.35f; _diffuseColor[1]=0.22f; _diffuseColor[2]=0.12f;
-            _metallic=0.0f; _roughness=0.6f; _ior=1.5f; _opacity=1.0f;
-            _clearcoat=0.15f; _clearcoatRoughness=0.3f;
-            break;
-
-        // ── measured coatings (RGL approximations) ──
-        case 39: // car paint red
-            _diffuseColor[0]=0.65f; _diffuseColor[1]=0.04f; _diffuseColor[2]=0.04f;
-            _metallic=0.3f; _roughness=0.15f; _ior=1.5f; _opacity=1.0f;
-            _clearcoat=1.0f; _clearcoatRoughness=0.02f;
-            break;
-        case 40: // car paint black
-            _diffuseColor[0]=0.02f; _diffuseColor[1]=0.02f; _diffuseColor[2]=0.02f;
-            _metallic=0.1f; _roughness=0.05f; _ior=1.5f; _opacity=1.0f;
-            _clearcoat=1.0f; _clearcoatRoughness=0.01f;
-            break;
-        case 41: // pearl white
-            _diffuseColor[0]=0.92f; _diffuseColor[1]=0.90f; _diffuseColor[2]=0.88f;
-            _metallic=0.15f; _roughness=0.2f; _ior=1.6f; _opacity=1.0f;
-            _clearcoat=0.8f; _clearcoatRoughness=0.05f;
-            _thinFilmThickness=180.f;
-            break;
-        case 42: // porcelain
-            _diffuseColor[0]=0.93f; _diffuseColor[1]=0.92f; _diffuseColor[2]=0.89f;
-            _metallic=0.0f; _roughness=0.15f; _ior=1.52f; _opacity=1.0f;
-            _sssColor[0]=0.95f; _sssColor[1]=0.9f; _sssColor[2]=0.85f;
-            _sssRadius=0.1f;
-            break;
-
-        default: break;
-    }
-
-    // Force knob UI update.
-    // Previously this block was wrapped in `if (Op* op = getOp()) { ... }`
-    // which silently skipped the entire push-back when getOp() returned
-    // null -- a timing issue that meant preset selection updated the C++
-    // members but left every slider on the UI at its old value. Call
-    // knob() directly on `this` (implicit) like SpectralStudioLight does.
-    // Also add metal_type which was missing -- metal presets set
-    // _metalType but never pushed it to the UI enum.
-    // Each knob needs an explicit changed() call after set_value so Nuke
-    // refreshes the slider UI immediately. Without this, the bound
-    // members update but the panel keeps showing the old values until
-    // some other event forces a redraw. asapUpdate() at the call site
-    // helped for simple cases; per-knob changed() is the robust path.
-    if (Knob* k = knob("diffuse_color")) {
-        k->set_value(_diffuseColor[0], 0);
-        k->set_value(_diffuseColor[1], 1);
-        k->set_value(_diffuseColor[2], 2);
-        k->changed();
-    }
-    if (Knob* k = knob("metallic"))    { k->set_value(_metallic);          k->changed(); }
-    if (Knob* k = knob("roughness"))   { k->set_value(_roughness);         k->changed(); }
-    if (Knob* k = knob("ior"))         { k->set_value(_ior);               k->changed(); }
-    if (Knob* k = knob("opacity"))     { k->set_value(_opacity);           k->changed(); }
-    if (Knob* k = knob("abbe_number")) { k->set_value(_abbeNumber);        k->changed(); }
-    if (Knob* k = knob("thin_film"))   { k->set_value(_thinFilmThickness); k->changed(); }
-    if (Knob* k = knob("metal_type"))  { k->set_value(double(_metalType)); k->changed(); }
-    if (Knob* k = knob("absorption_color")) {
-        k->set_value(_absorptionColor[0], 0);
-        k->set_value(_absorptionColor[1], 1);
-        k->set_value(_absorptionColor[2], 2);
-        k->changed();
-    }
-    if (Knob* k = knob("absorption_density")) { k->set_value(_absorptionDensity); k->changed(); }
-    if (Knob* k = knob("grating_spacing"))    { k->set_value(_gratingSpacing);    k->changed(); }
-    if (Knob* k = knob("grating_strength"))   { k->set_value(_gratingStrength);   k->changed(); }
-    if (Knob* k = knob("fluor_absorb"))       { k->set_value(_fluorAbsorb);       k->changed(); }
-    if (Knob* k = knob("fluor_emit"))         { k->set_value(_fluorEmit);         k->changed(); }
-    if (Knob* k = knob("fluor_strength"))     { k->set_value(_fluorStrength);     k->changed(); }
-    if (Knob* k = knob("emissive_color")) {
-        k->set_value(_emissiveColor[0], 0);
-        k->set_value(_emissiveColor[1], 1);
-        k->set_value(_emissiveColor[2], 2);
-        k->changed();
-    }
-    if (Knob* k = knob("sss_color")) {
-        k->set_value(_sssColor[0], 0);
-        k->set_value(_sssColor[1], 1);
-        k->set_value(_sssColor[2], 2);
-        k->changed();
-    }
-    if (Knob* k = knob("sss_radius"))          { k->set_value(_sssRadius);          k->changed(); }
-    if (Knob* k = knob("clearcoat"))           { k->set_value(_clearcoat);          k->changed(); }
-    if (Knob* k = knob("clearcoat_roughness")) { k->set_value(_clearcoatRoughness); k->changed(); }
-
-    // Force Nuke to redraw every widget on the panel. set_value +
-    // changed() should be enough in principle but Nuke's internal
-    // change tracking compares the member variable's CURRENT value
-    // to the set_value argument -- and we wrote the members directly
-    // in the switch block just above, so the change-detection sees
-    // "old=new" and skips the invalidate. updateUI() bypasses that
-    // by asking the panel to unconditionally repaint from current
-    // bound state.
-    updateUI(outputContext());
-}
-
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// _ApplyPresetV2 -- new preset application path for the per-category UI.
-//
-// Key difference from _ApplyPreset: every material value is written via
-// Knob::set_value() ONLY, never by direct member assignment. This is
-// what makes the panel actually refresh -- Nuke's change detection
-// compares the old bound value (pre-set_value) against the new value
-// passed to set_value. If we'd written the member first, the bound
-// variable would already equal the new value and Nuke would skip the
-// UI redraw. That was the root cause of the preset-UI-refresh bug.
-//
-// category: 0=dielectric 1=metal 2=organic 3=spectral 4=creative
-//           5=metal-rgl 6=fabric 7=coating
-// preset:   1-based index within that category (0="(none)" is handled
-//           by the caller, we assume > 0 here).
-// ---------------------------------------------------------------------------
-void SpectralSurfaceOp::_ApplyPresetV2(int category, int preset)
-{
-    // Local temporaries for every knob. Populated from the preset
-    // table below, then flushed to knobs via set_value at the end.
-    // Defaults match a "fresh custom material" (no advanced features).
+    // Locals: defaults for a "fresh custom material" (no advanced features).
     float diffuse[3]  = { 0.8f, 0.8f, 0.8f };
     float metallic    = 0.f;
     float roughness   = 0.5f;
@@ -887,227 +428,243 @@ void SpectralSurfaceOp::_ApplyPresetV2(int category, int preset)
     float sssCol[3]   = { 0.f, 0.f, 0.f };
     float sssRad      = 0.f;
 
-    // Dispatch table. Mirrors the old _ApplyPreset but populates
-    // locals instead of members. Nested switch keeps the category
-    // scope explicit and makes mistakes harder.
-    switch (category) {
-    case 0: // dielectric
-        switch (preset) {
-        case 1: // glass
+    switch (preset) {
+        // -- dielectrics --
+        case 2: // glass
             diffuse[0]=diffuse[1]=diffuse[2]=0.95f;
             metallic=0.f; roughness=0.f; ior=1.52f;
             opacity=0.002f; abbe=58.f;
             break;
-        case 2: // diamond
+        case 3: // diamond
             diffuse[0]=diffuse[1]=diffuse[2]=0.97f;
             metallic=0.f; roughness=0.f; ior=2.42f;
             opacity=0.002f; abbe=55.f;
             break;
-        case 3: // water
+        case 4: // water
             diffuse[0]=0.95f; diffuse[1]=0.95f; diffuse[2]=0.98f;
             metallic=0.f; roughness=0.f; ior=1.333f;
             opacity=0.15f; abbe=55.f;
-            absColor[0]=0.4f; absColor[1]=0.75f; absColor[2]=0.9f;
-            absDensity=1.f;
+            absColor[0]=0.4f; absColor[1]=0.75f; absColor[2]=0.9f; absDensity=1.f;
             break;
-        case 4: // ruby
+        case 5: // ruby
             diffuse[0]=0.8f; diffuse[1]=0.05f; diffuse[2]=0.1f;
             metallic=0.f; roughness=0.05f; ior=1.77f; opacity=0.3f;
             absColor[0]=0.9f; absColor[1]=0.05f; absColor[2]=0.1f;
             absDensity=3.f; abbe=45.f;
             flAbsorb=410.f; flEmit=694.f; flStrength=1.5f;
             break;
-        }
-        break;
-    case 1: // metal
-        switch (preset) {
-        case 1: // copper
+
+        // -- metals (spectral n,k) --
+        case 7: // copper
             diffuse[0]=0.95f; diffuse[1]=0.64f; diffuse[2]=0.54f;
             metallic=1.f; roughness=0.2f; ior=1.1f;
             metalType=2;
             break;
-        case 2: // gold
+        case 8: // gold
             diffuse[0]=1.f; diffuse[1]=0.76f; diffuse[2]=0.33f;
             metallic=1.f; roughness=0.1f; ior=0.47f;
             metalType=1;
             break;
-        case 3: // silver
+        case 9: // silver
             diffuse[0]=0.97f; diffuse[1]=0.96f; diffuse[2]=0.91f;
             metallic=1.f; roughness=0.05f; ior=0.18f;
             metalType=3;
             break;
-        case 4: // aluminium
+        case 10: // aluminium
             diffuse[0]=0.91f; diffuse[1]=0.92f; diffuse[2]=0.92f;
             metallic=1.f; roughness=0.15f; ior=1.39f;
             metalType=4;
             break;
-        }
-        break;
-    case 2: // organic
-        switch (preset) {
-        case 1: // skin
+
+        // -- organic --
+        case 12: // skin
             diffuse[0]=0.76f; diffuse[1]=0.57f; diffuse[2]=0.45f;
             roughness=0.5f; ior=1.4f;
             sssCol[0]=0.9f; sssCol[1]=0.4f; sssCol[2]=0.2f; sssRad=0.5f;
             break;
-        case 2: // wood
+        case 13: // wood
             diffuse[0]=0.43f; diffuse[1]=0.30f; diffuse[2]=0.18f;
             roughness=0.7f;
             break;
-        case 3: // white paper
+        case 14: // white paper
             diffuse[0]=0.75f; diffuse[1]=0.73f; diffuse[2]=0.70f;
             roughness=0.9f;
             break;
-        case 4: // concrete
+        case 15: // concrete
             diffuse[0]=0.55f; diffuse[1]=0.53f; diffuse[2]=0.50f;
             roughness=0.95f;
             break;
-        case 5: // rubber
+        case 16: // rubber
             diffuse[0]=0.05f; diffuse[1]=0.05f; diffuse[2]=0.05f;
             roughness=0.85f;
             break;
-        case 6: // jade
+        case 17: // jade
             diffuse[0]=0.15f; diffuse[1]=0.5f; diffuse[2]=0.2f;
             roughness=0.3f; ior=1.66f;
             sssCol[0]=0.2f; sssCol[1]=0.7f; sssCol[2]=0.25f; sssRad=0.3f;
             break;
-        }
-        break;
-    case 3: // spectral
-        switch (preset) {
-        case 1: // CD/DVD
+
+        // -- spectral --
+        case 19: // CD/DVD
             diffuse[0]=0.1f; diffuse[1]=0.1f; diffuse[2]=0.12f;
             metallic=0.8f; roughness=0.05f;
             gratingSp=0.46f; gratingStr=0.25f;
             break;
-        case 2: // soap bubble
+        case 20: // soap bubble
             diffuse[0]=0.95f; diffuse[1]=0.95f; diffuse[2]=0.98f;
             roughness=0.f; ior=1.33f; opacity=0.05f;
             thinFilm=350.f;
             break;
-        case 3: // highlighter
+        case 21: // highlighter
             diffuse[0]=0.8f; diffuse[1]=1.f; diffuse[2]=0.1f;
             roughness=0.8f;
             flAbsorb=350.f; flEmit=520.f; flStrength=3.f;
             break;
-        }
-        break;
-    case 4: // creative
-        switch (preset) {
-        case 1: // kryptonite
+
+        // -- creative --
+        case 23: // kryptonite
             diffuse[0]=0.1f; diffuse[1]=0.9f; diffuse[2]=0.15f;
             roughness=0.3f; ior=1.8f; opacity=0.4f;
             flAbsorb=380.f; flEmit=540.f; flStrength=4.f;
             absColor[0]=0.2f; absColor[1]=0.95f; absColor[2]=0.3f;
             absDensity=1.5f;
             break;
-        case 2: // bioluminescence
+        case 24: // bioluminescence
             diffuse[0]=0.05f; diffuse[1]=0.15f; diffuse[2]=0.2f;
             roughness=0.6f; ior=1.4f;
-            emissive[1]=0.5f; emissive[2]=0.8f;
+            emissive[0]=0.f; emissive[1]=0.5f; emissive[2]=0.8f;
             flAbsorb=400.f; flEmit=480.f; flStrength=2.f;
             break;
-        case 3: // plasma
+        case 25: // plasma
             diffuse[0]=0.02f; diffuse[1]=0.02f; diffuse[2]=0.05f;
             roughness=0.f; ior=1.f; opacity=0.1f;
             emissive[0]=0.6f; emissive[1]=0.2f; emissive[2]=1.f;
             flAbsorb=350.f; flEmit=450.f; flStrength=3.f;
             break;
-        }
-        break;
-    case 5: // metal rgl
-        switch (preset) {
-        case 1: // chrome steel
+
+        // -- measured metals (RGL/MERL approximations) --
+        case 27: // chrome steel
             diffuse[0]=0.55f; diffuse[1]=0.56f; diffuse[2]=0.56f;
             metallic=1.f; roughness=0.03f; ior=2.75f;
             break;
-        case 2: // brushed nickel
+        case 28: // brushed nickel
             diffuse[0]=0.66f; diffuse[1]=0.64f; diffuse[2]=0.58f;
             metallic=1.f; roughness=0.25f; ior=1.85f;
             break;
-        case 3: // brass
+        case 29: // brass
             diffuse[0]=0.89f; diffuse[1]=0.74f; diffuse[2]=0.42f;
             metallic=1.f; roughness=0.15f; ior=1.18f;
             break;
-        case 4: // tungsten
+        case 30: // tungsten
             diffuse[0]=0.52f; diffuse[1]=0.50f; diffuse[2]=0.47f;
             metallic=1.f; roughness=0.1f; ior=3.5f;
             break;
-        case 5: // anodized blue
+        case 31: // anodized blue
             diffuse[0]=0.12f; diffuse[1]=0.25f; diffuse[2]=0.55f;
             metallic=0.7f; roughness=0.2f; ior=1.8f;
-            metalType=4; thinFilm=250.f;
+            metalType=4; // aluminium base
+            thinFilm=250.f;
             break;
-        }
-        break;
-    case 6: // fabric
-        switch (preset) {
-        case 1: // silk
+
+        // -- measured fabrics (RGL approximations) --
+        case 33: // silk
             diffuse[0]=0.85f; diffuse[1]=0.78f; diffuse[2]=0.72f;
             roughness=0.35f; ior=1.55f;
             clearcoat=0.3f; clearRough=0.1f;
             break;
-        case 2: // velvet
+        case 34: // velvet
             diffuse[0]=0.25f; diffuse[1]=0.05f; diffuse[2]=0.08f;
             roughness=0.95f;
             break;
-        case 3: // satin
+        case 35: // satin
             diffuse[0]=0.82f; diffuse[1]=0.80f; diffuse[2]=0.75f;
             roughness=0.45f;
             clearcoat=0.5f; clearRough=0.15f;
             break;
-        case 4: // denim
+        case 36: // denim
             diffuse[0]=0.10f; diffuse[1]=0.15f; diffuse[2]=0.30f;
             roughness=0.85f;
             break;
-        case 5: // leather
+        case 37: // leather
             diffuse[0]=0.35f; diffuse[1]=0.22f; diffuse[2]=0.12f;
             roughness=0.6f;
             clearcoat=0.15f; clearRough=0.3f;
             break;
-        }
-        break;
-    case 7: // coating
-        switch (preset) {
-        case 1: // car paint red
+
+        // -- measured coatings (RGL approximations) --
+        case 39: // car paint red
             diffuse[0]=0.65f; diffuse[1]=0.04f; diffuse[2]=0.04f;
             metallic=0.3f; roughness=0.15f;
             clearcoat=1.f; clearRough=0.02f;
             break;
-        case 2: // car paint black
+        case 40: // car paint black
             diffuse[0]=0.02f; diffuse[1]=0.02f; diffuse[2]=0.02f;
             metallic=0.1f; roughness=0.05f;
             clearcoat=1.f; clearRough=0.01f;
             break;
-        case 3: // pearl white
+        case 41: // pearl white
             diffuse[0]=0.92f; diffuse[1]=0.90f; diffuse[2]=0.88f;
             metallic=0.15f; roughness=0.2f; ior=1.6f;
             clearcoat=0.8f; clearRough=0.05f;
             thinFilm=180.f;
             break;
-        case 4: // porcelain
+        case 42: // porcelain
             diffuse[0]=0.93f; diffuse[1]=0.92f; diffuse[2]=0.89f;
             roughness=0.15f; ior=1.52f;
             sssCol[0]=0.95f; sssCol[1]=0.9f; sssCol[2]=0.85f; sssRad=0.1f;
             break;
-        }
-        break;
+
+        default: break;
     }
 
-    // Flush locals to knobs via set_value. This is the key to the UI
-    // refresh fix -- members still hold the PREVIOUS value until
-    // set_value runs, so Nuke's change detection fires correctly.
-    Op* op = getOp();
-    if (!op) return;
+    // Flush locals to knobs via set_value. This is the key to the
+    // refresh: members still hold the PREVIOUS value until set_value
+    // runs, so Nuke's change detection fires correctly and the panel
+    // refreshes. Mirrors SpectralVolumeMaterial's reliable pattern.
+    // CRITICAL: write MEMBERS FIRST, then set_value. Volume does this to
+    // make set_value a no-op (bound value matches before the call) which
+    // suppresses Nuke's deferred change-notification callbacks. Without
+    // this, each pushed knob fires a fresh knob_changed, Nuke ends up
+    // rebuilding the Op mid-cascade, and subsequent preset picks hit a
+    // stale instance that never reaches our handler.
+    _diffuseColor[0] = diffuse[0];
+    _diffuseColor[1] = diffuse[1];
+    _diffuseColor[2] = diffuse[2];
+    _metallic             = metallic;
+    _roughness            = roughness;
+    _ior                  = ior;
+    _opacity              = opacity;
+    _emissiveColor[0]     = emissive[0];
+    _emissiveColor[1]     = emissive[1];
+    _emissiveColor[2]     = emissive[2];
+    _clearcoat            = clearcoat;
+    _clearcoatRoughness   = clearRough;
+    _abbeNumber           = abbe;
+    _thinFilmThickness    = thinFilm;
+    _metalType            = metalType;
+    _absorptionColor[0]   = absColor[0];
+    _absorptionColor[1]   = absColor[1];
+    _absorptionColor[2]   = absColor[2];
+    _absorptionDensity    = absDensity;
+    _gratingSpacing       = gratingSp;
+    _gratingStrength      = gratingStr;
+    _fluorAbsorb          = flAbsorb;
+    _fluorEmit            = flEmit;
+    _fluorStrength        = flStrength;
+    _sssColor[0]          = sssCol[0];
+    _sssColor[1]          = sssCol[1];
+    _sssColor[2]          = sssCol[2];
+    _sssRadius            = sssRad;
+
     auto setVec3 = [&](const char* name, const float v[3]) {
-        if (Knob* k = op->knob(name)) {
+        if (Knob* k = knob(name)) {
             k->set_value(v[0], 0);
             k->set_value(v[1], 1);
             k->set_value(v[2], 2);
         }
     };
     auto setF = [&](const char* name, float v) {
-        if (Knob* k = op->knob(name)) k->set_value(v);
+        if (Knob* k = knob(name)) k->set_value(v);
     };
     setVec3("diffuse_color",     diffuse);
     setF("metallic",             metallic);
@@ -1119,10 +676,7 @@ void SpectralSurfaceOp::_ApplyPresetV2(int category, int preset)
     setF("clearcoat_roughness",  clearRough);
     setF("abbe_number",          abbe);
     setF("thin_film",            thinFilm);
-    // _metalType has no knob -- it's a SpectralSurface-internal member
-    // set only by presets. Direct write is fine here (no UI widget to
-    // refresh).
-    _metalType = metalType;
+    // _metalType written in member-first block above.
     setVec3("absorption_color",  absColor);
     setF("absorption_density",   absDensity);
     setF("grating_spacing",      gratingSp);
@@ -1132,32 +686,6 @@ void SpectralSurfaceOp::_ApplyPresetV2(int category, int preset)
     setF("fluor_strength",       flStrength);
     setVec3("sss_color",         sssCol);
     setF("sss_radius",           sssRad);
-
-    // Reset the OTHER category preset enums to (none) = index 0 so the
-    // UI reflects which preset is actually active. Without this, the
-    // user can pick glass->gold->wood->porcelain and the panel ends up
-    // showing all four still selected (even though only porcelain's
-    // values are applied). The set_value(0) also drives the bound
-    // members and invalidates the widgets correctly.
-    //
-    // The active category's knob is skipped because we don't want to
-    // wipe out the user's selection we just applied.
-    static const char* const kCatKnobs[8] = {
-        "preset_dielectric",   // 0
-        "preset_metal",        // 1
-        "preset_organic",      // 2
-        "preset_spectral",     // 3
-        "preset_creative",     // 4
-        "preset_metal_rgl",    // 5
-        "preset_fabric",       // 6
-        "preset_coating",      // 7
-    };
-    for (int c = 0; c < 8; ++c) {
-        if (c == category) continue;
-        if (Knob* k = op->knob(kCatKnobs[c])) {
-            k->set_value(0.0);
-        }
-    }
 }
 
 void SpectralSurfaceOp::_SetShaderProperties(usg::ShaderDesc& desc,
