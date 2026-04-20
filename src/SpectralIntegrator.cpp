@@ -357,6 +357,26 @@ void SpectralIntegrator::RenderFrame(
                                 GfVec3d worldHit = ray.GetStartPoint() + hit.t * ray.GetDirection();
                                 GfVec3f hitPos = GfVec3f(worldHit);
                                 GfVec3f rayDir = GfVec3f(ray.GetDirection());
+
+                                // Single-sided backface cull: reject the hit entirely
+                                // (like GPU does at intersection). Invalidating hit.tri
+                                // propagates through all subsequent hit.valid() checks:
+                                // radiance = 0, alpha = 0, no depth/objId write.
+                                // Without this, CPU keeps solid alpha on backface hits
+                                // even with doubleSided=false, diverging from GPU.
+                                {
+                                    const GfVec3f& fN = hit.tri->faceNormal;
+                                    float RdotFaceN = rayDir[0]*fN[0] + rayDir[1]*fN[1] + rayDir[2]*fN[2];
+                                    if (!mat.doubleSided && RdotFaceN > 0.f) {
+                                        hit.tri = nullptr;
+                                    }
+                                }
+                            }
+                            if (hit.valid()) {
+                                const SpectralMaterial& mat = scene.GetMaterial(hit.tri->materialId);
+                                GfVec3d worldHit = ray.GetStartPoint() + hit.t * ray.GetDirection();
+                                GfVec3f hitPos = GfVec3f(worldHit);
+                                GfVec3f rayDir = GfVec3f(ray.GetDirection());
                                 unsigned int bounceSeed = seed + 100u;
                                 int shadeBounces = std::max(maxBounces, camera.refractionBounces);
 
@@ -1827,7 +1847,11 @@ float SpectralIntegrator::_ShadeSpectral(
             // Matches GPU: skip glass, block on opaque, check light distance
             bool inShadow = false;
             float shadowTransmit = 1.f;
-            GfVec3f shadowOrigin = hitPos + N * 0.01f;
+            // Offset along the shadow-ray-facing side of the surface so
+            // we don't self-occlude when doubleSided flipped N inward
+            // (e.g. camera inside a sphere). Same idiom as line ~508.
+            float _NdotL_off = N[0]*L[0] + N[1]*L[1] + N[2]*L[2];
+            GfVec3f shadowOrigin = hitPos + N * (_NdotL_off >= 0.f ? 0.01f : -0.01f);
             // receivesShadows=false on this mesh: skip the whole shadow
             // loop, treat as fully lit.
             bool skipShadow = (s_noShadowReceiveMatIds &&
@@ -1839,6 +1863,21 @@ float SpectralIntegrator::_ShadeSpectral(
                 if (!shadowHit.valid()) break;  // reached light
 
                 const SpectralMaterial& sMat = scene.GetMaterial(shadowHit.tri->materialId);
+
+                // Shell-passthrough for doubleSided meshes: if the
+                // shadow ray is hitting the backface of a doubleSided
+                // blocker, treat as not-occluded. The shadow is simply
+                // exiting the shell. Without this, camera-inside-a-
+                // doubleSided-sphere shadows itself via the far wall.
+                // Matches GPU behavior.
+                {
+                    const GfVec3f& fN = shadowHit.tri->faceNormal;
+                    float LdotFaceN = L[0]*fN[0] + L[1]*fN[1] + L[2]*fN[2];
+                    if (sMat.doubleSided && LdotFaceN > 0.f) {
+                        shadowOrigin = GfVec3f(GfVec3d(shadowOrigin) + shadowHit.t * GfVec3d(L)) + L * 0.02f;
+                        continue;
+                    }
+                }
 
                 // castsShadows=false: step ray past this hit and continue.
                 // Semantically identical to glass passthrough except no
@@ -1870,7 +1909,9 @@ float SpectralIntegrator::_ShadeSpectral(
 
             // March shadow ray through volumes (cloud/fog shadows on surfaces)
             if (!inShadow && numVolumes > 0 && shadowTransmit > 0.01f) {
-                GfVec3f sOrig = hitPos + N * 0.01f;
+                // Same self-shadow-avoidance as the surface shadow origin above.
+                float _NdotL_vol = N[0]*L[0] + N[1]*L[1] + N[2]*L[2];
+                GfVec3f sOrig = hitPos + N * (_NdotL_vol >= 0.f ? 0.01f : -0.01f);
                 for (int vi = 0; vi < numVolumes; ++vi) {
                     const SpectralVolume* vol = volumes[vi];
                     if (!vol || !vol->IsValid()) continue;

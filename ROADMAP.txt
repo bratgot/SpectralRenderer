@@ -220,9 +220,6 @@ Tracked here so we don't forget. Each line is roughly the shape of an issue.
   objects won't smear with the blur. Acceptable for current scope.
 - **PointInstancer + MeshProperties**: PointInstancer path doesn't consult
   the MeshProperties registry at all. Separate fix once prim-path reg lands.
-- **Subdivision level clamping**: knob range is 0-6 but OpenSubdiv clamps
-  internally to `[1, 4]`. Tooltip implies 6 works. Either raise the internal
-  cap or lower the knob max.
 - **Volume compositing on CPU**: volumes currently render behind geometry
   on the CPU path. GPU is correct. Fix the CPU path to match.
 - **Neutral white balance**: only applied in non-scanlineCompat spectral mode.
@@ -249,37 +246,78 @@ Tracked here so we don't forget. Each line is roughly the shape of an issue.
   viewer. Also: decide whether purpose=1 (render) should imply anything
   different from purpose=0 (default). USD treats 'render' as 'always
   include', 'default' as 'parent decides', so currently both render.
-- **SpectralMeshProperties doubleSided intermittent** (new, 2026-04-20).
-  After apply_ds_gpu_fix landed the GPUParams struct field + both upload
-  sites + matCheck coverage, doubleSided works in some scenes and not
-  others. When it works: backfaces of a single-sided mesh disappear when
-  the camera is interior (or primary rays otherwise hit backfaces). When
-  it doesn't: toggling the knob produces no visible change, often on the
-  same scene where it did work moments earlier. Suspects in priority
-  order:
-  (1) Stamping races against validate. Our stamp writes via const_cast
-      into scene._materials after the triangulation pass but within the
-      same _validate. If GPU.cpp computes matCheck from an earlier
-      snapshot (e.g. cached vector address) the XOR won't see the flag.
-      Triage: extend the MPDiag matCheck logger with the material's
-      memory address + tid to confirm single-validate ordering.
-  (2) Material sharing hidden by the Iop's material-resolution step.
-      Two meshes with the same SpectralSurface produce one shared
-      material ID. If one mesh is doubleSided and the other isn't, the
-      stamp's last-write-wins overwrites the previous mesh's intent.
-      User may be observing whichever mesh's stamp ran last in the
-      iteration order, which can flip between validates if the USD
-      Traverse() order isn't stable.
-  (3) Kernel normal-flip condition. The gate lives inside the primary
-      shade block. If the back-face hit is being handled by a DIFFERENT
-      code path (transmission / clearcoat / etc.) the gate never fires.
-      Might manifest as "doubleSided works on matte surfaces, fails on
-      glass" or similar.
-  Next action: add a per-material doubleSided tracer at kernel shade
-  entry (cheap: one fprintf from host-side comparison of expected-vs-
-  what-was-uploaded). Confirm matCheck XOR is actually being computed
-  over the flipped flag. Only after that can we nail which of the three
-  suspects is live.
+- **[RESOLVED 2026-04-21] SpectralMeshProperties doubleSided on CPU**
+  (was tracked as "doubleSided intermittent"). Original triage blamed
+  GPU stamping races and kernel shade-path gaps. Actual cause: GPU was
+  fine. CPU had two unrelated bugs.
+  Truth table from inside-sphere + card-backside tests:
+    inside sphere, doubleSided=true : GPU lit, CPU BLACK (bug)
+    inside sphere, doubleSided=false: GPU black alpha=0, CPU black alpha=0 (ok)
+    card backside, doubleSided=true : GPU lit, CPU lit (ok)
+    card backside, doubleSided=false: GPU black alpha=0, CPU black ALPHA=SOLID (bug)
+  Bug 1 (inside-sphere self-shadow): shadow ray from backface-flipped N
+    offset = hitPos + N*0.01 pushed shadow origin INTO the sphere, then
+    the shadow ray exited through the far shell wall and registered that
+    exit as occlusion. Two-part fix:
+      - Sign-flip origin offset: `hitPos + N * (NdotL >= 0 ? 0.01 : -0.01)`
+        at lines 1830 (direct shadow) and 1873 (volume shadow). Matches the
+        pre-existing idiom on line 508 of the compat shadow path.
+      - Shell-passthrough in the shadow loop: if the blocker is
+        doubleSided AND `L . faceNormal > 0` (shadow ray exiting the
+        blocker's back), step past and continue. Matches GPU behavior.
+        Trade-off: internal self-shadowing of concave doubleSided geometry
+        is suppressed (a cave interior lit by an internal light won't
+        shadow itself). Accepted.
+  Bug 2 (CPU alpha on single-sided backface): _ShadeSpectral returned 0
+    radiance via `if (!mat.doubleSided) return 0.f` but the outer RenderFrame
+    loop still wrote alpha from material.opacity. Fix: at the top of the
+    primary-hit-processing block, if `rayDir . faceNormal > 0` AND
+    material is single-sided, set `hit.tri = nullptr`. The downstream
+    hit.valid() guards then cascade: no radiance, no alpha, no depth, no
+    objId write. Matches GPU exactly (GPU culls at intersection stage).
+  Patches: apply_cpu_doubleside_diag (tracers), apply_cpu_doubleside_fix
+    (origin offset), apply_cpu_doubleside_shell_fix (shell passthrough),
+    apply_cpu_backface_cull_fix (primary-hit invalidation).
+  Leftover possible-latent: 4 other instances of the `hitPos + N * 0.01f`
+    pattern remain unmodified (line 1356 AO, 2442 indirect bounce, 2748
+    transmission). They may self-occlude similarly when rays originate
+    from backface-flipped surfaces. Parked pending user-visible symptoms.
+- **Surface-shader CPU/GPU parity audit gaps** (new, 2026-04-20).
+  Audit completed on 2026-04-20 found that GPU shade path matches CPU
+  for base colour, metallic, roughness, IOR, opacity, Abbe dispersion,
+  thin-film, measured metals, clearcoat, Beer-Lambert absorption,
+  grating diffraction, fluorescence, subsurface scattering (random walk),
+  texture blend, shadow catcher, and dielectric transmission. Four gaps
+  remain. Fix each as a standalone follow-up: (a) roughnessTexId -- CPU
+  samples texture green channel to override roughness per-pixel; GPU
+  ignores the field entirely. Needs GPUMaterial addition, host upload
+  + matCheck coverage, kernel sample and override before BSDF eval.
+  (b) metallicTexId -- CPU samples blue channel; GPU ignores. Same
+  shape as (a). (c) Spectral emissive -- CPU adds mat.SpectralEmission
+  (lambda) to radiance at every shade; GPU only handles emissive in
+  scanlineCompat RGB path, spectral shade block has no emissive
+  contribution. (d) Bump-map tangent frame -- CPU builds UV-gradient
+  derived T/B from triangle vertex data; GPU uses an arbitrary
+  "up x N" fallback. Bump pattern rotates differently per face. Fix
+  needs triangle vertex positions plumbed through OptiX SBT
+  (HitGroupData or per-triangle ptr in params).
+- **Volume shader CPU/GPU parity audit needed** (new, 2026-04-20).
+  Counterpart to the surface-shader audit. Scope: compare every field
+  of SpectralVolumeMaterial / SpectralVolume against GPUVolume in
+  SpectralGPUParams.h, and compare CPU shade path in SpectralIntegrator
+  (volume section) against the kernel's volume shading. Known GPU
+  fields that exist on GPUVolume: density/temp/flame tex, bbox,
+  extinction/scattering/densityMult, phase (HG dual-lobe + Cornette-
+  Shanks Mie), emission, powder, scatter colour, step size, jitter,
+  shadow steps, shadow density, quality, adaptive step, render mode
+  (Lit/Grey/Heat/Cool/BB/Expl), flame temperature range, core glow,
+  Cherenkov, chromatic extinction, multiple-scattering approximation,
+  grid noise, transform, grid mixer. Likely suspects before starting:
+  the CPU path might have spectral-emission temperature blackbody
+  handling that GPU lacks (or vice versa); volume-colour absorption
+  across wavelengths may diverge; shadow-density sampling step counts
+  may differ. File findings as a separate known-issues entry once the
+  audit lists discrepancies.
 - **HDRI "visible in background" checkbox does not render the BG** (new,
   2026-04-20). apply_hdri_visible patch added the knob on SpectralEnvLight
   plus the full plumbing: host member, SpectralLight.visibleInPrimary field,
@@ -482,34 +520,62 @@ To triage:
     code or Nuke's (or a driver DLL).
   - Valgrind / ASAN if feasible.
 
-### SpectralSurface preset UI refresh
+### SpectralSurface preset UI refresh -- RESOLVED 2026-04-20
 
-Preset dropdown updates the bound `_spectralPreset` member but sliders
-on the panel do not visually redraw to match the new values. Rendered
-material IS correct; the UI just looks stale.
+Was: picking a preset from the dropdown would update the rendered
+material but sliders on the panel wouldn't redraw. Variations: presets
+worked for the first pick or two then silently broke, especially jade
+and spectral-category items. Symptom was NOT "bound member didn't
+change" -- the render output showed the new preset values correctly --
+but the panel widgets stuck on old values AND after a few picks the
+preset knob stopped even firing knob_changed.
 
-Tried this session: `asapUpdate()`, per-knob `Knob::changed()`,
-`updateUI(outputContext())`. None refreshed the sliders.
+The earlier (wrong) diagnosis assumed Nuke's change detection was
+skipping widget invalidation when members were pre-written. That was
+BACKWARDS. The truth came out via diagnostic tracers: after the first
+preset pick, subsequent picks fired knob_changed on a DIFFERENT Op
+instance than the one displayed. The Op got rebuilt mid-callback.
 
-Root cause: Nuke's change-detection compares the bound variable's
-CURRENT value to the `set_value` argument. We write the members
-directly in the `_ApplyPreset` switch before calling `set_value`,
-so Nuke sees "same value, nothing to invalidate" and skips the widget
-update.
+Actual root cause: two things the rewrite had wrong vs SpectralVolume-
+Material (which always worked reliably):
 
-Proper fix (for a dedicated session -- ~300 mechanical lines):
-  - Restructure `_ApplyPreset` so the switch populates LOCAL temporaries
-  - All writes to members happen through `set_value` only
-  - Nuke sees "old->new, change" and invalidates the widget correctly
+  1. Missing `return 1;` after preset application. Without it,
+     knob_changed falls through to `ShaderOp::knob_changed(k)` which
+     runs Nuke's default handling. For reasons specific to Nuke 17's
+     ShaderOp machinery, that default handling rebuilds the Op when
+     a ShaderOp's knob set changes, which invalidates `this` and
+     routes future callbacks to a fresh instance.
 
-Currently-applied session code that can stay (harmless) or be backed
-out (cosmetic):
-  - Drift detector in `knob_changed` (catches preset changes on next
-    interaction -- works correctly for render, just not UI)
-  - Per-knob `Knob::changed()` calls in `_ApplyPreset`
-  - `updateUI(outputContext())` call at end of `_ApplyPreset`
-  - Back up suffixes: `.bak_presetreal`, `.bak_asap`, `.bak_changed`,
-    `.bak_updateui`, `.bak_updateuifix`
+  2. Writing members via `set_value` only, without preceding direct
+     member assignment. Every `set_value` where the bound value
+     differs fires a deferred `knob_changed` for that pushed knob.
+     When we push ~20 knobs in a row this cascades, and Nuke's
+     instance swap happens somewhere in the cascade.
+
+Volume pattern (which works) inverts both:
+  - member = local; (direct write first)
+  - if (Knob* k = knob(...)) k->set_value(v);  (now a no-op, suppresses
+    the callback storm because Nuke sees bound value already matches)
+  - return 1;  (after preset applied, don't fall through)
+
+Fix applied in `apply_surface_preset_fix.py` (2026-04-20) plus unified
+master dropdown UI from `apply_surface_preset_unify.py`. Diagnostic
+tracers and cleanup in `apply_surface_preset_diag*.py`.
+
+Lesson for future Nuke plugin work:
+  - ShaderOp::knob_changed path may rebuild the Op under default
+    handling. Always `return 1` when you've fully handled a knob.
+  - For panel-pushing code (presets, auto-populate, etc.), write the
+    member directly FIRST then call set_value -- Volume's pattern.
+    set_value as the ONLY write path triggers callback storms that
+    can end up swapping the Op out from under you.
+  - Diagnostic tracers with `this=%p` snapshot on knob_changed entry
+    are invaluable -- if the pointer changes mid-session, you're
+    chasing an instance-lifetime issue, not a value-handling one.
+
+Associated backups (.bak_surfunify, .bak_surfdiag, .bak_surfdiag2,
+.bak_surffix, .bak_surfclean) can all be discarded once confirmed
+stable.
 
 ### SpectralDrafting pass-through to upstream surface
 
@@ -529,6 +595,19 @@ useful in current state; safe to leave until we decide to re-attempt.
 ---
 
 ## Session journal
+
+- **2026-04-20 (late)** -- SpectralSurface preset UI bug fixed after
+  a long diagnostic chase. User reported "presets stop working after
+  a few selections, especially jade and spectral menus." Multiple
+  wrong attempts (re-entry guards, mutual-reset logic, V2 local-first
+  design) preceded the right diagnosis. Diagnostic tracers with
+  `this=%p` snapshot on every knob_changed made the Op-instance swap
+  visible. Fix: match SpectralVolumeMaterial exactly -- member-first
+  writes in push block + `return 1` in knob_changed after apply. Also
+  unified 8-category preset dropdowns into one master enum (simpler
+  UX, fewer edge cases). See "SpectralSurface preset UI refresh --
+  RESOLVED" for full writeup.
+
 
 One-line-per-session record of what happened. Add to the top. Serves as a
 memory aid for "what did I work on last week?"
