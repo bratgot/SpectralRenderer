@@ -2235,15 +2235,7 @@ extern "C" __global__ void __raygen__spectral()
                 }
 
                 float3 V = normalize3(neg3(dir));
-                if (dot3raw(N,V)<0.f) {
-                    if (!mat.doubleSided) {
-                        // Single-sided surface, back-facing hit ->
-                        // treat as miss. Ray passes through.
-                        isHit = false;
-                        goto spectral_miss;
-                    }
-                    N=neg3(N);
-                }
+                if (dot3raw(N,V)<0.f) N=neg3(N);
 
                 float3 hitPos = make_float3(origin.x+depth*dir.x, origin.y+depth*dir.y, origin.z+depth*dir.z);
                 if (depth < minDepth) minDepth = depth;

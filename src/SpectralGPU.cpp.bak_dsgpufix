@@ -427,7 +427,6 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
             p.f = mats[i].gratingSpacing; matCheck ^= p.u * 25165843u;
             p.f = mats[i].fluorStrength; matCheck ^= p.u * 50331653u;
             matCheck ^= static_cast<unsigned int>(mats[i].metalType) * 7u;
-            matCheck ^= (mats[i].doubleSided ? 1u : 0u) * 2246822519u;
             fprintf(stderr, "MPDiag: matCheck material[%zu] doubleSided=%d\n",
                 i, mats[i].doubleSided ? 1 : 0);
             // --- Comprehensive audit (all fields that flow to GPU) ---
@@ -542,7 +541,6 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
                 gpuMats[i].sssRadius       = mats[i].sssRadius;
                 gpuMats[i].clearcoat          = mats[i].clearcoat;
                 gpuMats[i].clearcoatRoughness = mats[i].clearcoatRoughness;
-                gpuMats[i].doubleSided     = mats[i].doubleSided ? 1 : 0;
             }
             const size_t matBytes = gpuMats.size() * sizeof(spectral_gpu::GPUMaterial);
             CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_materials), matBytes));
@@ -728,7 +726,6 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
             gpuMats[i].sssRadius       = mats[i].sssRadius;
             gpuMats[i].clearcoat          = mats[i].clearcoat;
             gpuMats[i].clearcoatRoughness = mats[i].clearcoatRoughness;
-            gpuMats[i].doubleSided     = mats[i].doubleSided ? 1 : 0;
         }
         const size_t matBytes = gpuMats.size() * sizeof(spectral_gpu::GPUMaterial);
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_materials), matBytes));

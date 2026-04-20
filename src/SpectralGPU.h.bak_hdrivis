@@ -178,13 +178,6 @@ private:
     float                  _envSH[4][3] = {};  // 4 SH coeffs × RGB
     bool                   _hasEnvSH = false;
     float                  _envIntensityGPU = 1.f;
-    // HDRI-as-background host state, copied into LaunchParams at launch.
-    int                    _envVisibleBg = 0;
-    int                    _envTexIdBg = -1;
-    int                    _envWidthBg = 0;
-    int                    _envHeightBg = 0;
-    float                  _envRotationBg = 0.f;
-    float                  _envIntensityBg = 1.f;
 
     // Denoiser
     OptixDenoiser          _denoiser = nullptr;

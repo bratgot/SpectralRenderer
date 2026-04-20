@@ -235,48 +235,6 @@ Tracked here so we don't forget. Each line is roughly the shape of an issue.
   limits us to 32 unique materials for each flag. Scenes with hero characters
   + dozens of props could brush this limit. Log warning exists; upgrade to
   wider type (uint64_t or a proper per-material flag) when needed.
-- **SpectralMeshProperties purpose menu needs validation** (new, 2026-04-20).
-  apply_meshprops_fields wired up doubleSided / orientation / purpose, but
-  purpose (default / render / proxy / guide) hasn't been tested end-to-end.
-  The intended behaviour: when purpose=proxy or purpose=guide, the mesh is
-  skipped from the ray-traced render (still shows in the 3D viewer). The
-  mesh-skip `continue` is in SpectralRenderIop.cpp around line 3286 guarded
-  by `meshPropsHasEntry && (meshPropsPurpose == 2 || meshPropsPurpose == 3)`.
-  To validate: (1) confirm the 'mesh props for ...' log shows the purpose
-  value flipping when you toggle the enum; (2) confirm 'SpectralRender:
-  skipping mesh X (purpose=proxy)' logs when set to proxy; (3) confirm the
-  mesh visually disappears from the rendered frame but remains in the
-  viewer. Also: decide whether purpose=1 (render) should imply anything
-  different from purpose=0 (default). USD treats 'render' as 'always
-  include', 'default' as 'parent decides', so currently both render.
-- **HDRI "visible in background" checkbox does not render the BG** (new,
-  2026-04-20). apply_hdri_visible patch added the knob on SpectralEnvLight
-  plus the full plumbing: host member, SpectralLight.visibleInPrimary field,
-  stamp at both hdriDome sites, CPU primary-miss gate, GPU LaunchParams
-  fields, GPU miss-shader HDRI sampling. Compiles and runs, but toggling
-  the checkbox does not change what the user sees. Suspects in priority
-  order: (1) checksum miss -- _envVisibleBg change may not invalidate
-  the GPU params upload (verify with a log line in the lightCheck block);
-  (2) the extract loop populates from the first Dome that HAS visibleInPrimary
-  set, so if the user's scene has multiple dome lights and the flag is on
-  the wrong one, code takes the first hit; (3) CPU path: verify the flag
-  is making it through SpectralLight copy construction (the light is
-  copied into `scene._lights` by value); (4) the envTexId the kernel
-  samples may be pointing at the wrong texture (HDRI tex upload order
-  could have shifted since the field was added). Triage plan: add an
-  SLOG at each stamp site (Iop, host extract, LaunchParams fill) printing
-  envVisibleBg + envTexId, then toggle the knob and watch the log
-  transitions.
-- **Nuke crash when clicking the HDRI file-path knob on SpectralEnvLight**
-  (new, 2026-04-20). User reported a crash after interacting with the
-  file browser on SpectralEnvLight -> HDRI -> file. No trace captured yet.
-  First suspects: the File_knob browse callback pathing (unicode? network
-  share?), the existing cold-load-to-texId path (SpectralRenderIop.cpp
-  ~line 8452 `el->hdriFile && strlen(el->hdriFile) > 0`), or a LoadTexture
-  reentrancy during active render. Next time it repros: run Nuke from a
-  cmd prompt and look for stderr, or attach Visual Studio debugger. A
-  defensive try/catch around the file-path reads + LoadTexture call would
-  reduce blast radius if the exception path is the cause.
 
 ---
 

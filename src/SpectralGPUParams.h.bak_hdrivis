@@ -62,9 +62,6 @@ struct GPUMaterial {
     // lobe and attenuation skip entirely.
     float  clearcoat;
     float  clearcoatRoughness;
-    // Double-sided flag. When 0, back-facing primary hits are treated
-    // as misses (ray passes through). Matches CPU and USD doubleSided.
-    int    doubleSided;
 };
 
 // GPU-side texture (header only — pixel data is a separate device buffer)
@@ -293,17 +290,6 @@ struct LaunchParams {
     float3                 envSH[4];       // SH L0+L1 (DC + 3 directional)
     int                    hasEnvSH;
     float                  envIntensityGPU; // dome envIntensity for volumes
-
-    // HDRI-as-background (primary-ray miss). When envVisibleBg=1 the
-    // miss shader samples envTexId via lat-long mapping and returns the
-    // pixel as spectral radiance. When 0, miss returns black (current
-    // behaviour). envRotation matches the CPU-side envRotation.
-    int                    envVisibleBg;
-    int                    envTexId;       // -1 if no HDRI
-    int                    envWidth;
-    int                    envHeight;
-    float                  envRotation;    // degrees
-    float                  envIntensityBg; // hdriDome.intensity (incl. ND)
 };
 
 // Per-ray payload — carried through the trace

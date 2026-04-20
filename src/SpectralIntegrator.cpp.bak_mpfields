@@ -1800,15 +1800,9 @@ float SpectralIntegrator::_ShadeSpectral(
         }
     }
 
-    // Ensure N faces the camera (flip if back-facing). If the material
-    // is single-sided, a back-facing hit is treated as a miss: the ray
-    // passes through unimpeded. Matches the GPU kernel and USD's
-    // UsdGeomMesh.doubleSided semantics.
+    // Ensure N faces the camera (flip if back-facing)
     float NdotV = N[0]*V[0] + N[1]*V[1] + N[2]*V[2];
-    if (NdotV < 0.f) {
-        if (!mat.doubleSided) return 0.f;
-        N = -N;
-    }
+    if (NdotV < 0.f) N = -N;
 
     // Resolve textures at this hit point
     SpectralMaterial resolvedMat = _ResolveMaterial(mat, tri, w, uf, vf, scene);

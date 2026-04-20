@@ -401,12 +401,6 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
             p.f = L.envShadowSoftness; lightCheck ^= p.u * 49979693u;
             if (L.envHasSH) { p.f = L.envSH[0][0]; lightCheck ^= p.u; }
             lightCheck ^= static_cast<unsigned int>(L.envVirtualLights.size()) * 104729u;
-            // Hdri-as-background flag must invalidate the GPU params so
-            // toggling the knob triggers a re-upload + launch.
-            lightCheck ^= (L.visibleInPrimary ? 1u : 0u) * 2654435761u;
-            p.f = L.envRotation;       lightCheck ^= p.u * 40503u;
-            p.f = L.EffectiveIntensity(); lightCheck ^= p.u * 50993u;
-            lightCheck ^= static_cast<unsigned int>(L.envTexId + 1) * 15299u;
         }
 
         // Checksum materials to detect SpectralSurface changes
@@ -427,9 +421,6 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
             p.f = mats[i].gratingSpacing; matCheck ^= p.u * 25165843u;
             p.f = mats[i].fluorStrength; matCheck ^= p.u * 50331653u;
             matCheck ^= static_cast<unsigned int>(mats[i].metalType) * 7u;
-            matCheck ^= (mats[i].doubleSided ? 1u : 0u) * 2246822519u;
-            fprintf(stderr, "MPDiag: matCheck material[%zu] doubleSided=%d\n",
-                i, mats[i].doubleSided ? 1 : 0);
             // --- Comprehensive audit (all fields that flow to GPU) ---
             // Missing from the original checksum; changing any of these
             // knobs silently did nothing on GPU because the material
@@ -542,7 +533,6 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
                 gpuMats[i].sssRadius       = mats[i].sssRadius;
                 gpuMats[i].clearcoat          = mats[i].clearcoat;
                 gpuMats[i].clearcoatRoughness = mats[i].clearcoatRoughness;
-                gpuMats[i].doubleSided     = mats[i].doubleSided ? 1 : 0;
             }
             const size_t matBytes = gpuMats.size() * sizeof(spectral_gpu::GPUMaterial);
             CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_materials), matBytes));
@@ -728,7 +718,6 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
             gpuMats[i].sssRadius       = mats[i].sssRadius;
             gpuMats[i].clearcoat          = mats[i].clearcoat;
             gpuMats[i].clearcoatRoughness = mats[i].clearcoatRoughness;
-            gpuMats[i].doubleSided     = mats[i].doubleSided ? 1 : 0;
         }
         const size_t matBytes = gpuMats.size() * sizeof(spectral_gpu::GPUMaterial);
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_materials), matBytes));
@@ -772,27 +761,8 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
         _numVirtualLights = 0;
         _hasEnvSH = false;
         _envIntensityGPU = 1.f;
-        // HDRI-as-background fields (Phase HDRI visible)
-        _envVisibleBg = 0;
-        _envTexIdBg = -1;
-        _envWidthBg = 0;
-        _envHeightBg = 0;
-        _envRotationBg = 0.f;
-        _envIntensityBg = 1.f;
         for (const auto& L : lights) {
             if (L.type != pxr::SpectralLight::Type::Dome) continue;
-
-            // HDRI-as-background state (carries the visibleInPrimary flag
-            // plus the tex ID / rotation / intensity). First dome wins,
-            // matching the pattern for virtual lights + SH below.
-            if (_envVisibleBg == 0 && L.visibleInPrimary && L.envTexId >= 0) {
-                _envVisibleBg = 1;
-                _envTexIdBg = L.envTexId;
-                _envWidthBg = L.envWidth;
-                _envHeightBg = L.envHeight;
-                _envRotationBg = L.envRotation;
-                _envIntensityBg = L.EffectiveIntensity();
-            }
 
             // Virtual lights
             int nVL = std::min(8, (int)L.envVirtualLights.size());
@@ -1435,13 +1405,6 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     for (int i = 0; i < 4; ++i)
         launchParams.envSH[i] = make_float3(_envSH[i][0], _envSH[i][1], _envSH[i][2]);
     launchParams.hasEnvSH = _hasEnvSH ? 1 : 0;
-    launchParams.envIntensityGPU = _envIntensityGPU;
-    launchParams.envVisibleBg    = _envVisibleBg;
-    launchParams.envTexId        = _envTexIdBg;
-    launchParams.envWidth        = _envWidthBg;
-    launchParams.envHeight       = _envHeightBg;
-    launchParams.envRotation     = _envRotationBg;
-    launchParams.envIntensityBg  = _envIntensityBg;
 
     // projInverse: CPU uses M*v (column-vector), copy as-is
     // viewToWorld: CPU uses v*M (row-vector via Transform), so transpose for GPU

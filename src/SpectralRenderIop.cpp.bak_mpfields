@@ -3161,9 +3161,6 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage,
         bool    meshPropsCastsShadows    = true;
         bool    meshPropsReceivesShadows = true;
         bool    meshPropsHasEntry        = false;
-        bool    meshPropsDoubleSided     = true;   // false -> backface = miss
-        int     meshPropsOrientation     = 0;      // 0=right-handed, 1=left (XOR into flipNormals)
-        int     meshPropsPurpose         = 0;      // 0=default, 1=render, 2=proxy (skip), 3=guide (skip)
 
         // TODO: replace substring / size==1 matching with prim-path
         // registration done inside SpectralMeshProperties::processScenegraph.
@@ -3231,34 +3228,18 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage,
                 meshPropsVisible         = matched->visible;
                 meshPropsCastsShadows    = matched->castsShadows;
                 meshPropsReceivesShadows = matched->receivesShadows;
-                meshPropsDoubleSided     = matched->doubleSided;
-                meshPropsOrientation     = matched->orientation;
-                meshPropsPurpose         = matched->purpose;
                 meshPropsHasEntry        = true;
                 SLOG("SpectralRender: mesh props for '%s' via node '%s' "
-                     "(level=%d scheme=%d flipN=%d normMode=%d visible=%d castsShadows=%d "
-                     "doubleSided=%d orientation=%d purpose=%d)\n",
+                     "(level=%d scheme=%d flipN=%d normMode=%d visible=%d castsShadows=%d)\n",
                      meshPath.c_str(), matchedNodeName.c_str(),
                      meshSubdivOverride, meshSchemeOverride,
                      (int)meshFlipNormals, meshNormalMode,
-                     (int)meshPropsVisible, (int)meshPropsCastsShadows,
-                     (int)meshPropsDoubleSided, meshPropsOrientation, meshPropsPurpose);
+                     (int)meshPropsVisible, (int)meshPropsCastsShadows);
             } else if (!meshReg.empty()) {
                 SLOG("SpectralRender: mesh '%s' (leaf '%s') - no matching "
                      "SpectralMeshProperties entry (registry size=%zu)\n",
                      meshPath.c_str(), meshLeaf.c_str(), meshReg.size());
             }
-        }
-
-        // Purpose filtering: 2=proxy / 3=guide are viewport-only. Skip
-        // them from the ray-tracing scene. They still draw in the viewer
-        // via Drafting / USD proxy paths.
-        if (meshPropsHasEntry &&
-            (meshPropsPurpose == 2 || meshPropsPurpose == 3)) {
-            SLOG("SpectralRender: skipping mesh '%s' (purpose=%s)\n",
-                 prim.GetPath().GetString().c_str(),
-                 (meshPropsPurpose == 2) ? "proxy" : "guide");
-            continue;
         }
 
         // Read points at shutter close for motion blur.
@@ -5345,45 +5326,17 @@ void SpectralRenderIop::_LoadFromPxrStage(const UsdStageRefPtr& stage,
                 }
             }
 
-            // SpectralMeshProperties flip-normals + orientation: both
-            // negate everything. orientation=leftHanded is the USD-idiomatic
-            // way to express the same concept as flipNormals; when either
-            // is active we flip. When BOTH are active, they cancel (XOR).
-            const bool effFlip = meshPropsHasEntry &&
-                                 (meshFlipNormals ^ (meshPropsOrientation == 1));
-            if (effFlip) {
+            // SpectralMeshProperties flip-normals: negate everything
+            // (shading normals AND face normal) so backface-culling and
+            // geometric orientation stay consistent. Runs last so it
+            // applies to whichever normals the previous steps produced.
+            if (meshPropsHasEntry && meshFlipNormals) {
                 for (auto& tri : data.triangles) {
                     tri.n0 = -tri.n0;
                     tri.n1 = -tri.n1;
                     tri.n2 = -tri.n2;
                     tri.faceNormal = -tri.faceNormal;
                 }
-            }
-
-            // Stamp per-mesh doubleSided onto the materials this mesh
-            // uses. Last-write-wins for shared materials; usually a non-
-            // issue since each mesh typically gets its own material
-            // variant after resolution. Harmless when doubleSided=true
-            // (that's the default on SpectralMaterial too).
-            fprintf(stderr, "MPDiag: STAMP entry for mesh '%s' hasEntry=%d doubleSided=%d\n",
-                data.id.GetString().c_str(),
-                meshPropsHasEntry ? 1 : 0,
-                meshPropsDoubleSided ? 1 : 0);
-            if (meshPropsHasEntry && !meshPropsDoubleSided) {
-                std::unordered_set<int> stampIds;
-                for (const auto& tri : data.triangles) {
-                    stampIds.insert(static_cast<int>(tri.materialId));
-                }
-                auto& mats = const_cast<std::vector<SpectralMaterial>&>(
-                    _scene->GetMaterials());
-                for (int mid : stampIds) {
-                    if (mid >= 0 && mid < (int)mats.size()) {
-                        mats[mid].doubleSided = false;
-                        fprintf(stderr, "MPDiag:   stamped material[%d].doubleSided=false\n", mid);
-                    }
-                }
-                SLOG("SpectralRender: mesh '%s' stamped doubleSided=false onto %zu materials\n",
-                     data.id.GetString().c_str(), stampIds.size());
             }
 
             _scene->SetMeshData(data.id, std::move(data));

@@ -21,8 +21,6 @@
 #include <algorithm>
 #include <string>
 #include <vector>
-#include <array>
-#include <cstdio>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -74,7 +72,6 @@ struct SpectralLight
     GfVec3f     envAvgColor = GfVec3f(1.f); // average HDRI colour (computed at load)
     float       envRotation = 0.f;         // HDRI rotation in degrees
     float       envShadowSoftness = 0.5f;  // virtual light shadow softness (0=hard, 1=soft)
-    bool        visibleInPrimary = false;   // dome shows as BG behind geometry
 
     // CDF importance sampling for HDRI
     std::vector<float> envConditionalCDF;  // per-row CDF (width entries per row)
@@ -109,26 +106,7 @@ struct SpectralLight
     // Compute average HDRI colour AND build importance sampling CDF
     void ComputeEnvAverage() {
         envHasCDF = false;
-        if (!envPixels || envWidth <= 0 || envHeight <= 0) {
-            fprintf(stderr, "EnvDiag: CEA  EARLY RETURN  envPixels=%p W=%d H=%d\n",
-                (const void*)envPixels, envWidth, envHeight);
-            return;
-        }
-        {
-            int W = envWidth, H = envHeight;
-            auto smp = [&](int x, int y) -> std::array<float,3> {
-                size_t i = (size_t(y) * W + x) * 3;
-                return { envPixels[i], envPixels[i+1], envPixels[i+2] };
-            };
-            auto c = smp(W/2, H/2);
-            auto tl = smp(0, 0);
-            auto br = smp(W-1, H-1);
-            fprintf(stderr,
-                "EnvDiag: CEA     envPixels=%p  texels center=(%.3f,%.3f,%.3f)  "
-                "tl=(%.3f,%.3f,%.3f)  br=(%.3f,%.3f,%.3f)\n",
-                (const void*)envPixels,
-                c[0], c[1], c[2], tl[0], tl[1], tl[2], br[0], br[1], br[2]);
-        }
+        if (!envPixels || envWidth <= 0 || envHeight <= 0) return;
 
         int W = envWidth, H = envHeight;
         double sumR=0, sumG=0, sumB=0;

@@ -665,70 +665,6 @@ static __forceinline__ __device__ float3 sampleTextureGPU(int texId, float2 uv)
 }
 
 // Sample alpha channel from texture (returns 1.0 if no alpha)
-// Sample the HDRI dome texture by world-space ray direction.
-// Uses the SAME lat-long convention as SpectralLight::EnvironmentEmission
-// on the CPU side, so GPU and CPU agree pixel-for-pixel when
-// envVisibleBg is ON.
-static __forceinline__ __device__ float3 sampleEnvHDRI(float3 dir)
-{
-    if (params.envTexId < 0 || params.envTexId >= (int)params.textureCount)
-        return make_float3(0.f, 0.f, 0.f);
-    const GPUTexture& tex = params.textures[params.envTexId];
-    if (!tex.pixels || tex.width <= 0 || tex.height <= 0)
-        return make_float3(0.f, 0.f, 0.f);
-
-    // dir is assumed unit. acos-clamped to avoid NaN at the poles.
-    float dy = fmaxf(-1.f, fminf(1.f, dir.y));
-    float theta = acosf(dy);                       // [0, pi]
-    float phi = atan2f(dir.x, -dir.z);             // [-pi, pi]
-
-    // Apply HDRI rotation in degrees (matches CPU EnvironmentEmission).
-    const float PI  = 3.14159265f;
-    if (fabsf(params.envRotation) > 0.01f) {
-        phi += params.envRotation * PI / 180.f;
-        if (phi >  PI) phi -= 2.f * PI;
-        if (phi < -PI) phi += 2.f * PI;
-    }
-
-    float u = (phi + PI) / (2.f * PI);
-    float v = theta / PI;
-
-    float fx = u * (tex.width  - 1);
-    float fy = v * (tex.height - 1);
-    int x0 = max(0, min(int(fx), tex.width  - 1));
-    int y0 = max(0, min(int(fy), tex.height - 1));
-    int x1 = min(x0 + 1, tex.width  - 1);
-    int y1 = min(y0 + 1, tex.height - 1);
-    float wx = fx - x0, wy = fy - y0;
-
-    int ch = tex.channels;
-    auto px = [&](int x, int y) -> float3 {
-        int idx = (y * tex.width + x) * ch;
-        float r = tex.pixels[idx];
-        float g = ch >= 2 ? tex.pixels[idx + 1] : r;
-        float b = ch >= 3 ? tex.pixels[idx + 2] : r;
-        return make_float3(r, g, b);
-    };
-    float3 c00 = px(x0, y0), c10 = px(x1, y0);
-    float3 c01 = px(x0, y1), c11 = px(x1, y1);
-    float3 top = make_float3(c00.x*(1-wx)+c10.x*wx, c00.y*(1-wx)+c10.y*wx, c00.z*(1-wx)+c10.z*wx);
-    float3 bot = make_float3(c01.x*(1-wx)+c11.x*wx, c01.y*(1-wx)+c11.y*wx, c01.z*(1-wx)+c11.z*wx);
-    return make_float3(top.x*(1-wy)+bot.x*wy, top.y*(1-wy)+bot.y*wy, top.z*(1-wy)+bot.z*wy);
-}
-
-// Convert sampled HDRI RGB + the current wavelength into spectral radiance.
-// Matches SpectralLight::_RGBtoSpectral on the CPU side using a simple
-// Gaussian basis decomposition. Cheap and consistent across CPU/GPU.
-static __forceinline__ __device__ float rgbToSpectralGPU(float3 rgb, float lambda)
-{
-    // Gaussian-lobe RGB basis. Centres at 450/550/620 nm, sigma = 40 nm.
-    // The same constants live on the CPU side in _RGBtoSpectral.
-    float bR = expf(-0.5f * powf((lambda - 620.f) / 40.f, 2.f));
-    float bG = expf(-0.5f * powf((lambda - 550.f) / 40.f, 2.f));
-    float bB = expf(-0.5f * powf((lambda - 450.f) / 40.f, 2.f));
-    return fmaxf(0.f, rgb.x * bR + rgb.y * bG + rgb.z * bB);
-}
-
 static __forceinline__ __device__ float sampleTextureAlphaGPU(int texId, float2 uv)
 {
     if (texId < 0 || texId >= (int)params.textureCount) return 1.f;
@@ -2235,15 +2171,7 @@ extern "C" __global__ void __raygen__spectral()
                 }
 
                 float3 V = normalize3(neg3(dir));
-                if (dot3raw(N,V)<0.f) {
-                    if (!mat.doubleSided) {
-                        // Single-sided surface, back-facing hit ->
-                        // treat as miss. Ray passes through.
-                        isHit = false;
-                        goto spectral_miss;
-                    }
-                    N=neg3(N);
-                }
+                if (dot3raw(N,V)<0.f) N=neg3(N);
 
                 float3 hitPos = make_float3(origin.x+depth*dir.x, origin.y+depth*dir.y, origin.z+depth*dir.z);
                 if (depth < minDepth) minDepth = depth;
@@ -2405,18 +2333,10 @@ extern "C" __global__ void __raygen__spectral()
                 }
             } else {
             spectral_miss:
-                // Miss -- primary ray hit nothing. Default black, matches
-                // CPU's transparent-BG-for-comp behaviour. When the user
-                // ticks "visible in background" on SpectralEnvLight, the
-                // dome pixel is sampled and returned as spectral radiance.
-                //
-                // Volumes suppress the BG (matches CPU: volume scenes use
-                // transparent BG so they can be comped over another plate).
+                // Miss — dome background only when no volume (for comp)
                 radiance = 0.f;
-                if (params.envVisibleBg && params.numGpuVolumes == 0) {
-                    float3 rgb = sampleEnvHDRI(dir);
-                    radiance = rgbToSpectralGPU(rgb, lambda) * params.envIntensityBg;
-                }
+                // Skip dome background — render to black for compositing
+                // Dome illumination comes through bounce paths, not background
             }
 
             // Alpha from material opacity (texture alpha modulates this)

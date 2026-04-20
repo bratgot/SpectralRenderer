@@ -732,15 +732,8 @@ void SpectralIntegrator::RenderFrame(
                                     GfVec3f missDir = GfVec3f(ray.GetDirection());
                                     float mLen = missDir.GetLength();
                                     if (mLen > 1e-6f) missDir /= mLen;
-                                    // Primary-ray miss: only render dome as BG
-                                    // if the user has ticked "visible in
-                                    // background" on the env light. IBL
-                                    // (bounce-ray EnvironmentEmission) is
-                                    // UNGATED -- that's how surfaces receive
-                                    // HDRI lighting.
                                     for (const SpectralLight& light : scene.GetLights()) {
-                                        if (light.type == SpectralLight::Type::Dome &&
-                                            light.visibleInPrimary) {
+                                        if (light.type == SpectralLight::Type::Dome) {
                                             radiance += light.EnvironmentEmission(missDir, lambda);
                                         }
                                     }
@@ -1800,15 +1793,9 @@ float SpectralIntegrator::_ShadeSpectral(
         }
     }
 
-    // Ensure N faces the camera (flip if back-facing). If the material
-    // is single-sided, a back-facing hit is treated as a miss: the ray
-    // passes through unimpeded. Matches the GPU kernel and USD's
-    // UsdGeomMesh.doubleSided semantics.
+    // Ensure N faces the camera (flip if back-facing)
     float NdotV = N[0]*V[0] + N[1]*V[1] + N[2]*V[2];
-    if (NdotV < 0.f) {
-        if (!mat.doubleSided) return 0.f;
-        N = -N;
-    }
+    if (NdotV < 0.f) N = -N;
 
     // Resolve textures at this hit point
     SpectralMaterial resolvedMat = _ResolveMaterial(mat, tri, w, uf, vf, scene);

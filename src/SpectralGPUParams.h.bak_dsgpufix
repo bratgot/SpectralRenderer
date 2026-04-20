@@ -62,9 +62,6 @@ struct GPUMaterial {
     // lobe and attenuation skip entirely.
     float  clearcoat;
     float  clearcoatRoughness;
-    // Double-sided flag. When 0, back-facing primary hits are treated
-    // as misses (ray passes through). Matches CPU and USD doubleSided.
-    int    doubleSided;
 };
 
 // GPU-side texture (header only — pixel data is a separate device buffer)

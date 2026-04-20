@@ -437,18 +437,6 @@ void SpectralEnvLight::knobs(Knob_Callback f)
     Tooltip(f, "Shadow softness for HDRI-derived virtual lights.\n"
                "0 = hard. 0.5 = medium. 1 = very soft.");
 
-    Bool_knob(f, &hdriVisible, "hdri_visible", "visible in background");
-    Tooltip(f, "When ON, the HDRI renders as the background behind all geometry\n"
-               "(the dome is visible in camera). When OFF, the background is\n"
-               "transparent/black and the HDRI only acts as a light source for\n"
-               "lighting the scene (common in comp workflows).\n"
-               "\n"
-               "GPU and CPU behave the same with this knob set.\n"
-               "\n"
-               "Tip: leave OFF when you want to comp a separate background\n"
-               "behind the render. Turn ON when you want the HDRI itself to\n"
-               "be the visible sky/environment in the final frame.");
-
     // ─── Volume Lighting ──────────────────────────────────────────────
     BeginClosedGroup(f, "grp_env", "Volume lighting");
     {
