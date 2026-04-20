@@ -91,6 +91,72 @@ behaviour is not guaranteed. Instead, do the registration in the Op's
   data flow.
 - `SetFlags(f, Knob::DISABLED | Knob::NO_ANIMATION)` for read-only display knobs.
 
+### Pushing values to knobs programmatically (presets, auto-populate)
+
+When code inside a ShaderOp writes to its own knobs via `Knob::set_value`
+-- typical cases: applying a preset, auto-computing a derived field,
+restoring defaults -- follow the SpectralVolumeMaterial pattern exactly
+or things break in non-obvious ways. The rules:
+
+1. **Write the bound member DIRECTLY first, then call `set_value`.**
+   ```cpp
+   _diffuseColor[0] = diffuse[0];  // direct write first
+   _diffuseColor[1] = diffuse[1];
+   _diffuseColor[2] = diffuse[2];
+   if (Knob* k = knob("diffuse_color")) {
+       k->set_value(_diffuseColor[0], 0);  // now a no-op (bound matches)
+       k->set_value(_diffuseColor[1], 1);
+       k->set_value(_diffuseColor[2], 2);
+   }
+   ```
+   This makes the `set_value` calls no-ops -- Nuke's change detection
+   sees "bound value matches new value" and does not queue a deferred
+   `knob_changed` callback for the pushed knob.
+   Counter-intuitively the `set_value` is still necessary: it drives
+   the panel-widget repaint. Without it the render output updates but
+   the sliders visually stay on the old values.
+
+2. **`return 1` after handling the originating knob, do not fall
+   through to `ShaderOp::knob_changed(k)`.** For ShaderOp subclasses,
+   Nuke's default handling can rebuild the Op when a knob in the panel
+   changes under certain conditions. If your handler has just pushed
+   ~20 values to knobs and then you let the default run, the Op gets
+   destroyed + recreated, and subsequent `knob_changed` callbacks land
+   on a fresh instance that never reaches your `_ApplyPreset` /
+   auto-populate code. Symptom: "preset works the first time or two,
+   then stops firing." Fix:
+   ```cpp
+   if (k->is("preset") && _spectralPreset != _lastAppliedPreset) {
+       _ApplyPreset(_spectralPreset);
+       _lastAppliedPreset = _spectralPreset;
+       return 1;    // do NOT fall through to ShaderOp::knob_changed
+   }
+   return ShaderOp::knob_changed(k);  // fall through for all other knobs
+   ```
+
+3. **If the push-to-knobs order matters, go: members first -> set_value
+   second.** Doing set_value first (member gets updated by the knob
+   binding) also works *mechanically* but fires a deferred callback for
+   every differing knob, which is what creates the callback cascade
+   that triggers the Op rebuild in (2). Always do direct member write
+   first to suppress the cascade.
+
+The distinction vs the `return 1` note in the hash-invalidation section
+above: that note is about whether Nuke re-hashes/re-renders. This one
+is about whether the Op instance stays alive. Both reasons for returning
+1 matter; they're independent.
+
+Diagnostic tip: if presets / auto-populate code stops firing
+`knob_changed` after the first pick, add a trace line at the top of
+`knob_changed` that prints `this=%p` and the name of the firing knob.
+If `this` changes between picks, the Op is being rebuilt -- go add
+`return 1`.
+
+Reference implementations:
+- Good: `SpectralVolumeMaterial::knob_changed` (members-first + return 1)
+- Bad (early 2026-04-20 attempt): `SpectralSurfaceOp::_ApplyPresetV2`
+  in the pre-fix history (set_value-only + fall-through)
+
 ---
 
 ## C++ / build gotchas
