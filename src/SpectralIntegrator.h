@@ -209,6 +209,15 @@ public:
         int    aoSamples,       // rays per pixel
         float  aoRadius);       // max ray distance
 
+    /// GPU-accelerated AO. Falls back to CPU ComputeAO on any failure.
+    /// Signature mirrors ComputeAO so callers can dispatch on a useGPU flag.
+    static void ComputeAOGPU(
+        const SpectralScene& scene,
+        const SpectralCamera& camera,
+        float* aoOut,
+        int    aoSamples,
+        float  aoRadius);
+
     /// Quick single-ray pass for geometry AOVs (N, P, UV, albedo, IDs, depth).
     /// Used after GPU render which doesn't fill these.
     static void ComputeGeometryAOVs(

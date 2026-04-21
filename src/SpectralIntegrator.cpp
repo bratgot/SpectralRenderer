@@ -1369,11 +1369,28 @@ void SpectralIntegrator::RenderFrame(
                         GfVec3f V = GfVec3f(-ray.GetDirection()[0], -ray.GetDirection()[1], -ray.GetDirection()[2]);
                         float vlen = V.GetLength();
                         if (vlen > 1e-6f) V /= vlen;
-                        if (N[0]*V[0] + N[1]*V[1] + N[2]*V[2] < 0.f) N = -N;
+                        float _aoNdotV = N[0]*V[0] + N[1]*V[1] + N[2]*V[2];
+                        bool _aoBackface = (_aoNdotV < 0.f);
+                        if (_aoNdotV < 0.f) N = -N;
 
                         GfVec3d worldHit = ray.GetStartPoint() + hit.t * ray.GetDirection();
                         GfVec3f hitPos = GfVec3f(worldHit);
                         GfVec3f aoOrigin = hitPos + N * 0.01f;
+
+                        // AODIAG: log backface-hit AO setup (cap at 5 pixels)
+                        if (_aoBackface) {
+                            static int _aodbf = 0;
+                            if (_aodbf < 5) {
+                                _aodbf++;
+                                fprintf(stderr, "AODIAG setup: backface hit matId=%d "
+                                        "hitPos=(%.3f,%.3f,%.3f) N-flipped=(%.3f,%.3f,%.3f) "
+                                        "aoOrigin=(%.3f,%.3f,%.3f)\n",
+                                        hit.tri->materialId,
+                                        hitPos[0], hitPos[1], hitPos[2],
+                                        N[0], N[1], N[2],
+                                        aoOrigin[0], aoOrigin[1], aoOrigin[2]);
+                            }
+                        }
 
                         // Build tangent frame
                         GfVec3f up = (std::abs(N[1]) < 0.999f) ? GfVec3f(0,1,0) : GfVec3f(1,0,0);
@@ -1403,6 +1420,20 @@ void SpectralIntegrator::RenderFrame(
                             GfRay aoRay;
                             aoRay.SetPointAndDirection(GfVec3d(aoOrigin), GfVec3d(dir));
                             SpectralBVH::Hit aoHit = bvh.Intersect(aoRay, 0.f);
+
+                            // AODIAG: log AO ray results for backface cases (cap at 16 total)
+                            if (_aoBackface) {
+                                static int _aodhit = 0;
+                                if (_aodhit < 16) {
+                                    _aodhit++;
+                                    int blockerMat = aoHit.valid() ? aoHit.tri->materialId : -1;
+                                    fprintf(stderr, "AODIAG ray: valid=%d t=%.3f (radius=%.3f) "
+                                            "blocker-mat=%d occluded=%d\n",
+                                            (int)aoHit.valid(), aoHit.t, aoRadius,
+                                            blockerMat,
+                                            (aoHit.valid() && aoHit.t <= aoRadius) ? 1 : 0);
+                                }
+                            }
 
                             if (!aoHit.valid() || aoHit.t > aoRadius) {
                                 unoccluded++;
@@ -2476,11 +2507,28 @@ void SpectralIntegrator::ComputeAO(
                 GfVec3f V = GfVec3f(-ray.GetDirection());
                 float vlen = V.GetLength();
                 if (vlen > 1e-6f) V /= vlen;
-                if (N[0]*V[0] + N[1]*V[1] + N[2]*V[2] < 0.f) N = -N;
+                float _ao2NdotV = N[0]*V[0] + N[1]*V[1] + N[2]*V[2];
+                bool _ao2Backface = (_ao2NdotV < 0.f);
+                if (_ao2NdotV < 0.f) N = -N;
 
                 GfVec3d worldHit = ray.GetStartPoint() + hit.t * ray.GetDirection();
                 GfVec3f hitPos = GfVec3f(worldHit);
                 GfVec3f origin = hitPos + N * 0.01f;
+
+                // AODIAG2: log backface-hit AO setup (cap at 5)
+                if (_ao2Backface) {
+                    static int _ao2dbf = 0;
+                    if (_ao2dbf < 5) {
+                        _ao2dbf++;
+                        fprintf(stderr, "AODIAG2 setup: backface hit matId=%d "
+                                "hitPos=(%.3f,%.3f,%.3f) N-flipped=(%.3f,%.3f,%.3f) "
+                                "origin=(%.3f,%.3f,%.3f) aoRadius=%.3f\n",
+                                hit.tri->materialId,
+                                hitPos[0], hitPos[1], hitPos[2],
+                                N[0], N[1], N[2],
+                                origin[0], origin[1], origin[2], aoRadius);
+                    }
+                }
 
                 // Build tangent frame
                 GfVec3f up = (std::abs(N[1]) < 0.999f) ? GfVec3f(0,1,0) : GfVec3f(1,0,0);
@@ -2509,6 +2557,21 @@ void SpectralIntegrator::ComputeAO(
                     GfRay aoRay;
                     aoRay.SetPointAndDirection(GfVec3d(origin), GfVec3d(dir));
                     SpectralBVH::Hit aoHit = bvh.Intersect(aoRay, 0.f);
+
+                    // AODIAG2: log AO ray results for backface cases (cap at 20)
+                    if (_ao2Backface) {
+                        static int _ao2dhit = 0;
+                        if (_ao2dhit < 20) {
+                            _ao2dhit++;
+                            int blockerMat = aoHit.valid() ? aoHit.tri->materialId : -1;
+                            float DdotN = dir[0]*N[0] + dir[1]*N[1] + dir[2]*N[2];
+                            fprintf(stderr, "AODIAG2 ray: DdotN=%.3f valid=%d t=%.3f "
+                                    "(radius=%.3f) blocker-mat=%d will-occlude=%d\n",
+                                    DdotN, (int)aoHit.valid(), aoHit.t, aoRadius,
+                                    blockerMat,
+                                    (aoHit.valid() && aoHit.t < aoRadius) ? 1 : 0);
+                        }
+                    }
 
                     if (aoHit.valid() && aoHit.t < aoRadius) {
                         occluded++;
@@ -2903,6 +2966,40 @@ void SpectralIntegrator::RenderFrameGPU(
 
     fprintf(stderr, "SpectralIntegrator: GPU render complete (%dx%d) %d volume(s)\n",
             camera.imageWidth, camera.imageHeight, numVolumes);
+}
+
+// ---------------------------------------------------------------------------
+// ComputeAOGPU -- GPU AO wrapper, falls back to CPU on failure.
+// Mirrors the RenderFrameGPU pattern exactly.
+// ---------------------------------------------------------------------------
+void SpectralIntegrator::ComputeAOGPU(
+    const SpectralScene&  scene,
+    const SpectralCamera& camera,
+    float*                aoOut,
+    int                   aoSamples,
+    float                 aoRadius)
+{
+    if (!aoOut || aoSamples <= 0) return;
+
+    SpectralGPU* gpu = _GetGPU();
+    if (!gpu) {
+        fprintf(stderr, "SpectralIntegrator: AO GPU unavailable, using CPU\n");
+        ComputeAO(scene, camera, aoOut, aoSamples, aoRadius);
+        return;
+    }
+
+    if (!gpu->BuildAccel(scene)) {
+        fprintf(stderr, "SpectralIntegrator: AO GPU accel build failed, using CPU\n");
+        ComputeAO(scene, camera, aoOut, aoSamples, aoRadius);
+        return;
+    }
+
+    if (!gpu->ComputeAO(camera, camera.imageWidth, camera.imageHeight,
+                        aoOut, aoSamples, aoRadius)) {
+        fprintf(stderr, "SpectralIntegrator: AO GPU launch failed, using CPU\n");
+        ComputeAO(scene, camera, aoOut, aoSamples, aoRadius);
+        return;
+    }
 }
 
 void SpectralIntegrator::DenoiseGPU(

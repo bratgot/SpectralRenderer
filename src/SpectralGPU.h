@@ -77,6 +77,12 @@ public:
     /// Denoise the framebuffer in-place on GPU, copy result to host pixels.
     bool Denoise(unsigned int width, unsigned int height, float* pixels);
 
+    /// Compute AO into aoOut (W*H floats, 1=open, 0=occluded).
+    /// Requires prior BuildAccel. Uses the __raygen__ao entry point.
+    bool ComputeAO(const SpectralCamera& camera,
+                   unsigned int width, unsigned int height,
+                   float* aoOut, int aoSamples, float aoRadius);
+
     /// Release all GPU resources.
     void Cleanup();
 
@@ -97,6 +103,7 @@ private:
     OptixProgramGroup      _raygenPG    = nullptr;
     OptixProgramGroup      _missPG      = nullptr;
     OptixProgramGroup      _hitgroupPG  = nullptr;
+    OptixProgramGroup      _raygenAOPG  = nullptr;   // AO-only raygen
 
     // Acceleration structure
     CUdeviceptr            _gasBuffer   = 0;
@@ -108,6 +115,10 @@ private:
     CUdeviceptr            _sbtRaygenRecord   = 0;
     CUdeviceptr            _sbtMissRecord     = 0;
     CUdeviceptr            _sbtHitgroupRecord = 0;
+
+    // AO SBT (separate, different raygen, shared miss + hitgroup)
+    OptixShaderBindingTable _sbtAO              = {};
+    CUdeviceptr            _sbtRaygenAORecord   = 0;
 
     // Device buffers
     CUdeviceptr            _d_framebuffer  = 0;
@@ -123,6 +134,11 @@ private:
     CUdeviceptr            _d_uvTriIndex   = 0;   // UV projection lookup
     CUdeviceptr            _d_uvBaryU      = 0;
     CUdeviceptr            _d_uvBaryV      = 0;
+
+    // AO output buffer (width*height floats, resized per render)
+    CUdeviceptr            _d_aoBuffer     = 0;
+    unsigned int           _aoAllocW       = 0;
+    unsigned int           _aoAllocH       = 0;
 
     // Multi-volume device buffers (Phase 13) — CUDA 3D textures
     struct DeviceVolume {

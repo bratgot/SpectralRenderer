@@ -2591,3 +2591,120 @@ extern "C" __global__ void __miss__spectral()
     optixSetPayload_5(0u);
     optixSetPayload_6(0u);
 }
+
+// ---------------------------------------------------------------------------
+// __raygen__ao -- ambient occlusion AOV pass
+// ---------------------------------------------------------------------------
+// Separate raygen that runs a standalone AO pass into params.aoBuffer.
+// Reuses __closesthit__spectral / __miss__spectral (SBT offset 0).
+// We only read payload_4 (matId+1, zero on miss) for hit detection.
+//
+// Matches CPU ComputeAO: cosine-weighted hemisphere around the camera-
+// facing (flipped) shading normal, occlusion ray flagged with
+// OPTIX_RAY_FLAG_CULL_BACK_FACING_TRIANGLES + TERMINATE_ON_FIRST_HIT
+// + DISABLE_CLOSESTHIT so we don't pay for shading on AO rays.
+//
+// Output: aoBuffer[pixIdx] in [0, 1], 1=unoccluded, 0=fully occluded.
+// ---------------------------------------------------------------------------
+extern "C" __global__ void __raygen__ao()
+{
+    const uint3 idx = optixGetLaunchIndex();
+    const unsigned int px = idx.x, py_local = idx.y;
+    const unsigned int py = py_local + params.yOffset;
+    const unsigned int pixIdx = py * params.width + px;
+
+    if (!params.aoBuffer) return;
+
+    // Default: empty pixel (no surface hit) = fully unoccluded
+    params.aoBuffer[pixIdx] = 1.f;
+
+    if (params.aoSamples <= 0 || !params.hasRealGeometry) return;
+
+    // --- Build primary ray via shared helper ---
+    // Using makeRay() matches __raygen__spectral's primary ray exactly
+    // across perspective / spherical / DOF / motion-blur modes.
+    const float W = float(params.width), H = float(params.height);
+    float3 ro, rd;
+    makeRay(float(px) + 0.5f, float(py) + 0.5f, W, H, ro, rd, pixIdx);
+    rd = normalize3(rd);
+
+    // --- Trace primary ray ---
+    unsigned int p0=0,p1=0,p2=0,p3=__float_as_uint(1e30f),p4=0,p5=0,p6=0;
+    optixTrace(params.traversable, ro, rd,
+               1e-3f, 1e30f, 0.f, OptixVisibilityMask(0xFF),
+               OPTIX_RAY_FLAG_NONE,
+               0, 1, 0, p0, p1, p2, p3, p4, p5, p6);
+
+    if (p4 == 0u) {
+        // Primary miss: nothing to AO. Leave aoBuffer[pixIdx] = 1.0.
+        return;
+    }
+
+    // Hit. Reconstruct normal + hit position.
+    float3 N = make_float3(__uint_as_float(p0),
+                           __uint_as_float(p1),
+                           __uint_as_float(p2));
+    N = normalize3(N);
+    float tHit = __uint_as_float(p3);
+    float3 hitPos = make_float3(ro.x + rd.x*tHit,
+                                ro.y + rd.y*tHit,
+                                ro.z + rd.z*tHit);
+
+    // Flip N to face camera (match CPU _ShadeSpectral backface branch).
+    // rd . N > 0 means N is facing away from camera -> flip.
+    float NdotRd = N.x*rd.x + N.y*rd.y + N.z*rd.z;
+    if (NdotRd > 0.f) { N.x = -N.x; N.y = -N.y; N.z = -N.z; }
+
+    // Build tangent frame around N
+    float3 up = (fabsf(N.y) < 0.999f) ? make_float3(0,1,0) : make_float3(1,0,0);
+    float3 T = make_float3(up.y*N.z - up.z*N.y,
+                           up.z*N.x - up.x*N.z,
+                           up.x*N.y - up.y*N.x);
+    T = normalize3(T);
+    float3 B = make_float3(N.y*T.z - N.z*T.y,
+                           N.z*T.x - N.x*T.z,
+                           N.x*T.y - N.y*T.x);
+
+    float3 aoOrig = make_float3(hitPos.x + N.x*0.01f,
+                                hitPos.y + N.y*0.01f,
+                                hitPos.z + N.z*0.01f);
+
+    // --- Cosine-weighted hemisphere AO rays ---
+    //
+    // Uses the same occlusion pattern as the main raygen's shadow rays:
+    // trace with CULL_BACK_FACING_TRIANGLES, run closest-hit/miss as
+    // normal, read payload_4 (matId+1 on hit, 0 on miss) to detect
+    // occlusion. Slightly more work than pure TERMINATE_ON_FIRST_HIT
+    // but reuses the same SBT and program groups.
+    int occluded = 0;
+    const int nSamples = params.aoSamples;
+    const float aoR = params.aoRadius;
+    unsigned int seed = (pixIdx * 7919u) ^ 0x9E3779B9u;
+
+    for (int s = 0; s < nSamples; ++s) {
+        unsigned int s2 = static_cast<unsigned int>(s) * 2u;
+        float u1 = hashRNG(seed + s2);
+        float u2 = hashRNG(seed + s2 + 1u);
+
+        float r = sqrtf(u1);
+        float phi = 6.28318530718f * u2;
+        float x = r * cosf(phi);
+        float y = r * sinf(phi);
+        float z = sqrtf(fmaxf(0.f, 1.f - u1));  // cosine hemisphere
+
+        float3 dir = make_float3(T.x*x + B.x*y + N.x*z,
+                                 T.y*x + B.y*y + N.y*z,
+                                 T.z*x + B.z*y + N.z*z);
+        dir = normalize3(dir);
+
+        unsigned int ap0=0, ap1=0, ap2=0, ap3=0, ap4=0, ap5=0, ap6=0;
+        optixTrace(params.traversable, aoOrig, dir,
+                   1e-3f, aoR, 0.f, OptixVisibilityMask(0xFF),
+                   OPTIX_RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+                   0, 1, 0, ap0, ap1, ap2, ap3, ap4, ap5, ap6);
+
+        if (ap4 != 0u) occluded++;
+    }
+
+    params.aoBuffer[pixIdx] = 1.f - float(occluded) / float(nSamples);
+}

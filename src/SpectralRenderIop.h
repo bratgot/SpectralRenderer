@@ -420,8 +420,9 @@ private:
     bool  _caustics = false;          // enable caustic photon mapping
     int   _causticPhotons = 500000;     // photons to trace
     float _causticRadius = 0.5f;       // gather radius
-    int   _aoSamples = 0;              // AO samples per pixel (0 = disabled)
-    float _aoRadius  = 5.f;            // AO max ray distance
+    bool  _aoEnable  = false;          // UI checkbox; mirrors _aoSamples > 0
+    int   _aoSamples = 16;             // AO samples per pixel (0 = disabled)
+    float _aoRadius  = 2.f;            // AO max ray distance (world units)
     bool  _aovNormals  = true;
     bool  _aovPosition = true;
     bool  _aovPRef    = true;
@@ -523,7 +524,10 @@ private:
     // Custom channels
     Channel _chanObjectId   = Chan_Black;
     Channel _chanMaterialId = Chan_Black;
-    Channel _chanAO         = Chan_Black;
+    // AO as top-level 'ao' layer (scalar replicated into R/G/B)
+    Channel _chanAOr        = Chan_Black;
+    Channel _chanAOg        = Chan_Black;
+    Channel _chanAOb        = Chan_Black;
     Channel _chanDepth      = Chan_Black;
     // Geometry AOV channels
     Channel _chanNx = Chan_Black, _chanNy = Chan_Black, _chanNz = Chan_Black;

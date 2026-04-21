@@ -1332,13 +1332,19 @@ void SpectralRenderIop::knobs(Knob_Callback f)
 
     BeginClosedGroup(f, "aov_util", "Utility passes");
     {
-        Int_knob(f, &_aoSamples, "ao_samples", "AO samples"); SetRange(f, 0, 64);
-        Tooltip(f, "Ambient occlusion ray count. 0 = disabled.\n"
-                   "8 = fast preview. 32 = smooth. 64 = final.\n"
-                   "Output as aov_AO (greyscale contact shadow).");
-        Float_knob(f, &_aoRadius, "ao_radius", "AO radius"); SetRange(f, 0.1f, 100.f);
+        Bool_knob(f, &_aoEnable, "ao_enable", "Ambient occlusion");
+        Tooltip(f, "Enable the AO AOV pass. Output channel: other.ao\n"
+                   "Runs on GPU when device=GPU, CPU otherwise.");
+        Int_knob(f, &_aoSamples, "ao_samples", "samples"); SetRange(f, 1, 64);
+        ClearFlags(f, Knob::STARTLINE);
+        Tooltip(f, "Ambient occlusion ray count.\n"
+                   "8 = fast preview. 16 = default. 32 = smooth. 64 = final.\n"
+                   "Output as other.ao (greyscale contact shadow).");
+        Float_knob(f, &_aoRadius, "ao_radius", "radius"); SetRange(f, 0.1f, 100.f);
+        ClearFlags(f, Knob::STARTLINE);
         Tooltip(f, "Maximum distance for AO rays (world units).\n"
-                   "Small = tight contact shadows. Large = broad ambient darkening.");
+                   "Small = tight contact shadows. Large = broad ambient darkening.\n"
+                   "Default 2.0 suits typical scenes; scale to your geometry size.");
     }
     EndGroup(f);
 
@@ -1413,6 +1419,21 @@ void SpectralRenderIop::knobs(Knob_Callback f)
 
 int SpectralRenderIop::knob_changed(Knob* k)
 {
+    // Backward-compat: older scenes didn't have ao_enable serialized.
+    // If ao_samples > 0 but checkbox is off, sync the checkbox on so the
+    // panel shows the real state. Also refresh the enable/disable UI
+    // flags on ao_samples / ao_radius so they reflect the checkbox.
+    if (k->is("showPanel")) {
+        if (!_aoEnable && _aoSamples > 0) {
+            _aoEnable = true;
+            if (Knob* ke = knob("ao_enable")) ke->set_value(true);
+        }
+        Knob* kSamples = knob("ao_samples");
+        Knob* kRadius  = knob("ao_radius");
+        if (kSamples) { if (_aoEnable) kSamples->enable(); else kSamples->disable(); }
+        if (kRadius)  { if (_aoEnable) kRadius->enable();  else kRadius->disable(); }
+    }
+
     // Only reset render for knobs that affect the image
     // Skip UI-only knobs (showPanel, hidePanel, label, tile_color, etc.)
     bool isUIOnly = k->is("showPanel") || k->is("hidePanel")
@@ -1427,6 +1448,33 @@ int SpectralRenderIop::knob_changed(Knob* k)
         if (_asyncQualityThread.joinable()) _asyncQualityThread.join();
         _frameReady.store(false); _sceneReady.store(false);
         _progressiveSppDone = 0;
+    }
+
+    // AO enable checkbox: toggling off stores 0 in ao_samples (disables pass);
+    // toggling on restores a non-zero value so the user gets visible AO
+    // immediately. Also drives the DISABLED flag on ao_samples / ao_radius
+    // knobs so they grey out when the pass is off.
+    if (k->is("ao_enable")) {
+        Knob* kSamples = knob("ao_samples");
+        Knob* kRadius  = knob("ao_radius");
+        if (_aoEnable) {
+            if (_aoSamples <= 0) {
+                _aoSamples = 16;  // default when enabling
+                if (kSamples) kSamples->set_value(_aoSamples);
+            }
+        } else {
+            _aoSamples = 0;
+            if (kSamples) kSamples->set_value(0);
+        }
+        if (kSamples) {
+            if (_aoEnable) kSamples->enable();
+            else           kSamples->disable();
+        }
+        if (kRadius) {
+            if (_aoEnable) kRadius->enable();
+            else           kRadius->disable();
+        }
+        return 1;
     }
 
     // Update DAG node tile colour based on device mode OR scanline compat.
@@ -1989,10 +2037,16 @@ void SpectralRenderIop::_validate(bool forReal)
     ChannelSet channels = Mask_RGBA;
     _chanObjectId   = getChannel("other.objectId");
     _chanMaterialId = getChannel("other.materialId");
-    _chanAO         = getChannel("other.ao");
+    _chanAOr        = getChannel("ao.red");
+    _chanAOg        = getChannel("ao.green");
+    _chanAOb        = getChannel("ao.blue");
     channels += _chanObjectId;
     channels += _chanMaterialId;
-    if (_aoSamples > 0) channels += _chanAO;
+    if (_aoSamples > 0) {
+        channels += _chanAOr;
+        channels += _chanAOg;
+        channels += _chanAOb;
+    }
 
     if (_aovNormals) {
         _chanNx = getChannel("N.red"); _chanNy = getChannel("N.green"); _chanNz = getChannel("N.blue");
@@ -2262,7 +2316,11 @@ void SpectralRenderIop::engine(
     };
     writeIdChannel(_chanObjectId, _objectIdBuffer);
     writeIdChannel(_chanMaterialId, _materialIdBuffer);
-    writeIdChannel(_chanAO, _aoBuffer);
+    // AO is scalar but surfaced as ao.red/green/blue so it's its own
+    // top-level layer. Write the same value to all three channels.
+    writeIdChannel(_chanAOr, _aoBuffer);
+    writeIdChannel(_chanAOg, _aoBuffer);
+    writeIdChannel(_chanAOb, _aoBuffer);
     // _depthBuffer is a single float per pixel (camera-space Z, background
     // sentinel 1e30). Same shape as the ID buffers so it rides the same helper.
     writeIdChannel(_chanDepth, _depthBuffer);
@@ -9238,10 +9296,18 @@ void SpectralRenderIop::_RenderStrip(int stripIdx)
             }
         }
 
-        // AO pass
+        // AO pass -- use GPU AO when rendering on GPU, CPU otherwise.
+        // Falls back to CPU automatically on GPU failure (see ComputeAOGPU).
         if (_aoSamples > 0) {
-            SpectralIntegrator::ComputeAO(*_scene, _renderCam, _aoBuffer.data(),
-                                           _aoSamples, _aoRadius);
+            if (_renderUseGPU) {
+                SpectralIntegrator::ComputeAOGPU(*_scene, _renderCam,
+                                                  _aoBuffer.data(),
+                                                  _aoSamples, _aoRadius);
+            } else {
+                SpectralIntegrator::ComputeAO(*_scene, _renderCam,
+                                               _aoBuffer.data(),
+                                               _aoSamples, _aoRadius);
+            }
         }
 
         // ─── Edge anti-aliasing post-pass ───

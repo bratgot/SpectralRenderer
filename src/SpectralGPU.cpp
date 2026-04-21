@@ -142,10 +142,12 @@ void SpectralGPU::Cleanup()
     _FreeBuffers();
     _FreeAccel();
 
-    if (_sbtRaygenRecord)   { cudaFree(reinterpret_cast<void*>(_sbtRaygenRecord));   _sbtRaygenRecord = 0; }
-    if (_sbtMissRecord)     { cudaFree(reinterpret_cast<void*>(_sbtMissRecord));     _sbtMissRecord = 0; }
-    if (_sbtHitgroupRecord) { cudaFree(reinterpret_cast<void*>(_sbtHitgroupRecord)); _sbtHitgroupRecord = 0; }
+    if (_sbtRaygenRecord)    { cudaFree(reinterpret_cast<void*>(_sbtRaygenRecord));    _sbtRaygenRecord = 0; }
+    if (_sbtMissRecord)      { cudaFree(reinterpret_cast<void*>(_sbtMissRecord));      _sbtMissRecord = 0; }
+    if (_sbtHitgroupRecord)  { cudaFree(reinterpret_cast<void*>(_sbtHitgroupRecord));  _sbtHitgroupRecord = 0; }
+    if (_sbtRaygenAORecord)  { cudaFree(reinterpret_cast<void*>(_sbtRaygenAORecord));  _sbtRaygenAORecord = 0; }
 
+    if (_raygenAOPG) { optixProgramGroupDestroy(_raygenAOPG); _raygenAOPG = nullptr; }
     if (_hitgroupPG) { optixProgramGroupDestroy(_hitgroupPG); _hitgroupPG = nullptr; }
     if (_missPG)     { optixProgramGroupDestroy(_missPG);     _missPG = nullptr; }
     if (_raygenPG)   { optixProgramGroupDestroy(_raygenPG);   _raygenPG = nullptr; }
@@ -154,6 +156,7 @@ void SpectralGPU::Cleanup()
     if (_optixContext) { optixDeviceContextDestroy(_optixContext); _optixContext = nullptr; }
 
     memset(&_sbt, 0, sizeof(_sbt));
+    memset(&_sbtAO, 0, sizeof(_sbtAO));
 }
 
 void SpectralGPU::_FreeAccel()
@@ -176,6 +179,8 @@ void SpectralGPU::_FreeBuffers()
     if (_d_textures)     { cudaFree(reinterpret_cast<void*>(_d_textures));     _d_textures = 0; }
     _FreeDenoiser();
     if (_d_params)       { cudaFree(reinterpret_cast<void*>(_d_params));       _d_params = 0; }
+    if (_d_aoBuffer)     { cudaFree(reinterpret_cast<void*>(_d_aoBuffer));     _d_aoBuffer = 0; }
+    _aoAllocW = _aoAllocH = 0;
     _allocW = _allocH = 0;
     _triCount = 0;
 }
@@ -285,10 +290,19 @@ bool SpectralGPU::Initialize(const std::string& ptxSource)
     OPTIX_CHECK(optixProgramGroupCreate(
         _optixContext, &hitgroupDesc, 1, &pgOptions, log, &logSize, &_hitgroupPG));
 
+    // AO raygen (separate entry point, shares miss + hitgroup)
+    OptixProgramGroupDesc raygenAODesc = {};
+    raygenAODesc.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
+    raygenAODesc.raygen.module = _module;
+    raygenAODesc.raygen.entryFunctionName = "__raygen__ao";
+    logSize = sizeof(log);
+    OPTIX_CHECK(optixProgramGroupCreate(
+        _optixContext, &raygenAODesc, 1, &pgOptions, log, &logSize, &_raygenAOPG));
+
     fprintf(stderr, "SpectralGPU: program groups created\n");
 
-    // Pipeline
-    OptixProgramGroup programGroups[] = { _raygenPG, _missPG, _hitgroupPG };
+    // Pipeline -- includes the AO raygen so __raygen__ao is linkable
+    OptixProgramGroup programGroups[] = { _raygenPG, _missPG, _hitgroupPG, _raygenAOPG };
 
     OptixPipelineLinkOptions linkOptions = {};
     linkOptions.maxTraceDepth = 8;  // bounces + shadow rays
@@ -296,7 +310,7 @@ bool SpectralGPU::Initialize(const std::string& ptxSource)
     logSize = sizeof(log);
     OPTIX_CHECK(optixPipelineCreate(
         _optixContext, &pipelineOptions, &linkOptions,
-        programGroups, 3,
+        programGroups, 4,
         log, &logSize, &_pipeline));
 
     // Stack sizes
@@ -337,6 +351,20 @@ bool SpectralGPU::Initialize(const std::string& ptxSource)
     _sbt.missRecordBase              = _sbtMissRecord;
     _sbt.missRecordStrideInBytes     = sizeof(MissSbtRecord);
     _sbt.missRecordCount             = 1;
+
+    // SBT — AO raygen record
+    RayGenSbtRecord raygenAORec = {};
+    OPTIX_CHECK(optixSbtRecordPackHeader(_raygenAOPG, &raygenAORec));
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_sbtRaygenAORecord), sizeof(RayGenSbtRecord)));
+    CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_sbtRaygenAORecord), &raygenAORec,
+                          sizeof(RayGenSbtRecord), cudaMemcpyHostToDevice));
+
+    // _sbtAO: same miss + hitgroup as _sbt, different raygen. hitgroup base is
+    // filled in BuildAccel (same _sbtHitgroupRecord used by both SBTs).
+    _sbtAO.raygenRecord                = _sbtRaygenAORecord;
+    _sbtAO.missRecordBase              = _sbtMissRecord;
+    _sbtAO.missRecordStrideInBytes     = sizeof(MissSbtRecord);
+    _sbtAO.missRecordCount             = 1;
 
     // Allocate params buffer
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_params),
@@ -943,6 +971,14 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
     _sbt.hitgroupRecordBase          = _sbtHitgroupRecord;
     _sbt.hitgroupRecordStrideInBytes = sizeof(HitGroupSbtRecord);
     _sbt.hitgroupRecordCount         = 1;
+
+    // Mirror hitgroup to _sbtAO (shared hit program, same record).
+    // Without this, AO launches see a zero hitgroupRecordBase and
+    // dereference garbage on first hit -> CUDA illegal memory access
+    // that poisons the context until Nuke restarts.
+    _sbtAO.hitgroupRecordBase          = _sbtHitgroupRecord;
+    _sbtAO.hitgroupRecordStrideInBytes = sizeof(HitGroupSbtRecord);
+    _sbtAO.hitgroupRecordCount         = 1;
 
     fprintf(stderr, "SpectralGPU: built OptiX GAS for %u triangles\n", _triCount);
     _gasBuilt = true;
@@ -1606,6 +1642,92 @@ void SpectralGPU::_FreeDenoiser()
     if (_d_denoiserScratch) { cudaFree(reinterpret_cast<void*>(_d_denoiserScratch)); _d_denoiserScratch = 0; }
     if (_denoiser)          { optixDenoiserDestroy(_denoiser); _denoiser = nullptr; }
     _denoiserW = _denoiserH = 0;
+}
+
+// ---------------------------------------------------------------------------
+// ComputeAO — ambient occlusion AOV pass via __raygen__ao
+// ---------------------------------------------------------------------------
+bool SpectralGPU::ComputeAO(const SpectralCamera& camera,
+                             unsigned int width, unsigned int height,
+                             float* aoOut, int aoSamples, float aoRadius)
+{
+    if (!_pipeline || !_gasHandle) {
+        fprintf(stderr, "SpectralGPU::ComputeAO: no pipeline or GAS\n");
+        return false;
+    }
+    if (width == 0 || height == 0 || aoOut == nullptr || aoSamples <= 0) {
+        return false;
+    }
+
+    // (Re)alloc AO device buffer if size changed
+    if (width != _aoAllocW || height != _aoAllocH) {
+        if (_d_aoBuffer) cudaFree(reinterpret_cast<void*>(_d_aoBuffer));
+        _d_aoBuffer = 0;
+        size_t nBytes = size_t(width) * height * sizeof(float);
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_aoBuffer), nBytes));
+        _aoAllocW = width;
+        _aoAllocH = height;
+    }
+
+    // Camera matrices -- matches convention in Render()
+    auto copyMatrix = [](const pxr::GfMatrix4d& src, float* dst) {
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 4; ++c)
+                dst[r * 4 + c] = static_cast<float>(src[r][c]);
+    };
+    auto copyMatrixTransposed = [](const pxr::GfMatrix4d& src, float* dst) {
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 4; ++c)
+                dst[r * 4 + c] = static_cast<float>(src[c][r]);
+    };
+
+    spectral_gpu::LaunchParams launchParams = {};
+    launchParams.framebuffer   = nullptr;  // AO pass doesn't touch framebuffer
+    launchParams.depthbuffer   = nullptr;
+    launchParams.width         = width;
+    launchParams.height        = height;
+    launchParams.yOffset       = 0;
+    launchParams.traversable   = _gasHandle;
+    launchParams.spp           = 1;
+    launchParams.maxBounces    = 0;
+    launchParams.previewMode   = 0;
+    launchParams.hasRealGeometry = _hasRealGeometry ? 1 : 0;
+
+    // AO-specific params
+    launchParams.aoBuffer  = reinterpret_cast<float*>(_d_aoBuffer);
+    launchParams.aoSamples = aoSamples;
+    launchParams.aoRadius  = aoRadius;
+
+    // Camera (same as Render())
+    copyMatrix(camera.projInverse, launchParams.camera.projInverse);
+    copyMatrixTransposed(camera.viewToWorld, launchParams.camera.viewToWorld);
+    launchParams.camera.fStop          = camera.fStop;
+    launchParams.camera.focusDistance  = camera.focusDistance;
+    launchParams.camera.focalLength    = camera.focalLength;
+    launchParams.camera.cameraMblur    = 0;  // motion blur not relevant for AO AOV
+    launchParams.projectionMode        = camera.projectionMode;
+
+    // Upload params
+    CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_params), &launchParams,
+                          sizeof(spectral_gpu::LaunchParams), cudaMemcpyHostToDevice));
+
+    // Launch AO raygen
+    OPTIX_CHECK(optixLaunch(
+        _pipeline, 0,
+        _d_params, sizeof(spectral_gpu::LaunchParams),
+        &_sbtAO,
+        width, height, 1));
+
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Download
+    CUDA_CHECK(cudaMemcpy(aoOut, reinterpret_cast<void*>(_d_aoBuffer),
+                          size_t(width) * height * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+
+    fprintf(stderr, "SpectralGPU: ComputeAO complete (%dx%d, %d samples, radius %.2f)\n",
+            width, height, aoSamples, aoRadius);
+    return true;
 }
 
 bool SpectralGPU::Denoise(unsigned int width, unsigned int height, float* pixels)

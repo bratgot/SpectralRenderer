@@ -304,6 +304,15 @@ struct LaunchParams {
     int                    envHeight;
     float                  envRotation;    // degrees
     float                  envIntensityBg; // hdriDome.intensity (incl. ND)
+
+    // Ambient occlusion AOV (spectral_gpu::ComputeAO pass).
+    // aoBuffer null or aoSamples == 0 means AO pass is skipped entirely.
+    // Filled by the dedicated __raygen__ao program, NOT the main spectral
+    // raygen. Output is single-channel float in [0, 1], 1 = fully
+    // unoccluded, 0 = fully occluded. Matches CPU ComputeAO output.
+    float*             aoBuffer;
+    int                aoSamples;
+    float              aoRadius;
 };
 
 // Per-ray payload — carried through the trace
