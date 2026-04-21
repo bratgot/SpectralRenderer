@@ -202,6 +202,16 @@ private:
     float                  _envRotationBg = 0.f;
     float                  _envIntensityBg = 1.f;
 
+    // HDRI importance-sampling CDFs on device (first dome's tables).
+    CUdeviceptr            _d_envMarginalCDF    = 0;
+    CUdeviceptr            _d_envConditionalCDF = 0;
+    int                    _envCDFWidth         = 0;
+    int                    _envCDFHeight        = 0;
+    float                  _envCDFTotal         = 0.f;
+    int                    _envHasCDF           = 0;
+    // Content hash of the CDF currently on-device, to skip re-upload.
+    size_t                 _cdfUploadHash       = 0;
+
     // Denoiser
     OptixDenoiser          _denoiser = nullptr;
     CUdeviceptr            _d_denoiserState    = 0;

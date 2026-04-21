@@ -8557,6 +8557,7 @@ void SpectralRenderIop::_BuildLightRig()
                 // Apply ND filter: each stop halves brightness
                 float ndAtten = (el->ndFilter > 0.01) ? float(std::pow(2.0, -el->ndFilter)) : 1.f;
                 hdriDome.intensity = float(el->hdriIntensity) * ndAtten;
+                hdriDome.visibleInPrimary = el->visibleInPrimary;
                 hdriDome.envTexId = texId;
                 hdriDome.envWidth = tex->GetWidth();
                 hdriDome.envHeight = tex->GetHeight();
