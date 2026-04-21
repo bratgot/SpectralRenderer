@@ -340,6 +340,45 @@ set_target_properties(SpectralRender PROPERTIES
 )
 
 # ---------------------------------------------------------------------------
+# Plugin runtime files: icons + init.py + menu.py next to the DLL
+# ---------------------------------------------------------------------------
+# Nuke needs these alongside SpectralRender.dll:
+#   - init.py  : adds plugin dir to nuke.pluginAddPath and force-loads the DLL
+#   - menu.py  : builds the SpectralRenderer toolbar menu
+#   - *.png    : toolbar + node icons referenced from menu.py by bare filename
+#
+# Without this POST_BUILD, wiping `build/` loses everything but the DLL and
+# Nuke comes up with blank icons + no menu until manually re-copied.
+#
+# SAFETY: destination is hard-wired to ${CMAKE_CURRENT_BINARY_DIR}/SpectralRender,
+# which is always inside the build tree. This step never touches
+# ~/.nuke/ or any user-personal Nuke configuration.
+set(_spectral_runtime_dst "${CMAKE_CURRENT_BINARY_DIR}/SpectralRender")
+
+# Assert: destination must be under the build tree, never elsewhere.
+# Guards against someone pointing CMAKE_BINARY_DIR somewhere weird.
+string(FIND "${_spectral_runtime_dst}" "${CMAKE_BINARY_DIR}" _spectral_dst_ok)
+if(NOT _spectral_dst_ok EQUAL 0)
+    message(FATAL_ERROR
+        "SpectralRenderer runtime-files destination is outside the build tree: "
+        "'${_spectral_runtime_dst}'. Refusing to copy. Check your CMake configure args.")
+endif()
+
+add_custom_command(TARGET SpectralRender POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/init.py"
+        "${_spectral_runtime_dst}/init.py"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/menu.py"
+        "${_spectral_runtime_dst}/menu.py"
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/icons/current"
+        "${_spectral_runtime_dst}"
+    COMMENT "Staging plugin runtime files (init.py, menu.py, icons) next to DLL"
+    VERBATIM
+)
+
+# ---------------------------------------------------------------------------
 # Status
 # ---------------------------------------------------------------------------
 message(STATUS "")

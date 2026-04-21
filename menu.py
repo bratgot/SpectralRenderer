@@ -18,7 +18,7 @@ if nuke.NUKE_VERSION_MAJOR >= 17:
     m.addCommand("Materials/SpectralDrafting", "nuke.createNode('SpectralDrafting')", icon="SpectralDrafting.png")
     m.addCommand("Materials/SpectralShadowCatcher", "nuke.createNode('SpectralShadowCatcher')", icon="SpectralShadowCatcher.png")
     m.addCommand("Materials/SpectralVolumeMaterial", "nuke.createNode('SpectralVolumeMaterial')", icon="SpectralVolumeMaterial.png")
-    m.addCommand("Materials/SpectralMeshProperties", "nuke.createNode('SpectralMeshProperties')")
+    m.addCommand("Materials/SpectralMeshProperties", "nuke.createNode('SpectralMeshProperties')", icon="SpectralMeshProperties.png")
 
     m.addSeparator()
 
