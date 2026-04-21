@@ -638,6 +638,121 @@ static __forceinline__ __device__ float3 sampleTextureGPU(int texId, float2 uv)
     return make_float3(top.x*(1-dy)+bot.x*dy, top.y*(1-dy)+bot.y*dy, top.z*(1-dy)+bot.z*dy);
 }
 
+// ---------------------------------------------------------------------------
+// HDRI importance sampling via 2D CDF. Mirrors CPU SpectralLight::
+// SampleDirection / SamplePdf. Binary-search the marginal (rows) then
+// the per-row conditional (columns). Each sample returns a direction
+// drawn in proportion to HDRI luminance * sin(theta).
+// ---------------------------------------------------------------------------
+static __forceinline__ __device__ int lowerBoundGPU(const float* data, int n, float val)
+{
+    int lo = 0, hi = n;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (data[mid] < val) lo = mid + 1;
+        else                 hi = mid;
+    }
+    return (lo < n) ? lo : (n - 1);
+}
+
+static __forceinline__ __device__ float3 sampleEnvHDRIDirection(float u1, float u2)
+{
+    const int W = params.envCDFWidth;
+    const int H = params.envCDFHeight;
+    const int y = lowerBoundGPU(params.envMarginalCDF, H, u2);
+    const int x = lowerBoundGPU(&params.envConditionalCDF[y * W], W, u1);
+
+    const float u = (float(x) + 0.5f) / float(W);
+    const float v = (float(y) + 0.5f) / float(H);
+    const float PI = 3.14159265f;
+    float phi = u * 2.f * PI - PI;
+    if (fabsf(params.envRotation) > 0.01f)
+        phi -= params.envRotation * PI / 180.f;
+    const float theta = v * PI;
+    const float sinT = sinf(theta);
+
+    float3 dir = make_float3(sinT * sinf(phi), cosf(theta), -sinT * cosf(phi));
+    const float dlen2 = dir.x*dir.x + dir.y*dir.y + dir.z*dir.z;
+    if (dlen2 > 1e-12f) {
+        const float inv = rsqrtf(dlen2);
+        dir.x *= inv; dir.y *= inv; dir.z *= inv;
+    }
+    return dir;
+}
+
+static __forceinline__ __device__ float envSamplePdf(float3 L)
+{
+    if (!params.envHasCDF || params.envCDFTotal < 1e-10f
+        || params.envTexId < 0 || params.envTexId >= (int)params.textureCount)
+        return 0.f;
+
+    const GPUTexture& tex = params.textures[params.envTexId];
+    if (!tex.pixels || tex.width <= 0 || tex.height <= 0) return 0.f;
+
+    const float PI = 3.14159265f;
+    float dy = fmaxf(-1.f, fminf(1.f, L.y));
+    float theta = acosf(dy);
+    float phi = atan2f(L.x, -L.z);
+    if (fabsf(params.envRotation) > 0.01f) {
+        phi += params.envRotation * PI / 180.f;
+        if (phi >  PI) phi -= 2.f * PI;
+        if (phi < -PI) phi += 2.f * PI;
+    }
+    float u = (phi + PI) / (2.f * PI);
+    float v = theta / PI;
+
+    int px = max(0, min(int(u * tex.width),  tex.width  - 1));
+    int py = max(0, min(int(v * tex.height), tex.height - 1));
+    int idx = (py * tex.width + px) * tex.channels;
+    float rr = tex.pixels[idx];
+    float gg = (tex.channels >= 2) ? tex.pixels[idx + 1] : rr;
+    float bb = (tex.channels >= 3) ? tex.pixels[idx + 2] : rr;
+    float lum = 0.2126f * rr + 0.7152f * gg + 0.0722f * bb;
+
+    float sinTheta = sinf(theta);
+    if (sinTheta < 1e-6f) return 0.f;
+
+    // Matches CPU: PDF is (lum * sinTheta / totalLum) * (W*H) / (2*pi*pi)
+    return (lum * sinTheta / params.envCDFTotal)
+         * float(tex.width * tex.height)
+         / (2.f * PI * PI);
+}
+
+// GGX D + mixture BSDF pdf for MIS balance. Mirrors SpectralBSDF::Pdf.
+static __forceinline__ __device__ float ggxD_GPU(float alpha, float NdotH)
+{
+    const float a2 = alpha * alpha;
+    const float PI = 3.14159265f;
+    const float denom = NdotH * NdotH * (a2 - 1.f) + 1.f;
+    return a2 / (PI * denom * denom + 1e-7f);
+}
+
+static __forceinline__ __device__ float bsdfPdfGPU(
+    const GPUMaterial& mat, float3 N, float3 V, float3 L)
+{
+    float NdotL = N.x*L.x + N.y*L.y + N.z*L.z;
+    float NdotV = N.x*V.x + N.y*V.y + N.z*V.z;
+    if (NdotL <= 0.f || NdotV <= 0.f) return 0.f;
+
+    float roughness = fmaxf(0.01f, mat.roughness);
+    float alpha = roughness * roughness;
+    float specProb = fmaxf(0.25f, 0.5f * (1.f - roughness) + 0.5f * mat.metallic);
+
+    float3 H = make_float3(V.x + L.x, V.y + L.y, V.z + L.z);
+    float hlen2 = H.x*H.x + H.y*H.y + H.z*H.z;
+    if (hlen2 < 1e-12f) return 0.f;
+    float invH = rsqrtf(hlen2);
+    H.x *= invH; H.y *= invH; H.z *= invH;
+    float NdotH = fmaxf(0.f, N.x*H.x + N.y*H.y + N.z*H.z);
+    float VdotH = fmaxf(0.f, V.x*H.x + V.y*H.y + V.z*H.z);
+
+    float D = ggxD_GPU(alpha, NdotH);
+    float pdfGGX = (VdotH > 1e-7f) ? D * NdotH / (4.f * VdotH) : 0.f;
+    float pdfCos = NdotL / 3.14159265f;
+
+    return specProb * pdfGGX + (1.f - specProb) * pdfCos;
+}
+
 // Sample alpha channel from texture (returns 1.0 if no alpha)
 // Sample the HDRI dome texture by world-space ray direction.
 // Uses the SAME lat-long convention as SpectralLight::EnvironmentEmission
@@ -695,11 +810,17 @@ static __forceinline__ __device__ float3 sampleEnvHDRI(float3 dir)
 // Gaussian basis decomposition. Cheap and consistent across CPU/GPU.
 static __forceinline__ __device__ float rgbToSpectralGPU(float3 rgb, float lambda)
 {
-    // Gaussian-lobe RGB basis. Centres at 450/550/620 nm, sigma = 40 nm.
-    // The same constants live on the CPU side in _RGBtoSpectral.
-    float bR = expf(-0.5f * powf((lambda - 620.f) / 40.f, 2.f));
-    float bG = expf(-0.5f * powf((lambda - 550.f) / 40.f, 2.f));
-    float bB = expf(-0.5f * powf((lambda - 450.f) / 40.f, 2.f));
+    // Gaussian-lobe RGB basis. Must match SpectralLight::_RGBtoSpectral
+    // exactly -- centres 630/532/460 nm, sigmas 30/30/25 nm. This keeps
+    // CPU and GPU paths in lockstep for HDRI BG, emission, and any other
+    // RGB->spectral lift. An earlier version had (450,40)(550,40)(620,40)
+    // and drifted warm on sunset HDRIs because wider sigmas over-sample
+    // the red lobe -- fixed 2026-04-21. Inline form (not lambda) to
+    // match the style used elsewhere in this file and avoid any OptiX
+    // module-compile quirks with device lambdas.
+    float bR = expf(-((lambda-630.f)*(lambda-630.f))/(2.f*30.f*30.f));
+    float bG = expf(-((lambda-532.f)*(lambda-532.f))/(2.f*30.f*30.f));
+    float bB = expf(-((lambda-460.f)*(lambda-460.f))/(2.f*25.f*25.f));
     return fmaxf(0.f, rgb.x * bR + rgb.y * bG + rgb.z * bB);
 }
 
@@ -880,8 +1001,22 @@ static __forceinline__ __device__ float shadeHit(
     if (params.lightCount > 0) {
         for (unsigned int li = 0; li < params.lightCount; ++li) {
             const GPULight& light = params.lights[li];
-            // Jittered light direction for soft shadows
-            float3 L = sampleLightDir(light, hitPos, hashRNG(rngSeed++), hashRNG(rngSeed++), N);
+            // Jittered light direction for soft shadows.
+            // For HDRI dome with CDF available, importance-sample the HDRI
+            // directly (CPU-parity: SpectralLight::SampleDirection). Otherwise
+            // fall through to cosine-weighted hemisphere.
+            float u1 = hashRNG(rngSeed++);
+            float u2 = hashRNG(rngSeed++);
+            float3 L;
+            float pdfLight = 0.f;   // nonzero only when sampling by light IS
+            const bool domeIS = (light.type == 3) && params.envHasCDF
+                                && (params.envTexId >= 0);
+            if (domeIS) {
+                L = sampleEnvHDRIDirection(u1, u2);
+                pdfLight = envSamplePdf(L);
+            } else {
+                L = sampleLightDir(light, hitPos, u1, u2, N);
+            }
 
             // Shadow ray — trace through glass (transparent shadows)
             bool inShadow = false;
@@ -990,10 +1125,37 @@ static __forceinline__ __device__ float shadeHit(
                 }
 
                 float bsdf = evalBSDF(mat, N, V, L, lambda);
-                float emission = lightEmission(light, lambda) * lightAttenuation(light, hitPos);
-                // Dome: scale by 0.5 to match CPU MIS (other half comes from bounce miss)
-                if (light.type == 3) emission *= 0.5f;
-                radiance += bsdf * emission * shadowTransmit;
+                float emission;
+                if (light.type == 3 && params.envTexId >= 0) {
+                    // Dome with HDRI texture: sample the HDRI at the sampled
+                    // direction L, convert to spectral. Mirrors CPU
+                    // SpectralLight::EnvironmentEmission.
+                    float3 rgb = sampleEnvHDRI(L);
+                    emission = rgbToSpectralGPU(rgb, lambda) * params.envIntensityGPU;
+                } else {
+                    emission = lightEmission(light, lambda) * lightAttenuation(light, hitPos);
+                }
+
+                if (domeIS) {
+                    // HDRI importance-sampled branch with MIS: power-heuristic
+                    // beta=2 between pdfLight (CDF IS) and pdfBsdf (BSDF IS).
+                    // Matches CPU SpectralBSDF::MISWeight. No /pdf division --
+                    // mirrors CPU SpectralIntegrator line 1930.
+                    float pdfBsdf = bsdfPdfGPU(mat, N, V, L);
+                    float a2 = pdfLight * pdfLight;
+                    float b2 = pdfBsdf  * pdfBsdf;
+                    // Match CPU SpectralIntegrator line 1926-1928: when
+                    // pdfLight degenerates to 0 (e.g. L at pole, lum=0),
+                    // use misW=1 rather than 0 so the sample still counts.
+                    float misW = (pdfLight > 0.f) ? a2 / (a2 + b2 + 1e-10f) : 1.f;
+                    radiance += bsdf * emission * misW * shadowTransmit;
+                } else {
+                    // Non-CDF path: keep the hardcoded 0.5 factor for dome
+                    // (matches pre-CDF CPU-compat fallback for domes without
+                    // a built CDF).
+                    if (light.type == 3) emission *= 0.5f;
+                    radiance += bsdf * emission * shadowTransmit;
+                }
             }
         }
     }
@@ -2257,6 +2419,8 @@ extern "C" __global__ void __raygen__spectral()
             bool isHit = (p4 > 0u);
 
             float radiance = 0.f;
+            // Moved up so DIR-VIZ BYPASS (below) can write to them from miss.
+            float vx=0.f, vy=0.f, vz=0.f;
 
             if (isHit) {
                 int matId = int(p4)-1;
@@ -2413,11 +2577,48 @@ extern "C" __global__ void __raygen__spectral()
                             radiance += throughput * volSpec;
                             throughput *= volTrans;
                         }
-                        // Dome contribution (MIS weight 0.5, other half in direct)
+                        // Dome contribution (BSDF IS strategy). Mirrors CPU
+                        // SpectralIntegrator line 2180-2193: sample HDRI at
+                        // the bounce direction and MIS-weight against the
+                        // CDF light-sampling strategy (shadeHit).
                         for (unsigned int li = 0; li < params.lightCount; ++li) {
                             const GPULight& domeL = params.lights[li];
                             if (domeL.type != 3) continue;
-                            radiance += throughput * lightEmission(domeL, lambda) * 0.5f;
+
+                            // Sample HDRI along bounceDir. This is the key
+                            // fix: previously we used lightEmission() which
+                            // returns light.color=(1,1,1) * Gauss * intensity
+                            // -- uniform white, no HDRI content.
+                            float domeRad;
+                            if (params.envTexId >= 0) {
+                                float3 rgb = sampleEnvHDRI(bounceDir);
+                                domeRad = rgbToSpectralGPU(rgb, lambda)
+                                        * params.envIntensityGPU;
+                            } else {
+                                domeRad = lightEmission(domeL, lambda);
+                            }
+                            if (domeRad <= 0.f) continue;
+
+                            // MIS weight for the BSDF strategy: power
+                            // heuristic beta=2, misW_B = pdfB^2 / (pdfB^2 + pdfL^2).
+                            // When no CDF is available, fall back to 0.5
+                            // (splits the two "strategies" evenly and matches
+                            // prior behaviour).
+                            float misW = 0.5f;
+                            if (params.envHasCDF) {
+                                float pdfBsdf = bsdfPdfGPU(*bMat, bN, bV, bounceDir);
+                                float pdfLight = envSamplePdf(bounceDir);
+                                if (pdfBsdf > 0.f && pdfLight > 0.f) {
+                                    float a2 = pdfBsdf * pdfBsdf;
+                                    float b2 = pdfLight * pdfLight;
+                                    misW = a2 / (a2 + b2 + 1e-10f);
+                                } else if (pdfBsdf > 0.f) {
+                                    misW = 1.f;
+                                } else {
+                                    misW = 0.f;
+                                }
+                            }
+                            radiance += throughput * domeRad * misW;
                         }
                         break;
                     }
@@ -2485,8 +2686,32 @@ extern "C" __global__ void __raygen__spectral()
                 // transparent BG so they can be comped over another plate).
                 radiance = 0.f;
                 if (params.envVisibleBg && params.numGpuVolumes == 0) {
-                    float3 rgb = sampleEnvHDRI(dir);
-                    radiance = rgbToSpectralGPU(rgb, lambda) * params.envIntensityBg;
+                    // INLINE BYPASS: HDRI sampler expanded here, no lambda.
+                    // If this shows the HDRI and sampleEnvHDRI doesn't,
+                    // the lambda inside sampleEnvHDRI is the bug.
+                    const GPUTexture& _tex = params.textures[params.envTexId];
+                    float _nx = dir.x, _ny = dir.y, _nz = dir.z;
+                    float _invLen = rsqrtf(_nx*_nx + _ny*_ny + _nz*_nz);
+                    _nx *= _invLen; _ny *= _invLen; _nz *= _invLen;
+                    float _theta = acosf(fmaxf(-1.f, fminf(1.f, _ny)));
+                    float _phi = atan2f(_nx, -_nz);
+                    const float _PI = 3.14159265f;
+                    float _u = (_phi + _PI) / (2.f * _PI);
+                    float _v = _theta / _PI;
+                    int _x = (int)(_u * (_tex.width - 1));
+                    int _y = (int)(_v * (_tex.height - 1));
+                    _x = max(0, min(_x, _tex.width - 1));
+                    _y = max(0, min(_y, _tex.height - 1));
+                    int _idx = (_y * _tex.width + _x) * _tex.channels;
+                    float _r = _tex.pixels[_idx];
+                    float _g = (_tex.channels >= 2) ? _tex.pixels[_idx + 1] : _r;
+                    float _b = (_tex.channels >= 3) ? _tex.pixels[_idx + 2] : _r;
+                    _r *= params.envIntensityBg;
+                    _g *= params.envIntensityBg;
+                    _b *= params.envIntensityBg;
+                    vx = (0.4124f*_r + 0.3576f*_g + 0.1805f*_b);
+                    vy = (0.2126f*_r + 0.7152f*_g + 0.0722f*_b);
+                    vz = (0.0193f*_r + 0.1192f*_g + 0.9505f*_b);
                 }
             }
 
@@ -2506,7 +2731,6 @@ extern "C" __global__ void __raygen__spectral()
 
             // GPU volume ray marching — gated by volumeSpp
             float sampleAlpha = isHit ? hitOpacity : 0.f;
-            float vx=0.f, vy=0.f, vz=0.f;
             if (params.numGpuVolumes > 0 && s < params.volumeSpp) {
                 float surfT = isHit ? depth : 1e30f;
                 float3 volRGB = make_float3(0.f,0.f,0.f); float volTrans = 1.f;

@@ -177,6 +177,10 @@ void SpectralGPU::_FreeBuffers()
     for (auto& dp : _d_texPixels) { if (dp) cudaFree(reinterpret_cast<void*>(dp)); }
     _d_texPixels.clear();
     if (_d_textures)     { cudaFree(reinterpret_cast<void*>(_d_textures));     _d_textures = 0; }
+    if (_d_envMarginalCDF)    { cudaFree(reinterpret_cast<void*>(_d_envMarginalCDF));    _d_envMarginalCDF = 0; }
+    if (_d_envConditionalCDF) { cudaFree(reinterpret_cast<void*>(_d_envConditionalCDF)); _d_envConditionalCDF = 0; }
+    _cdfUploadHash = 0;
+    _envHasCDF = 0;
     _FreeDenoiser();
     if (_d_params)       { cudaFree(reinterpret_cast<void*>(_d_params));       _d_params = 0; }
     if (_d_aoBuffer)     { cudaFree(reinterpret_cast<void*>(_d_aoBuffer));     _d_aoBuffer = 0; }
@@ -237,8 +241,19 @@ bool SpectralGPU::Initialize(const std::string& ptxSource)
     // Module
     OptixModuleCompileOptions moduleOptions = {};
     moduleOptions.maxRegisterCount = OPTIX_COMPILE_DEFAULT_MAX_REGISTER_COUNT;
-    moduleOptions.optLevel         = OPTIX_COMPILE_OPTIMIZATION_DEFAULT;
-    moduleOptions.debugLevel       = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
+    // Dev-mode fast compile: SPECTRAL_FAST_COMPILE=1 -> LEVEL_0 opt
+    // (~10s vs ~70s) in exchange for ~20-30% slower runtime.
+    // Designed for iterating on kernel code; unset for release renders.
+    const char* fastCompile = std::getenv("SPECTRAL_FAST_COMPILE");
+    if (fastCompile && fastCompile[0] == '1') {
+        moduleOptions.optLevel   = OPTIX_COMPILE_OPTIMIZATION_LEVEL_0;
+        moduleOptions.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
+        fprintf(stderr, "SpectralGPU: SPECTRAL_FAST_COMPILE=1 -- using LEVEL_0 "
+                        "optimization (faster compile, slower runtime)\n");
+    } else {
+        moduleOptions.optLevel   = OPTIX_COMPILE_OPTIMIZATION_DEFAULT;
+        moduleOptions.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
+    }
 
     OptixPipelineCompileOptions pipelineOptions = {};
     pipelineOptions.usesMotionBlur        = false;
@@ -379,6 +394,13 @@ bool SpectralGPU::Initialize(const std::string& ptxSource)
 // ---------------------------------------------------------------------------
 bool SpectralGPU::BuildAccel(const SpectralScene& scene)
 {
+    // Sync with any previous launch before we start freeing/reallocating
+    // device buffers. Without this, a rapid knob drag (which re-validates
+    // mid-render) can free buffers that a still-running kernel is reading,
+    // causing a hard crash. Seen in practice on HDRI rotation drag.
+    // Cost: a stall wait for the previous kernel. Small.
+    cudaDeviceSynchronize();
+
     // Skip full rebuild if geometry hasn't changed (volume-only scenes)
     unsigned int newTriCount = scene.TotalTriangles();
     if (_gasBuilt && newTriCount == _cachedSceneTriCount) {
@@ -607,12 +629,42 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
                                       lightBytes, cudaMemcpyHostToDevice));
                 _lightCount = static_cast<unsigned int>(gpuLights.size());
             }
-            // Re-extract virtual lights + SH
+            // Re-extract virtual lights + SH + HDRI-BG fields.
+            // All must land in the cached path; otherwise toggling a dome
+            // knob busts the lightCheck hash, flags lightsChanged, but
+            // leaves this extract stale and the GPU miss-shader reads
+            // pre-toggle state.
             _numVirtualLights = 0;
             _hasEnvSH = false;
             _envIntensityGPU = 1.f;
+            _envVisibleBg = 0;
+            _envTexIdBg = -1;
+            _envWidthBg = 0;
+            _envHeightBg = 0;
+            _envRotationBg = 0.f;
+            _envIntensityBg = 1.f;
+            bool texLatched = false;
+            bool bgLatched  = false;
             for (const auto& L : lights) {
                 if (L.type != pxr::SpectralLight::Type::Dome) continue;
+                // Lighting data: record the first HDRI dome's tex + dims +
+                // rotation regardless of visibleInPrimary. Surface shading
+                // (shadeHit CDF IS / bounce-miss HDRI sample) must always
+                // be able to sample the texture. The 'visible in BG'
+                // checkbox controls only primary-ray miss, not lighting.
+                if (!texLatched && L.envTexId >= 0) {
+                    _envTexIdBg = L.envTexId;
+                    _envWidthBg = L.envWidth;
+                    _envHeightBg = L.envHeight;
+                    _envRotationBg = L.envRotation;
+                    texLatched = true;
+                }
+                // BG visibility: gate on visibleInPrimary. Separate latch.
+                if (!bgLatched && L.visibleInPrimary && L.envTexId >= 0) {
+                    _envVisibleBg = 1;
+                    _envIntensityBg = L.EffectiveIntensity();
+                    bgLatched = true;
+                }
                 int nVL = std::min(8, (int)L.envVirtualLights.size());
                 for (int i = 0; i < nVL && _numVirtualLights < 8; ++i) {
                     auto& vl = L.envVirtualLights[i];
@@ -634,6 +686,34 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
                     _hasEnvSH = true;
                 }
                 _envIntensityGPU = L.EffectiveIntensity();
+
+                // HDRI CDF for importance sampling (cached path mirror of Pass 2).
+                if (L.envHasCDF && !L.envMarginalCDF.empty() && !L.envConditionalCDF.empty()) {
+                    size_t cdfHash = size_t(L.envWidth) * 2654435761u
+                                   + size_t(L.envHeight) * 2246822519u
+                                   + size_t(L.envCDFTotal * 1000.f);
+                    if (cdfHash != _cdfUploadHash) {
+                        if (_d_envMarginalCDF)    { cudaFree(reinterpret_cast<void*>(_d_envMarginalCDF));    _d_envMarginalCDF = 0; }
+                        if (_d_envConditionalCDF) { cudaFree(reinterpret_cast<void*>(_d_envConditionalCDF)); _d_envConditionalCDF = 0; }
+                        size_t margBytes = L.envMarginalCDF.size() * sizeof(float);
+                        size_t condBytes = L.envConditionalCDF.size() * sizeof(float);
+                        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_envMarginalCDF), margBytes));
+                        CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_envMarginalCDF),
+                                              L.envMarginalCDF.data(), margBytes, cudaMemcpyHostToDevice));
+                        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_envConditionalCDF), condBytes));
+                        CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_envConditionalCDF),
+                                              L.envConditionalCDF.data(), condBytes, cudaMemcpyHostToDevice));
+                        _cdfUploadHash = cdfHash;
+                        fprintf(stderr, "SpectralGPU: re-uploaded HDRI CDF (%zu + %zu floats)\n",
+                                L.envMarginalCDF.size(), L.envConditionalCDF.size());
+                    }
+                    _envHasCDF = 1;
+                    _envCDFWidth = L.envWidth;
+                    _envCDFHeight = L.envHeight;
+                    _envCDFTotal = L.envCDFTotal;
+                } else {
+                    _envHasCDF = 0;
+                }
             }
             _cachedLightChecksum = lightCheck;
             fprintf(stderr, "SpectralGPU: GAS cached, uploaded %u lights\n", _lightCount);
@@ -807,20 +887,43 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
         _envHeightBg = 0;
         _envRotationBg = 0.f;
         _envIntensityBg = 1.f;
+
+        // Pass 1: two concerns, two latches.
+        // (a) Lighting tex+dims+rotation: first HDRI dome wins. This is
+        //     what surface shading on GPU reads (shadeHit CDF IS,
+        //     bounce-miss HDRI sample). It must NOT be gated on
+        //     visibleInPrimary or unchecking 'visible in BG' kills the
+        //     HDRI lighting too.
+        // (b) Background visibility + intensity: gated on visibleInPrimary.
+        //     Used only by the miss shader for primary-ray BG rendering.
+        {
+            bool texLatched = false;
+            bool bgLatched  = false;
+            for (const auto& L : lights) {
+                if (L.type != pxr::SpectralLight::Type::Dome) continue;
+                if (!texLatched && L.envTexId >= 0) {
+                    _envTexIdBg = L.envTexId;
+                    _envWidthBg = L.envWidth;
+                    _envHeightBg = L.envHeight;
+                    _envRotationBg = L.envRotation;
+                    texLatched = true;
+                }
+                if (!bgLatched && L.visibleInPrimary && L.envTexId >= 0) {
+                    _envVisibleBg = 1;
+                    _envIntensityBg = L.EffectiveIntensity();
+                    bgLatched = true;
+                }
+                if (texLatched && bgLatched) break;
+            }
+        }
+
+        // Pass 2: first dome with actual virtual-light or SH content wins
+        // for GPU volume lighting. We prefer a content-bearing dome over an
+        // empty color-only one for the same reason as above.
         for (const auto& L : lights) {
             if (L.type != pxr::SpectralLight::Type::Dome) continue;
-
-            // HDRI-as-background state (carries the visibleInPrimary flag
-            // plus the tex ID / rotation / intensity). First dome wins,
-            // matching the pattern for virtual lights + SH below.
-            if (_envVisibleBg == 0 && L.visibleInPrimary && L.envTexId >= 0) {
-                _envVisibleBg = 1;
-                _envTexIdBg = L.envTexId;
-                _envWidthBg = L.envWidth;
-                _envHeightBg = L.envHeight;
-                _envRotationBg = L.envRotation;
-                _envIntensityBg = L.EffectiveIntensity();
-            }
+            const bool hasVL = !L.envVirtualLights.empty();
+            if (!hasVL && !L.envHasSH) continue;  // skip empty sky dome
 
             // Virtual lights
             int nVL = std::min(8, (int)L.envVirtualLights.size());
@@ -845,7 +948,40 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
                 }
                 _hasEnvSH = true;
             }
-            break;  // use first dome light
+
+            // HDRI lighting intensity for surface shading (mirrors cached path).
+            _envIntensityGPU = L.EffectiveIntensity();
+
+            // HDRI importance-sampling CDFs -- upload if available and the
+            // content has changed since last upload. Matches what CPU
+            // SpectralLight::SampleDirection reads for dome lights.
+            if (L.envHasCDF && !L.envMarginalCDF.empty() && !L.envConditionalCDF.empty()) {
+                size_t cdfHash = size_t(L.envWidth) * 2654435761u
+                               + size_t(L.envHeight) * 2246822519u
+                               + size_t(L.envCDFTotal * 1000.f);
+                if (cdfHash != _cdfUploadHash) {
+                    if (_d_envMarginalCDF)    { cudaFree(reinterpret_cast<void*>(_d_envMarginalCDF));    _d_envMarginalCDF = 0; }
+                    if (_d_envConditionalCDF) { cudaFree(reinterpret_cast<void*>(_d_envConditionalCDF)); _d_envConditionalCDF = 0; }
+                    size_t margBytes = L.envMarginalCDF.size() * sizeof(float);
+                    size_t condBytes = L.envConditionalCDF.size() * sizeof(float);
+                    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_envMarginalCDF), margBytes));
+                    CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_envMarginalCDF),
+                                          L.envMarginalCDF.data(), margBytes, cudaMemcpyHostToDevice));
+                    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_envConditionalCDF), condBytes));
+                    CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_envConditionalCDF),
+                                          L.envConditionalCDF.data(), condBytes, cudaMemcpyHostToDevice));
+                    _cdfUploadHash = cdfHash;
+                    fprintf(stderr, "SpectralGPU: uploaded HDRI CDF (%zu + %zu floats)\n",
+                            L.envMarginalCDF.size(), L.envConditionalCDF.size());
+                }
+                _envHasCDF = 1;
+                _envCDFWidth = L.envWidth;
+                _envCDFHeight = L.envHeight;
+                _envCDFTotal = L.envCDFTotal;
+            } else {
+                _envHasCDF = 0;
+            }
+            break;  // use first content-bearing dome
         }
     }
 
@@ -885,6 +1021,30 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
                                   gpuTextures.data(), texHdrBytes, cudaMemcpyHostToDevice));
             _textureCount = static_cast<unsigned int>(numTex);
             fprintf(stderr, "SpectralGPU: uploaded %zu textures to device\n", numTex);
+
+            // READBACK DIAG -- verify pixel data actually landed on the device.
+            // For each uploaded texture, cudaMemcpy 3 sample pixels back and
+            // print them. Values should match what CPU sees in tex->_pixels.
+            for (size_t i = 0; i < numTex; ++i) {
+                if (!_d_texPixels[i]) continue;
+                int W = gpuTextures[i].width;
+                int H = gpuTextures[i].height;
+                int C = gpuTextures[i].channels;
+                if (W <= 0 || H <= 0 || C <= 0) continue;
+                auto sample = [&](int x, int y, const char* label) {
+                    float rgb[3] = {0,0,0};
+                    size_t off = (size_t(y) * W + x) * C;
+                    cudaMemcpy(rgb, reinterpret_cast<float*>(_d_texPixels[i]) + off,
+                               std::min(3, C) * sizeof(float), cudaMemcpyDeviceToHost);
+                    fprintf(stderr, "TEXDIAG tex%zu %s (%d,%d) = (%.3f, %.3f, %.3f)\n",
+                            i, label, x, y, rgb[0], rgb[1], rgb[2]);
+                };
+                sample(0,      0,      "TL");
+                sample(W/2,    H/2,    "CTR");
+                sample(W-1,    H-1,    "BR");
+                fprintf(stderr, "TEXDIAG tex%zu dims=%dx%d ch=%d d_ptr=%p\n",
+                        i, W, H, C, reinterpret_cast<void*>(_d_texPixels[i]));
+            }
         }
     }
 
@@ -1478,6 +1638,13 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     launchParams.envHeight       = _envHeightBg;
     launchParams.envRotation     = _envRotationBg;
     launchParams.envIntensityBg  = _envIntensityBg;
+    // HDRI importance-sampling CDF (for dome-light IS in shadeHit)
+    launchParams.envMarginalCDF    = reinterpret_cast<float*>(_d_envMarginalCDF);
+    launchParams.envConditionalCDF = reinterpret_cast<float*>(_d_envConditionalCDF);
+    launchParams.envCDFWidth       = _envCDFWidth;
+    launchParams.envCDFHeight      = _envCDFHeight;
+    launchParams.envCDFTotal       = _envCDFTotal;
+    launchParams.envHasCDF         = _envHasCDF;
 
     // projInverse: CPU uses M*v (column-vector), copy as-is
     // viewToWorld: CPU uses v*M (row-vector via Transform), so transpose for GPU

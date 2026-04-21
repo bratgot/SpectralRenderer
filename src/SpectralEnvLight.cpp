@@ -423,9 +423,17 @@ void SpectralEnvLight::knobs(Knob_Callback f)
     Double_knob(f, &hdriIntensity, "hdri_intensity", "intensity");
     SetRange(f, 0, 20); SetFlags(f, Knob::LOG_SLIDER);
     Double_knob(f, &hdriRotate, "hdri_rotate", "rotate");
-    ClearFlags(f, Knob::STARTLINE); SetRange(f, 0, 360);
+    SetRange(f, -180, 180);
     Tooltip(f, "Rotate HDRI horizontally in degrees.\n"
-               "Use to align sun direction with your plate.");
+               "Use to align sun direction with your plate.\n"
+               "Range -180..+180 (centered).");
+    Bool_knob(f, &visibleInPrimary, "hdri_visible_primary", "visible in BG");
+    ClearFlags(f, Knob::STARTLINE);
+    Tooltip(f, "Render the HDRI dome as the background behind geometry.\n"
+               "Off: primary rays that miss geometry return black (useful for\n"
+               "compositing). On: HDRI shows through as sky/IBL background.\n"
+               "Shadow and indirect illumination are unaffected -- the dome\n"
+               "still lights geometry either way.");
 
     Double_knob(f, &ndFilter, "nd_filter", "ND");
     SetRange(f, 0, 10);
@@ -436,18 +444,6 @@ void SpectralEnvLight::knobs(Knob_Callback f)
     ClearFlags(f, Knob::STARTLINE); SetRange(f, 0, 1);
     Tooltip(f, "Shadow softness for HDRI-derived virtual lights.\n"
                "0 = hard. 0.5 = medium. 1 = very soft.");
-
-    Bool_knob(f, &hdriVisible, "hdri_visible", "visible in background");
-    Tooltip(f, "When ON, the HDRI renders as the background behind all geometry\n"
-               "(the dome is visible in camera). When OFF, the background is\n"
-               "transparent/black and the HDRI only acts as a light source for\n"
-               "lighting the scene (common in comp workflows).\n"
-               "\n"
-               "GPU and CPU behave the same with this knob set.\n"
-               "\n"
-               "Tip: leave OFF when you want to comp a separate background\n"
-               "behind the render. Turn ON when you want the HDRI itself to\n"
-               "be the visible sky/environment in the final frame.");
 
     // ─── Volume Lighting ──────────────────────────────────────────────
     BeginClosedGroup(f, "grp_env", "Volume lighting");

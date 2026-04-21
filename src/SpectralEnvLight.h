@@ -78,7 +78,7 @@ public:
     double hdriRotate = 0.0;
     double ndFilter = 0.0;     // ND filter in stops (0=none, 1=halve, 10=1/1024)
     double hdriShadowSoftness = 0.5; // 0=hard, 1=very soft
-    bool   hdriVisible = false; // HDRI shows as BG behind geo (default off)
+    bool   visibleInPrimary = false; // show HDRI dome in primary rays (BG)
 
     // --- Environment Controls ---
     double envIntensity = 1.0;

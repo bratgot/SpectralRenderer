@@ -305,6 +305,17 @@ struct LaunchParams {
     float                  envRotation;    // degrees
     float                  envIntensityBg; // hdriDome.intensity (incl. ND)
 
+    // HDRI importance sampling via 2D CDF tables. Marginal is a row
+    // CDF (envCDFHeight entries). Conditional is a per-row column CDF
+    // (envCDFWidth * envCDFHeight entries, row-major). See CPU
+    // SpectralLight::SampleDirection / SamplePdf for the reference.
+    float*                 envMarginalCDF;     // envCDFHeight floats
+    float*                 envConditionalCDF;  // envCDFWidth*envCDFHeight
+    int                    envCDFWidth;
+    int                    envCDFHeight;
+    float                  envCDFTotal;
+    int                    envHasCDF;
+
     // Ambient occlusion AOV (spectral_gpu::ComputeAO pass).
     // aoBuffer null or aoSamples == 0 means AO pass is skipped entirely.
     // Filled by the dedicated __raygen__ao program, NOT the main spectral
