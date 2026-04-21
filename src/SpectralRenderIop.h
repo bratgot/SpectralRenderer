@@ -289,7 +289,7 @@ private:
     double _vdbUniformScale = 1.0;
 
     // VDB viewport preview
-    bool   _scanlineCompat = true;  // ScanlineRender compatible mode
+    bool   _scanlineCompat = false;  // ScanlineRender compatible mode (off by default; spectral path tracing is primary)
     bool   _neutralBalance = true;  // Correct spectral white balance
     bool   _vdb3dPreview = true;   // true = SpectralRender draws its own GL preview
     bool   _vdbShowBbox = true;
