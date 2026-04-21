@@ -520,6 +520,115 @@ To triage:
     code or Nuke's (or a driver DLL).
   - Valgrind / ASAN if feasible.
 
+### GPU ambient occlusion + dedicated 'ao' output layer -- RESOLVED 2026-04-21
+
+GPU path for AO AOV: previously AO ran on CPU only (via
+SpectralIntegrator::ComputeAO) regardless of the render device. Scenes
+with GPU device + AO enabled paid the CPU-AO cost on top of GPU beauty.
+Also AO output lived under 'other.ao', harder to find in the Viewer
+channel dropdown than a top-level layer.
+
+Shipped end-to-end:
+
+  1. __raygen__ao kernel program (SpectralGPUKernel.cu): uses the
+     existing makeRay() helper (shared with __raygen__spectral so
+     primary rays match across perspective / spherical / DOF /
+     motion-blur camera modes), traces primary ray via shared
+     closesthit, reconstructs flipped-to-camera normal from payload,
+     builds TBN, launches aoSamples cosine-hemisphere AO rays with
+     CULL_BACK_FACING_TRIANGLES, writes 1/aoSamples per unoccluded
+     ray into aoBuffer.
+  2. Host pipeline (SpectralGPU.cpp): pipeline link extended from
+     3 -> 4 program groups (AO raygen added). Separate _sbtAO with
+     the AO raygen record; shares miss + hitgroup records with the
+     main _sbt. Device buffer _d_aoBuffer sized W*H floats, reused
+     across frames, resized on format change.
+  3. Integrator wrapper (SpectralIntegrator::ComputeAOGPU): mirrors
+     the RenderFrameGPU pattern. Gets GPU, BuildAccel, calls
+     SpectralGPU::ComputeAO, falls back to CPU ComputeAO on any
+     failure path (no GPU, accel build fail, launch fail).
+  4. Iop dispatch (SpectralRenderIop.cpp): AO call site branches on
+     _renderUseGPU.
+  5. UI polish: new 'Ambient occlusion' checkbox gates samples +
+     radius sliders. Defaults tuned to samples=16 and radius=2.0
+     (earlier default radius=5 was too large for typical scene
+     scales and gave mostly-unoccluded output). Backward-compat
+     sync in knob_changed panel-open: scenes with existing
+     _aoSamples > 0 auto-tick the checkbox.
+  6. Output layer: AO now surfaces as 'ao.red'/'ao.green'/'ao.blue'
+     (top-level layer, scalar replicated into R/G/B), replacing
+     'other.ao'.
+
+Critical bug + fix (SBT hitgroup):
+  _sbtAO was populated in Initialize() with raygen + miss records,
+  but hitgroupRecordBase/Stride/Count were NEVER set. Those fields
+  get populated for _sbt inside BuildAccel() at line ~943-945; I
+  mirrored the raygen+miss setup in Initialize for _sbtAO and missed
+  BuildAccel's hitgroup step. On first AO ray hit, OptiX dereferenced
+  a zero hitgroupRecordBase -> CUDA "illegal memory access". The
+  error poisoned the CUDA context so EVERY subsequent optixLaunch
+  failed (main render included) until Nuke fully restarted.
+
+  Fix was 3 lines in BuildAccel mirroring the hitgroup assignment
+  to _sbtAO. Lesson: when adding a sibling SBT that shares a hitgroup
+  with the main SBT, the hitgroup record fields live in BuildAccel
+  (runtime, after accel is built), not Initialize. Mirror them there.
+
+Associated patches (backups discardable once stable):
+  - apply_gpu_ao_step1_params.py       (LaunchParams fields)
+  - apply_gpu_ao_step2_raygen.py       (kernel raygen)
+  - apply_gpu_ao_step2b_makeray.py     (switch to shared makeRay)
+  - apply_gpu_ao_step3_host.py         (host pipeline + SBT + ComputeAO)
+  - apply_gpu_ao_step3_sbt_hotfix.py   (CRITICAL hitgroup mirror)
+  - apply_gpu_ao_step4_dispatch.py     (Iop dispatch + Integrator wrapper)
+  - apply_gpu_ao_step5_ui.py           (checkbox + defaults)
+  - apply_ao_layer.py                  (other.ao -> ao.red/g/b)
+
+Backup suffixes: .bak_aostep1/2/2b/3/3sbt/4/5, .bak_aolayer.
+
+### SpectralMeshProperties doubleSided CPU fixes -- RESOLVED 2026-04-21
+
+GPU render of doubleSided materials behaved correctly; CPU had two
+distinct bugs + one asymmetry vs GPU. Original triage wrongly blamed
+GPU. Real picture came out via DSDIAG tracers:
+
+  Bug 1 -- inside-sphere + doubleSided=true rendered BLACK on CPU.
+  Root cause: primary ray hits a backface, we flip N to face the
+  camera (inward in this case), shadowOrigin = hitPos + N*0.01
+  pushes INTO the sphere volume, shadow ray then exits through the
+  far wall which IS geometry -> false self-occlusion -> zero direct
+  lighting. Two-part fix:
+    (a) Sign-flip offset: hitPos + N * (NdotL >= 0 ? 0.01 : -0.01)
+        so the shadow origin rides on the correct side of the shell
+        (apply_cpu_doubleside_fix.py).
+    (b) Shell passthrough in the shadow loop: if the blocker surface
+        is itself doubleSided and L dot faceNormal > 0 (shadow ray
+        exiting a shell rather than entering geometry from outside),
+        skip the occlusion contribution. Completes the fix for
+        closed doubleSided shells (apply_cpu_doubleside_shell_fix.py).
+
+  Bug 2 -- card-back + doubleSided=false rendered alpha=solid on
+  CPU even though RGB=0. GPU correctly gave alpha=0 because its
+  backface cull happens at the OptiX intersection level (ray filtered
+  before any shade). CPU previously reached shade with hit.valid(),
+  returned zero radiance, but alpha=1 from the presence of a hit.
+  Fixed by culling at primary-hit entry in RenderFrame: if
+  rayDir dot faceNormal > 0 AND !mat.doubleSided, set hit.tri =
+  nullptr so downstream hit.valid() guards cascade as "no hit"
+  (apply_cpu_backface_cull_fix.py). Matches GPU's at-intersection
+  semantics exactly.
+
+Testing matrix confirmed: card front/back x doubleSided on/off x
+inside-sphere -> all 6 cases match GPU output. DSDIAG tracers
+retired via apply_doubleside_cleanup.py.
+
+Paranoia check on 3 other `hitPos + N * 0.01f` offset sites (AO
+main, AO fallback, bounce): verified safe -- those use cosine-
+hemisphere sampling around flipped N, so the offset direction
+always agrees with the sample direction. No self-shadow geometry
+like the shadow loop. AO radius naturally filters far-wall
+self-hits. Photon site is dead code (caustics disabled).
+
 ### SpectralSurface preset UI refresh -- RESOLVED 2026-04-20
 
 Was: picking a preset from the dropdown would update the rendered
@@ -596,6 +705,26 @@ useful in current state; safe to leave until we decide to re-attempt.
 
 ## Session journal
 
+- **2026-04-21** -- Big session. GPU ambient occlusion shipped end-to-end:
+  __raygen__ao kernel using shared makeRay, separate _sbtAO in the OptiX
+  pipeline, SpectralGPU::ComputeAO host method, SpectralIntegrator::
+  ComputeAOGPU wrapper following RenderFrameGPU pattern, Iop dispatch on
+  _renderUseGPU. UI polish: ao_enable checkbox gates samples/radius
+  sliders with backward-compat auto-sync. AO output migrated from
+  'other.ao' single channel to dedicated 'ao' top-level layer
+  (ao.red/green/blue replicating the scalar). Critical SBT hotfix:
+  _sbtAO.hitgroupRecord* must be populated in BuildAccel, not Initialize
+  -- missing this poisoned the CUDA context on first ray hit, cascading
+  to all subsequent launches. SpectralMeshProperties doubleSided CPU bug
+  hunt: DSDIAG tracers revealed two independent bugs (inside-sphere
+  shadow origin sign flip + shell passthrough in shadow loop; card-back
+  alpha parity via at-entry backface cull matching GPU semantics). All
+  6 truth-table cases (card front/back x doubleSided on/off x inside-
+  sphere) now match GPU. CPU and GPU AO visibly consistent. Dropped 4
+  completed ROADMAP housekeeping items. SpectralMeshProperties purpose
+  field validated against Nuke 3D viewer Display Purposes filter
+  (works correctly). Documented DLL-timestamp-didn't-update gotcha in
+  CLAUDE.md (Nuke file lock silently prevents overwrite on rebuild).
 - **2026-04-20 (late)** -- SpectralSurface preset UI bug fixed after
   a long diagnostic chase. User reported "presets stop working after
   a few selections, especially jade and spectral menus." Multiple
