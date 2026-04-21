@@ -91,6 +91,39 @@ behaviour is not guaranteed. Instead, do the registration in the Op's
   data flow.
 - `SetFlags(f, Knob::DISABLED | Knob::NO_ANIMATION)` for read-only display knobs.
 
+### Knob modifier ordering
+
+`SetRange`, `SetFlags`, `ClearFlags`, and `Tooltip` apply to the **most
+recently created knob**, not to any named knob. Insert a new knob between
+an existing `_knob(...)` declaration and its modifiers, and all the
+modifiers silently retarget:
+
+```cpp
+Double_knob(f, &foo, "foo", "foo");
+Bool_knob(f, &bar, "bar", "bar");   // <-- inserted later
+SetRange(f, 0, 360);                // now applies to `bar`, not `foo`!
+Tooltip(f, "foo tooltip");          // now appears on `bar` hover
+```
+
+Consequence: `foo` silently defaults to Nuke's 0..1 slider range, `bar`
+gets a meaningless range (ignored for Bool) and the wrong tooltip. Has
+bitten us on HDRI rotate + visible-in-BG -- slider read 0..1 after the
+visibility checkbox was added between rotate's declaration and its
+SetRange, and nobody noticed until a user tried to rotate.
+
+Rule: **put each knob's modifiers immediately after its `_knob(...)`
+declaration**, before the next knob. When inserting a new knob between
+existing ones, move the old knob's modifiers up first:
+
+```cpp
+Double_knob(f, &foo, "foo", "foo");
+SetRange(f, 0, 360);                // always directly after
+Tooltip(f, "foo tooltip");
+Bool_knob(f, &bar, "bar", "bar");
+ClearFlags(f, Knob::STARTLINE);     // bar's modifiers
+Tooltip(f, "bar tooltip");
+```
+
 ### Pushing values to knobs programmatically (presets, auto-populate)
 
 When code inside a ShaderOp writes to its own knobs via `Knob::set_value`
@@ -161,6 +194,34 @@ Reference implementations:
 
 ## C++ / build gotchas
 
+### DLL build timestamp can be stale (Windows file-lock quirk)
+
+`SpectralRender.dll` has a compiled-in build timestamp that gets logged on
+load: `SpectralRender: DLL build <date> <time>`. It's useful for confirming a
+rebuild actually reached the running process -- but **don't trust "same
+timestamp" as proof of "same binary"** in every case.
+
+Failure mode: Nuke is open, `.\build.ps1` runs, reports BUILD SUCCEEDED, but
+the DLL on disk doesn't change because Windows blocks the overwrite while
+Nuke has the DLL mmap'd. Build tools may report success because the linker
+step appears to have run, without failing loudly on the locked output file.
+Next Nuke session loads the OLD DLL. Developer sees no effect from their
+patch, log timestamp matches the previous session, and concludes "my diag
+didn't fire / my fix didn't work" when in reality the new binary never got
+loaded.
+
+Diagnostic steps when "my patch didn't work":
+1. Check Task Manager: is `Nuke17.exe` or `Nuke15.exe` (etc.) actually gone?
+2. Check the DLL's filesystem timestamp (`Get-Item
+   build\SpectralRender\SpectralRender.dll | Select LastWriteTime`). Compare
+   to when you ran build.ps1.
+3. Compare the `SpectralRender: DLL build ...` log line with that filesystem
+   timestamp. They should match.
+
+Mitigation: always fully close Nuke (not just the file) before rebuilding.
+Rebuild may need to be run from a fresh PowerShell if VS/MSBuild caches
+something about the previous output state.
+
 ### MSVC lambda capture quirk
 
 MSVC requires `constexpr` locals to be explicitly captured in lambdas. GCC/Clang
@@ -169,6 +230,30 @@ let this slide. Either:
 - Inline the constant value into the lambda body directly.
 
 The second is preferred for small constants -- no capture overhead, no ambiguity.
+
+### CUDA: device-function lambdas can silently return stale memory
+
+On CUDA 12.6 / OptiX 9.0, `auto f = [&](...) {...}` inside a
+`__device__` function can silently return uninitialised / stale memory
+when the lambda captures locals by reference. No compile warning, no
+sanitizer fire, no CUDA runtime error -- the kernel just produces
+wrong output, reproducibly.
+
+Root-caused via an HDRI surface-shading bug ("flat grey cube under
+HDRI"): `sampleEnvHDRI` and `sampleTextureGPU` both used
+`auto px = [&](int x, int y) { ... };` to do their bilinear taps. The
+lambda loaded correct values on the first tap and then drifted to
+stale/garbage on subsequent taps from the same call. Inlining the
+lambda body into four explicit reads (one per tap) fixed it fully.
+
+Rule for device code: **do not use lambdas inside `__device__` /
+`__forceinline__ __device__` functions**, even trivial ones, even with
+`[&]`. Inline the body. If you need shared logic, factor to a
+`__forceinline__ __device__` helper function, not a lambda.
+
+This is a device-side issue; host-side C++ lambdas are fine. Cost us
+most of a debugging day; the symptom looks like a physics / shading
+bug, not a memory bug, so the right hypothesis comes last.
 
 ### UTF-8 in string literals
 
@@ -209,6 +294,37 @@ what was inserted.
   force CatmullClark.
 - Loop scheme requires all-triangle input. GeoCard / GeoSphere are quads.
 - Level is clamped to `[1, 4]` internally. Knob range of 0-6 is misleading.
+
+### CUDA buffer lifecycle during knob drags (free-during-kernel race)
+
+A rapid knob drag triggers multiple `_validate` calls from Nuke in quick
+succession. Each one re-extracts the scene, and if a checksummed input
+(HDRI texels, material baseColor, etc.) changed, we `cudaFree` + realloc
+the corresponding device buffer. If a previous `optixLaunch` for the
+same Iop is still running on the default stream, the kernel reads freed
+memory -> access violation -> GPU driver reset -> hard Nuke crash.
+
+Mitigation in place: `cudaDeviceSynchronize()` at the top of
+`SpectralGPU::BuildAccel`, before any cudaFree. Waits for any in-flight
+launch to finish before we touch its device buffers. Small cost on the
+happy path (immediate return); prevents the crash on the drag path.
+
+Longer-term: per-Iop CUDA stream with events, so renders serialize on
+events instead of a device-wide sync. Not yet done.
+
+### Dev iteration: SPECTRAL_FAST_COMPILE env var
+
+OptiX PTX compile is ~70s cold on our target kernel at `-O3`. For
+iteration where you're recompiling often, set `SPECTRAL_FAST_COMPILE=1`
+before launching Nuke -- we pass
+`OPTIX_COMPILE_OPTIMIZATION_LEVEL_0` to the module, cutting cold
+compile to ~10s. Runtime perf drops ~20-30%, so don't ship with it.
+Cache hit (no source change) is ~140ms either way.
+
+Also: **don't `printf` from device code**. A single `printf` in the
+kernel balloons OptiX PTX compile from ~200ms warm to 80s+ because it
+disables optimisations aggressively. If you need device-side debugging,
+gate prints behind a launch-index check and remove before committing.
 
 ---
 
@@ -283,3 +399,19 @@ the consuming Iop needs to hash the registry.
   from SpectralMeshProperties -- currently registered but unused.
 - Call `Iop::append(hash)` at the top of `SpectralRenderIop::append` to auto-
   hash all knobs (would pre-empt a whole class of "toggle doesn't work" bugs).
+- HDRI Read-pipe upstream can arrive empty on intermittent validates
+  (avg=(0,0,0), cdf=no, all-zero texels). Currently the empty state
+  overwrites the GPU HDRI with zeros, causing transient black frames during
+  rapid knob drags. Fix: in SpectralRenderIop when constructing the dome
+  light, detect pipe-empty (avg==0 or first N texels all zero) and skip
+  both the dome-light update and the texture re-upload for that validate --
+  keep the previously-uploaded frame. Log a single line ("HDRI pipe empty
+  on this validate, keeping previous frame") for diagnostics. Long-standing
+  upstream flakiness, not caused by any recent change.
+- Unify the two HDRI dome construction sites in SpectralRenderIop.cpp
+  (~line 7656 and ~line 7829) into one helper. Currently both need to be
+  updated in lockstep whenever dome behaviour changes, which has already
+  caused divergence bugs.
+- Per-Iop CUDA stream with events instead of the current device-wide
+  `cudaDeviceSynchronize` at BuildAccel entry. Proper fix for the
+  free-during-kernel race that currently uses a sync as mitigation.
