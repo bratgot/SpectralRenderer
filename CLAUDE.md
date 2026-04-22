@@ -255,6 +255,21 @@ This is a device-side issue; host-side C++ lambdas are fine. Cost us
 most of a debugging day; the symptom looks like a physics / shading
 bug, not a memory bug, so the right hypothesis comes last.
 
+**Collateral hazard: inline-expansion drops context.** When de-lambda'ing
+by inlining the body at the callsite (correct fix for the stale-memory
+bug above), it's easy to drop surrounding logic that lived in the outer
+function. Hit this on 2026-04-22: the "visible in BG" path inlined a
+copy of `sampleEnvHDRI`'s body at the miss shader, but the inlined copy
+dropped the HDRI rotation block. Result: rotating the HDRI rotated the
+sphere lighting but left the BG plate stationary.
+
+Rule: when inlining a device function as a de-lambda fix, treat the
+inline site as a **full replacement** for the original call, including
+every preprocessing / post-processing block. Diff the inlined body
+against the original function and confirm every non-lambda line is
+represented. It is not enough to just inline the lambda body -- the
+surrounding code in the original function is also the contract.
+
 ### UTF-8 in string literals
 
 MSVC produces C2022 errors on non-ASCII bytes in `char*` string literals. Do
@@ -325,6 +340,51 @@ Also: **don't `printf` from device code**. A single `printf` in the
 kernel balloons OptiX PTX compile from ~200ms warm to 80s+ because it
 disables optimisations aggressively. If you need device-side debugging,
 gate prints behind a launch-index check and remove before committing.
+
+### Monte Carlo estimators: the missing `/pdf` divide
+
+Any Monte Carlo estimator drawing samples from a non-uniform distribution
+must divide by the sampling pdf. For direct lighting with importance
+sampling, the estimator is:
+
+    contribution = bsdf(L) * L_env(L) * cos(N,L) * misWeight / pdfLight
+
+The `/pdfLight` is non-negotiable -- without it the estimator isn't
+unbiased, and worse: the contribution is directly proportional to the
+sampling density. Regions the sampler concentrates on (bright HDRI
+pixels, the sun) get over-weighted exactly where the CDF was trying to
+concentrate effort. Regions it doesn't concentrate on get zero.
+
+We had this bug in both CPU (SpectralIntegrator.cpp:1735, :2121) and
+GPU (SpectralGPUKernel.cu:1151) for a long time. It stayed invisible as
+long as HDRI sampling was a uniform / cosine-weighted hemisphere --
+the missing divide just produced a constant bias. When 2D CDF importance
+sampling landed (Phase 15 GPU parity, 2026-04-22) and actually
+concentrated samples on the HDRI's sun pixel, the missing divide
+manifested as a hard terminator line across the sphere along the locus
+where `pdfLight` transitioned from "huge" to "modest".
+
+Diagnostic that nailed it: **blur the HDRI upstream**. If the terminator
+line disappears, the pdf is spiky and the divide is missing (or wrong).
+If it persists, look elsewhere.
+
+Notes:
+- Guard the divide with `pdfLight > 1e-10f` to avoid NaN / Inf at poles
+  and at dark pixels where `lum * sinTheta` goes to zero.
+- BSDF-IS / bounce-miss paths typically bake `1/pdfBsdf` into the path
+  throughput as part of BSDF sampling, so those do *not* need an
+  explicit divide at the miss site. Only light-IS / NEE branches need
+  the explicit `/pdfLight`.
+- Applying this fix makes every HDRI-lit render noticeably dimmer
+  because the previous math was inflating contribution. Not a
+  regression -- just unbiased now. Bump `hdri_intensity` defaults
+  if the new baseline feels too dark across the board.
+
+Rule for writing any new MC estimator (light sampling, volume phase
+sampling, subsurface walk, photon gather with IS): write the `/pdf`
+divide on the same line as the contribution. If you find yourself
+typing `radiance += bsdf * L * misW` with no `/pdf` in sight, stop and
+confirm the pdf is baked in elsewhere. Usually it isn't.
 
 ---
 
@@ -399,15 +459,23 @@ the consuming Iop needs to hash the registry.
   from SpectralMeshProperties -- currently registered but unused.
 - Call `Iop::append(hash)` at the top of `SpectralRenderIop::append` to auto-
   hash all knobs (would pre-empt a whole class of "toggle doesn't work" bugs).
-- HDRI Read-pipe upstream can arrive empty on intermittent validates
-  (avg=(0,0,0), cdf=no, all-zero texels). Currently the empty state
-  overwrites the GPU HDRI with zeros, causing transient black frames during
-  rapid knob drags. Fix: in SpectralRenderIop when constructing the dome
-  light, detect pipe-empty (avg==0 or first N texels all zero) and skip
-  both the dome-light update and the texture re-upload for that validate --
-  keep the previously-uploaded frame. Log a single line ("HDRI pipe empty
-  on this validate, keeping previous frame") for diagnostics. Long-standing
-  upstream flakiness, not caused by any recent change.
+- HDRI intensity calibration post-MIS-fix. The `/pdfLight` bug fix
+  (2026-04-22) makes every HDRI render substantially dimmer than pre-fix
+  renders. After a few days of rendering at the new baseline, decide
+  whether to bump default `hdri_intensity` by a constant factor (~2-3x
+  suspected) so neutral scenes match expectations. Until then, users
+  opening old scripts may need to manually push intensity up.
+- HDRI Read-pipe "empty validate" detection. Theoretical race: upstream
+  Read intermittently delivers all-zero texels on rapid knob drags,
+  overwriting the GPU HDRI with zeros -> transient black frames. We
+  tested for this on 2026-04-22 and could not reproduce visible
+  black-frame flashes. Likely the GPU content-hash skip (today's work)
+  already masks the effect. Left as a watch-note rather than a
+  committed fix: if the symptom ever appears in practice, the plan is
+  to detect avg==0 or first-N-texels==0 in SpectralRenderIop when
+  constructing the dome light, skip both the dome update and the
+  texture re-upload for that validate, and log "HDRI pipe empty on
+  this validate, keeping previous frame".
 - Unify the two HDRI dome construction sites in SpectralRenderIop.cpp
   (~line 7656 and ~line 7829) into one helper. Currently both need to be
   updated in lockstep whenever dome behaviour changes, which has already
