@@ -1148,7 +1148,9 @@ static __forceinline__ __device__ float shadeHit(
                     // pdfLight degenerates to 0 (e.g. L at pole, lum=0),
                     // use misW=1 rather than 0 so the sample still counts.
                     float misW = (pdfLight > 0.f) ? a2 / (a2 + b2 + 1e-10f) : 1.f;
-                    radiance += bsdf * emission * misW * shadowTransmit;
+                    if (pdfLight > 1e-10f) {
+                        radiance += bsdf * emission * misW * shadowTransmit / pdfLight;
+                    }
                 } else {
                     // Non-CDF path: keep the hardcoded 0.5 factor for dome
                     // (matches pre-CDF CPU-compat fallback for domes without
@@ -2696,6 +2698,14 @@ extern "C" __global__ void __raygen__spectral()
                     float _theta = acosf(fmaxf(-1.f, fminf(1.f, _ny)));
                     float _phi = atan2f(_nx, -_nz);
                     const float _PI = 3.14159265f;
+                    // Apply HDRI rotation (matches sampleEnvHDRI / envSamplePdf).
+                    // Was dropped when the sampler was inlined; caused the BG
+                    // plate to stay still while the dome lighting rotated.
+                    if (fabsf(params.envRotation) > 0.01f) {
+                        _phi += params.envRotation * _PI / 180.f;
+                        if (_phi >  _PI) _phi -= 2.f * _PI;
+                        if (_phi < -_PI) _phi += 2.f * _PI;
+                    }
                     float _u = (_phi + _PI) / (2.f * _PI);
                     float _v = _theta / _PI;
                     int _x = (int)(_u * (_tex.width - 1));

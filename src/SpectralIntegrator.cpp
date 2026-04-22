@@ -1999,7 +1999,9 @@ float SpectralIntegrator::_ShadeSpectral(
                     ? SpectralBSDF::MISWeight(pdfLight, pdfBsdf)
                     : 1.f;
 
-                float contrib = bsdf * lightRad * atten * misW * shadowTransmit;
+                float contrib = (pdfLight > 1e-10f)
+                              ? bsdf * lightRad * atten * misW * shadowTransmit / pdfLight
+                              : 0.f;
                 radiance += contrib;
                 if (comps) {
                     comps->direct += contrib;
@@ -2394,7 +2396,9 @@ float SpectralIntegrator::_ShadeSpectral(
                         ? SpectralBSDF::MISWeight(pdfLight, pdfBsdf)
                         : 1.f;
 
-                    bounceRadiance += bsdf * lightRad * atten * misW * shadowTransmit;
+                    if (pdfLight > 1e-10f) {
+                        bounceRadiance += bsdf * lightRad * atten * misW * shadowTransmit / pdfLight;
+                    }
                 }
             }
         }
