@@ -102,6 +102,12 @@ private:
     // spectral category) to fail after a few selections.
     const char* _displacementFile = "";  // displacement map path
 
+    // Last name this Op registered itself under. On rename Nuke does
+    // not destroy the Op, so the destructor's erase-by-node_name()
+    // misses the stale old-name entry; RegisterParams compares this
+    // to node_name() on every call and purges the old entry first.
+    std::string _lastRegisteredName;
+
     void _ApplyPreset(int preset);
     void _SetShaderProperties(usg::ShaderDesc& desc, const MaterialContext& rtx);
 

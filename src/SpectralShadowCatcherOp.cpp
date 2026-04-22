@@ -19,8 +19,8 @@ SpectralShadowCatcherOp::SpectralShadowCatcherOp(Node* node)
 {
 }
 
-// Erase our registry entry on Op destruction. See SpectralSurfaceOp.cpp
-// for rationale; rename still leaks under the old name.
+// Erase our registry entry on Op destruction. Rename is handled
+// separately in RegisterParams. See SpectralSurfaceOp.cpp.
 SpectralShadowCatcherOp::~SpectralShadowCatcherOp()
 {
     auto& reg = GetRegistry();
@@ -69,6 +69,16 @@ SpectralShadowCatcherOp::GetRegistry()
 
 void SpectralShadowCatcherOp::RegisterParams()
 {
+    // Rename-in-place: Nuke does not destroy the Op when the user
+    // renames it, so this Op's destructor can't catch the stale entry
+    // that sits under the previous node_name(). If the name has changed
+    // since the last call, erase under the old name first.
+    const std::string currentName = node_name();
+    if (!_lastRegisteredName.empty() && _lastRegisteredName != currentName) {
+        GetRegistry().erase(_lastRegisteredName);
+    }
+    _lastRegisteredName = currentName;
+
     if (node_disabled()) {
         GetRegistry().erase(node_name());
         return;

@@ -310,6 +310,16 @@ static void _CollectUpstreamGeoNames(DD::Image::Op* op,
 
 void SpectralMeshPropertiesOp::RegisterParams()
 {
+    // Rename-in-place: Nuke does not destroy the Op when the user
+    // renames it, so this Op's destructor can't catch the stale entry
+    // that sits under the previous node_name(). If the name has changed
+    // since the last call, erase under the old name first.
+    const std::string currentName = node_name();
+    if (!_lastRegisteredName.empty() && _lastRegisteredName != currentName) {
+        GetRegistry().erase(_lastRegisteredName);
+    }
+    _lastRegisteredName = currentName;
+
     // If the node is disabled in Nuke, remove any stale entry from the
     // registry so downstream SpectralRenderIop sees no overrides for this
     // node. Re-enabling will re-add via the next _validate / knob_changed.

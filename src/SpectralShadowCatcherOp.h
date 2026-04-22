@@ -42,6 +42,12 @@ private:
     float _shadowColor[3]   = {0.f, 0.f, 0.f};
     bool  _selfShadow       = false;
 
+    // Last name this Op registered itself under. On rename Nuke does
+    // not destroy the Op, so the destructor's erase-by-node_name()
+    // misses the stale old-name entry; RegisterParams compares this
+    // to node_name() on every call and purges the old entry first.
+    std::string _lastRegisteredName;
+
     void _SetShaderProperties(usg::ShaderDesc& desc, const MaterialContext& rtx);
 
 public:

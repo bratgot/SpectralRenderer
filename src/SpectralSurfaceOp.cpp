@@ -58,10 +58,9 @@ SpectralSurfaceOp::SpectralSurfaceOp(Node* node)
 // of deleted nodes lingers as phantom overrides on any mesh that
 // matches by prim-path fallback.
 //
-// Rename: Nuke does not destroy the Op on a simple rename, so the old
-// entry is NOT erased here. RegisterParams will insert a second entry
-// under the new name and the old one persists until deletion. Known
-// limitation -- tracked in ROADMAP tech debt.
+// Rename: Nuke does not destroy the Op on a simple rename, so this
+// destructor cannot catch rename-driven stale entries. That path is
+// handled in RegisterParams via _lastRegisteredName comparison.
 SpectralSurfaceOp::~SpectralSurfaceOp()
 {
     auto& reg = GetRegistry();
@@ -713,6 +712,16 @@ SpectralSurfaceOp::GetRegistry()
 
 void SpectralSurfaceOp::RegisterParams()
 {
+    // Rename-in-place: Nuke does not destroy the Op when the user
+    // renames it, so this Op's destructor can't catch the stale entry
+    // that sits under the previous node_name(). If the name has changed
+    // since the last call, erase under the old name first.
+    const std::string currentName = node_name();
+    if (!_lastRegisteredName.empty() && _lastRegisteredName != currentName) {
+        GetRegistry().erase(_lastRegisteredName);
+    }
+    _lastRegisteredName = currentName;
+
     if (node_disabled()) {
         GetRegistry().erase(node_name());
         return;

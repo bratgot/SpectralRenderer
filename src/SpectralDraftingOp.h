@@ -75,6 +75,12 @@ private:
     int   _aaMode = 1;       // 0=off, 1=edge, 2=2x2, 3=4x4
     float _aaWidth = 1.5f;   // smoothstep band in pixels (mode >= 1)
 
+    // Last name this Op registered itself under. On rename Nuke does
+    // not destroy the Op, so the destructor's erase-by-node_name()
+    // misses the stale old-name entry; RegisterParams compares this
+    // to node_name() on every call and purges the old entry first.
+    std::string _lastRegisteredName;
+
     void _SetShaderProperties(usg::ShaderDesc& desc, const MaterialContext& rtx);
 
 public:
