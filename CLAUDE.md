@@ -452,7 +452,6 @@ the consuming Iop needs to hash the registry.
 
 ## Things we haven't done yet but should
 
-- Clean up registry entries on node destruction (currently leaks on rename/delete).
 - Call `Iop::append(hash)` at the top of `SpectralRenderIop::append` to auto-
   hash all knobs. Considered 2026-04-22 but deferred: base-class append would
   also sweep viewport-preview knobs (`vdb_point_density`, `vdb_show_points`,
@@ -477,10 +476,24 @@ the consuming Iop needs to hash the registry.
   constructing the dome light, skip both the dome update and the
   texture re-upload for that validate, and log "HDRI pipe empty on
   this validate, keeping previous frame".
-- Unify the two HDRI dome construction sites in SpectralRenderIop.cpp
-  (~line 7656 and ~line 7829) into one helper. Currently both need to be
-  updated in lockstep whenever dome behaviour changes, which has already
-  caused divergence bugs.
+- HDRI sphere preview in 3D viewport for SpectralEnvLight. Current state:
+  the node draws a wireframe hemisphere + compass rose + sun arrow (for
+  the sky model), but no visual representation of the pipe-connected
+  HDRI. Plan: textured hemisphere showing a pre-tonemapped thumbnail of
+  the HDRI, rotating with `hdriRotate`, so the user can see where the
+  sun and major features of their environment are. Requires: pipe-read
+  in `_validate` (SpectralEnvLight currently doesn't read its own input
+  1; SpectralRenderIop does the walking), downsample + Reinhard tonemap
+  at upload, GL texture lifecycle tied to Op lifetime (free in destructor
+  when a context is current; defer otherwise), textured hemisphere
+  triangle-strip with UV rotation. Scoped as ~200-300 LoC, compile-test
+  iteration. Backlogged 2026-04-22 at end of a long productive session.
 - Per-Iop CUDA stream with events instead of the current device-wide
   `cudaDeviceSynchronize` at BuildAccel entry. Proper fix for the
   free-during-kernel race that currently uses a sync as mitigation.
+- `SPECTRAL_FAST_COMPILE=1` broken at -O0 since kernel grew (2281 basic
+  blocks, 27555 instructions in raygen). Fails module compile with OptiX
+  error 7299 at `-O0`, compiles fine at `-O3` (70s cold / 140ms cached).
+  Workaround is to unset the env var. Proper fix: drop FAST_COMPILE to
+  `OPTIX_COMPILE_OPTIMIZATION_LEVEL_1` instead of `LEVEL_0` -- still
+  faster than O3, shouldn't hit the same limit. Not urgent.
