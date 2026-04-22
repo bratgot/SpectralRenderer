@@ -682,29 +682,11 @@ void SpectralRenderIop::knobs(Knob_Callback f)
                    "0.5 = medium soft (overcast feel)\n"
                    "1.0 = very diffuse (large softbox)");
 
-        // ─── Environment Map ────────────────────────────────────────────
-        Divider(f, "Environment map");
-        Text_knob(f,
-            "<font color='#777' size='-1'>"
-            "HDRI environment maps provide image-based lighting from all directions.<br>"
-            "Load an .hdr or .exr file below, or connect an EnvironLight to scn input."
-            "</font>"
-        );
-        Newline(f);
-        File_knob(f, &_hdriFile, "hdri_file", "HDRI file");
-        Tooltip(f, "Load an HDRI environment map (.hdr, .exr, .tx).\n"
-                   "Creates a dome light that illuminates both geometry and volumes.\n"
-                   "This overrides any EnvironLight connected to the scn input.");
-        Double_knob(f, &_hdriIntensity, "hdri_intensity", "HDRI intensity"); SetRange(f, 0, 20);
-        SetFlags(f, Knob::LOG_SLIDER);
-        ClearFlags(f, Knob::STARTLINE);
-        Tooltip(f, "Brightness multiplier for the HDRI dome light.\n"
-                   "1 = as-authored. 5 = boosted. 10+ = very bright.");
-        Double_knob(f, &_hdriRotate, "hdri_rotate", "HDRI rotate");
-        SetRange(f, 0, 360);
-        Tooltip(f, "Rotate HDRI horizontally in degrees.\n"
-                   "Repositions the sun/sky without re-rendering the map.");
-        Divider(f, "");
+        // Environment maps are now only provided via SpectralEnvLight
+        // connected to the scn input. The former local hdri_file / intensity
+        // / rotate knobs were removed 2026-04-22; users migrate by adding a
+        // SpectralEnvLight node.
+
         Double_knob(f, &_vdbEnvIntensity, "vdb_env_intensity", "env intensity"); SetRange(f, 0, 10);
         SetFlags(f, Knob::LOG_SLIDER);
         Tooltip(f, "Environment map brightness multiplier.\n"
@@ -1809,7 +1791,6 @@ int SpectralRenderIop::knob_changed(Knob* k)
     if (k->is("vdb_phase_mode") || k->is("vdb_mie_droplet_d") || k->is("vdb_gradient_mix")) return 1;
     if (k->is("vdb_env_intensity") || k->is("vdb_env_rotate") ||
         k->is("vdb_env_mode") || k->is("vdb_env_virtual_lights") || k->is("vdb_use_restir")) return 1;
-    if (k->is("hdri_file") || k->is("hdri_intensity") || k->is("hdri_rotate")) return 1;
     if (k->is("vdb_noise_enable") || k->is("vdb_noise_scale") || k->is("vdb_noise_strength") ||
         k->is("vdb_noise_octaves") || k->is("vdb_noise_roughness") || k->is("vdb_noise_normalize")) return 1;
 
@@ -8374,6 +8355,76 @@ static GfVec3f dirFromElevAzim(double elevDeg, double azimDeg) {
     return (len > 1e-8f) ? d / len : GfVec3f(0, -1, 0);
 }
 
+// ---------------------------------------------------------------------------
+// _AddHdriDome -- single construction path for HDRI dome lights.
+//
+// Consolidates the former two inline copies. Callers populate an
+// HdriDomeParams (defaults match SpectralLight's own defaults so omitting
+// a field produces identical runtime behaviour), texture id is resolved
+// by the caller, and the rest is mechanical: construct the SpectralLight,
+// run ComputeEnvAverage, AddLight, log. Also emits the EnvDiag pixel
+// dump that was in the env-light path so it now fires for both paths.
+// ---------------------------------------------------------------------------
+void SpectralRenderIop::_AddHdriDome(const HdriDomeParams& p)
+{
+    if (p.texId < 0) return;
+    const auto* tex = _scene->GetTexture(p.texId);
+    if (!tex || !tex->IsValid()) return;
+
+    SpectralLight hdriDome;
+    hdriDome.type              = SpectralLight::Type::Dome;
+    hdriDome.color             = GfVec3f(1.f);
+    hdriDome.intensity         = p.intensity;
+    hdriDome.visibleInPrimary  = p.visibleInPrimary;
+    hdriDome.envTexId          = p.texId;
+    hdriDome.envWidth          = tex->GetWidth();
+    hdriDome.envHeight         = tex->GetHeight();
+    hdriDome.envPixels         = tex->_pixels.data();
+    hdriDome.envRotation       = p.rotation;
+    hdriDome.envShadowSoftness = p.shadowSoftness;
+
+    // EnvDiag pixel dump -- preserved from the old env-light site. If these
+    // numbers differ from PRE-ADD values, the vector reallocated or the
+    // texture got corrupted in between. Silent log-only diagnostic.
+    {
+        int W = hdriDome.envWidth, H = hdriDome.envHeight;
+        auto smp = [&](int x, int y) -> std::array<float, 3> {
+            size_t i = (size_t(y) * W + x) * 3;
+            return { hdriDome.envPixels[i],
+                     hdriDome.envPixels[i+1],
+                     hdriDome.envPixels[i+2] };
+        };
+        auto c  = smp(W/2, H/2);
+        auto tl = smp(0, 0);
+        auto br = smp(W-1, H-1);
+        fprintf(stderr,
+            "EnvDiag: PRE-CEA [%s] envPixels=%p  texels center=(%.3f,%.3f,%.3f)  "
+            "tl=(%.3f,%.3f,%.3f)  br=(%.3f,%.3f,%.3f)\n",
+            p.sourceLabel, (void*)hdriDome.envPixels,
+            c[0], c[1], c[2], tl[0], tl[1], tl[2], br[0], br[1], br[2]);
+    }
+
+    hdriDome.ComputeEnvAverage();
+    _scene->AddLight(hdriDome);
+
+    SLOG("SpectralRender: HDRI dome [%s] (%dx%d) intensity=%.3f rot=%.1f soft=%.2f vis=%d "
+         "avg=(%.3f,%.3f,%.3f) cdf=%s sh=%s vlights=%d\n",
+         p.sourceLabel,
+         hdriDome.envWidth, hdriDome.envHeight,
+         hdriDome.intensity, p.rotation, p.shadowSoftness,
+         (int)p.visibleInPrimary,
+         hdriDome.envAvgColor[0], hdriDome.envAvgColor[1], hdriDome.envAvgColor[2],
+         hdriDome.envHasCDF ? "yes" : "no",
+         hdriDome.envHasSH ? "yes" : "no",
+         (int)hdriDome.envVirtualLights.size());
+    for (size_t vi = 0; vi < hdriDome.envVirtualLights.size(); ++vi) {
+        const auto& vl = hdriDome.envVirtualLights[vi];
+        SLOG("  vlight[%zu] dir=(%.2f,%.2f,%.2f) rgb=(%.2f,%.2f,%.2f)\n",
+             vi, vl.direction[0], vl.direction[1], vl.direction[2],
+             vl.color[0], vl.color[1], vl.color[2]);
+    }
+}
+
 void SpectralRenderIop::_BuildLightRig()
 {
     if (!_scene) return;
@@ -8549,57 +8600,15 @@ void SpectralRenderIop::_BuildLightRig()
         }
 
         if (hasHdri && texId >= 0) {
-            const auto* tex = _scene->GetTexture(texId);
-            if (tex && tex->IsValid()) {
-                SpectralLight hdriDome;
-                hdriDome.type = SpectralLight::Type::Dome;
-                hdriDome.color = GfVec3f(1.f);
-                // Apply ND filter: each stop halves brightness
-                float ndAtten = (el->ndFilter > 0.01) ? float(std::pow(2.0, -el->ndFilter)) : 1.f;
-                hdriDome.intensity = float(el->hdriIntensity) * ndAtten;
-                hdriDome.visibleInPrimary = el->visibleInPrimary;
-                hdriDome.envTexId = texId;
-                hdriDome.envWidth = tex->GetWidth();
-                hdriDome.envHeight = tex->GetHeight();
-                hdriDome.envPixels = tex->_pixels.data();
-                hdriDome.envRotation = float(el->hdriRotate);
-                hdriDome.envShadowSoftness = float(el->hdriShadowSoftness);
-                // Sample via hdriDome.envPixels right before ComputeEnvAverage.
-                // If these differ from PRE-ADD numbers, the vector reallocated
-                // or the texture got corrupted in between.
-                {
-                    int W = hdriDome.envWidth, H = hdriDome.envHeight;
-                    auto smp = [&](int x, int y) -> std::array<float, 3> {
-                        size_t i = (size_t(y) * W + x) * 3;
-                        return { hdriDome.envPixels[i],
-                                 hdriDome.envPixels[i+1],
-                                 hdriDome.envPixels[i+2] };
-                    };
-                    auto c = smp(W/2, H/2);
-                    auto tl = smp(0, 0);
-                    auto br = smp(W-1, H-1);
-                    fprintf(stderr,
-                        "EnvDiag: PRE-CEA  envPixels=%p  texels center=(%.3f,%.3f,%.3f)  "
-                        "tl=(%.3f,%.3f,%.3f)  br=(%.3f,%.3f,%.3f)\n",
-                        (void*)hdriDome.envPixels,
-                        c[0], c[1], c[2], tl[0], tl[1], tl[2], br[0], br[1], br[2]);
-                }
-                hdriDome.ComputeEnvAverage();
-                _scene->AddLight(hdriDome);
-                SLOG("SpectralRender: HDRI dome (%dx%d) intensity=%.1f nd=%.1f stops (effective=%.3f) avg=(%.3f,%.3f,%.3f) cdf=%s sh=%s vlights=%d\n",
-                        hdriDome.envWidth, hdriDome.envHeight, el->hdriIntensity, el->ndFilter,
-                        hdriDome.intensity,
-                        hdriDome.envAvgColor[0], hdriDome.envAvgColor[1], hdriDome.envAvgColor[2],
-                        hdriDome.envHasCDF ? "yes" : "no",
-                        hdriDome.envHasSH ? "yes" : "no",
-                        (int)hdriDome.envVirtualLights.size());
-                for (size_t vi = 0; vi < hdriDome.envVirtualLights.size(); ++vi) {
-                    auto& vl = hdriDome.envVirtualLights[vi];
-                    SLOG("  vlight[%zu] dir=(%.2f,%.2f,%.2f) rgb=(%.2f,%.2f,%.2f)\n",
-                            vi, vl.direction[0], vl.direction[1], vl.direction[2],
-                            vl.color[0], vl.color[1], vl.color[2]);
-                }
-            }
+            HdriDomeParams dp;
+            dp.texId            = texId;
+            float ndAtten       = (el->ndFilter > 0.01) ? float(std::pow(2.0, -el->ndFilter)) : 1.f;
+            dp.intensity        = float(el->hdriIntensity) * ndAtten;
+            dp.visibleInPrimary = el->visibleInPrimary;
+            dp.rotation         = float(el->hdriRotate);
+            dp.shadowSoftness   = float(el->hdriShadowSoftness);
+            dp.sourceLabel      = "env";
+            _AddHdriDome(dp);
         }
     }
 
@@ -8758,27 +8767,6 @@ void SpectralRenderIop::_BuildLightRig()
                 rim.illuminant = SpectralLight::Illuminant::RGB;
                 rim.intensity = 1.f;
                 _scene->AddLight(rim);
-            }
-        }
-
-        // HDRI from local knobs
-        if (_hdriFile && strlen(_hdriFile) > 0) {
-            int texId = _scene->LoadTexture(_hdriFile);
-            if (texId >= 0) {
-                const auto* tex = _scene->GetTexture(texId);
-                if (tex && tex->IsValid()) {
-                    SpectralLight hdriDome;
-                    hdriDome.type = SpectralLight::Type::Dome;
-                    hdriDome.color = GfVec3f(1.f);
-                    hdriDome.intensity = float(_hdriIntensity);
-                    hdriDome.envTexId = texId;
-                    hdriDome.envWidth = tex->GetWidth();
-                    hdriDome.envHeight = tex->GetHeight();
-                    hdriDome.envPixels = tex->_pixels.data();
-                    hdriDome.envRotation = float(_hdriRotate);
-                    hdriDome.ComputeEnvAverage();
-                    _scene->AddLight(hdriDome);
-                }
             }
         }
     }

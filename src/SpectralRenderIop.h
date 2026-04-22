@@ -125,6 +125,20 @@ private:
                        DD::Image::Op*        nodeGraphInput = nullptr);
     void _BuildCameraFromInput();
     void _BuildLightRig();
+
+    // HDRI dome construction -- unified helper. Both the per-input-
+    // EnvLight path and the local-knob path go through this, so they
+    // cannot silently diverge on ND filter / visibility / softness /
+    // diagnostics. Defaults match SpectralLight's struct defaults.
+    struct HdriDomeParams {
+        int         texId             = -1;
+        float       intensity         = 1.f;     // already ND-attenuated by caller
+        bool        visibleInPrimary  = false;
+        float       rotation          = 0.f;
+        float       shadowSoftness    = 0.5f;    // matches SpectralLight default
+        const char* sourceLabel       = "HDRI";  // SLOG prefix (e.g. 'env', 'local')
+    };
+    void _AddHdriDome(const HdriDomeParams& p);
     void _LoadVDB();
     void _LoadVDBForRender();
     void _applyVolumeShading(std::shared_ptr<pxr::SpectralVolume>& vol,
@@ -193,9 +207,6 @@ private:
     double _longitude = -0.12;
     double _timeOfDay = 12.0;     // 24h clock
     int    _dayOfYear = 172;      // June 21 (summer solstice)
-    const char* _hdriFile = "";   // HDRI environment map file
-    double _hdriIntensity = 1.0;
-    double _hdriRotate = 0.0;
 
     int    _studioPreset = 0;      // 0=off, 1=portrait, 2=product, 3=dramatic
     double _studioMix = 1.0;
