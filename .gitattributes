@@ -1,0 +1,35 @@
+# Line endings policy for this repo.
+#
+# Default: normalize to LF on checkin. Git will convert to the working
+# tree's native ending on checkout, so Windows editors still see CRLF
+# when they expect it -- but the repo stays consistent.
+
+* text=auto eol=lf
+
+# Windows-native files -- MSVC and Windows scripting require CRLF
+*.sln              text eol=crlf
+*.vcxproj          text eol=crlf
+*.vcxproj.filters  text eol=crlf
+*.vcxproj.user     text eol=crlf
+*.bat              text eol=crlf
+*.cmd              text eol=crlf
+*.ps1              text eol=crlf
+
+# Explicit binary -- prevents git from guessing wrong on these
+*.exr   binary
+*.hdr   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.tif   binary
+*.tiff  binary
+*.vdb   binary
+*.usd   binary
+*.usdz  binary
+*.usdc  binary
+*.dll   binary
+*.lib   binary
+*.pdb   binary
+*.exe   binary
+*.obj   binary
+*.ptx   binary
