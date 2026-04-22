@@ -335,9 +335,14 @@ events instead of a device-wide sync. Not yet done.
 OptiX PTX compile is ~70s cold on our target kernel at `-O3`. For
 iteration where you're recompiling often, set `SPECTRAL_FAST_COMPILE=1`
 before launching Nuke -- we pass
-`OPTIX_COMPILE_OPTIMIZATION_LEVEL_0` to the module, cutting cold
-compile to ~10s. Runtime perf drops ~20-30%, so don't ship with it.
-Cache hit (no source change) is ~140ms either way.
+`OPTIX_COMPILE_OPTIMIZATION_LEVEL_1` to the module for a much faster
+compile. Runtime perf drops ~20-30%, so don't ship with it. Cache
+hit (no source change) is ~140ms either way.
+
+NOTE: was LEVEL_0 until 2026-04-23, but after the /pdfLight MIS fix
+raygen grew to ~2281 basic blocks and exceeds OptiX's -O0 compile
+ceiling (error 7299). LEVEL_1 enables just enough DCE/block-merging
+to fit while still being cheap to compile.
 
 Also: **don't `printf` from device code**. A single `printf` in the
 kernel balloons OptiX PTX compile from ~200ms warm to 80s+ because it
@@ -491,12 +496,3 @@ the consuming Iop needs to hash the registry.
   when a context is current; defer otherwise), textured hemisphere
   triangle-strip with UV rotation. Scoped as ~200-300 LoC, compile-test
   iteration. Backlogged 2026-04-22 at end of a long productive session.
-- Per-Iop CUDA stream with events instead of the current device-wide
-  `cudaDeviceSynchronize` at BuildAccel entry. Proper fix for the
-  free-during-kernel race that currently uses a sync as mitigation.
-- `SPECTRAL_FAST_COMPILE=1` broken at -O0 since kernel grew (2281 basic
-  blocks, 27555 instructions in raygen). Fails module compile with OptiX
-  error 7299 at `-O0`, compiles fine at `-O3` (70s cold / 140ms cached).
-  Workaround is to unset the env var. Proper fix: drop FAST_COMPILE to
-  `OPTIX_COMPILE_OPTIMIZATION_LEVEL_1` instead of `LEVEL_0` -- still
-  faster than O3, shouldn't hit the same limit. Not urgent.
