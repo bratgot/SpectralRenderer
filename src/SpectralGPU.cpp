@@ -155,6 +155,12 @@ void SpectralGPU::Cleanup()
     if (_module)     { optixModuleDestroy(_module);           _module = nullptr; }
     if (_optixContext) { optixDeviceContextDestroy(_optixContext); _optixContext = nullptr; }
 
+    if (_stream) {
+        cudaStreamSynchronize(_stream);
+        cudaStreamDestroy(_stream);
+        _stream = nullptr;
+    }
+
     memset(&_sbt, 0, sizeof(_sbt));
     memset(&_sbtAO, 0, sizeof(_sbtAO));
 }
@@ -205,6 +211,13 @@ bool SpectralGPU::Initialize(const std::string& ptxSource)
         return false;
     }
 
+    // Per-Iop CUDA stream -- scopes syncs to our own work instead of
+    // the whole device. Multiple SpectralRenderIops can now coexist
+    // without stomping on each other's cudaDeviceSynchronize.
+    CUDA_CHECK(cudaStreamCreate(&_stream));
+    fprintf(stderr, "SpectralGPU: created per-Iop CUDA stream %p\n",
+            (void*)_stream);
+
     // OptiX init
     OPTIX_CHECK(optixInit());
     fprintf(stderr, "SpectralGPU: OptiX SDK %d.%d.%d\n",
@@ -241,14 +254,16 @@ bool SpectralGPU::Initialize(const std::string& ptxSource)
     // Module
     OptixModuleCompileOptions moduleOptions = {};
     moduleOptions.maxRegisterCount = OPTIX_COMPILE_DEFAULT_MAX_REGISTER_COUNT;
-    // Dev-mode fast compile: SPECTRAL_FAST_COMPILE=1 -> LEVEL_0 opt
-    // (~10s vs ~70s) in exchange for ~20-30% slower runtime.
-    // Designed for iterating on kernel code; unset for release renders.
+    // Dev-mode fast compile: SPECTRAL_FAST_COMPILE=1 -> LEVEL_1 opt
+    // for iterating on kernel code; unset for release renders.
+    // NOTE: was LEVEL_0, but after the /pdfLight MIS fix raygen exceeds
+    // OptiX's -O0 compile ceiling (error 7299). LEVEL_1 enables just
+    // enough DCE/block-merging to fit, while staying cheap to compile.
     const char* fastCompile = std::getenv("SPECTRAL_FAST_COMPILE");
     if (fastCompile && fastCompile[0] == '1') {
-        moduleOptions.optLevel   = OPTIX_COMPILE_OPTIMIZATION_LEVEL_0;
+        moduleOptions.optLevel   = OPTIX_COMPILE_OPTIMIZATION_LEVEL_1;
         moduleOptions.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
-        fprintf(stderr, "SpectralGPU: SPECTRAL_FAST_COMPILE=1 -- using LEVEL_0 "
+        fprintf(stderr, "SpectralGPU: SPECTRAL_FAST_COMPILE=1 -- using LEVEL_1 "
                         "optimization (faster compile, slower runtime)\n");
     } else {
         moduleOptions.optLevel   = OPTIX_COMPILE_OPTIMIZATION_DEFAULT;
@@ -399,7 +414,8 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
     // mid-render) can free buffers that a still-running kernel is reading,
     // causing a hard crash. Seen in practice on HDRI rotation drag.
     // Cost: a stall wait for the previous kernel. Small.
-    cudaDeviceSynchronize();
+    // Stream-scoped so other Iops sharing the device aren't stalled.
+    CUDA_CHECK(cudaStreamSynchronize(_stream));
 
     // Skip full rebuild if geometry hasn't changed (volume-only scenes)
     unsigned int newTriCount = scene.TotalTriangles();
@@ -1103,7 +1119,7 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
     fprintf(stderr, "SpectralGPU: [DIAG] optixAccelBuild OK, handle=%llu\n",
             (unsigned long long)_gasHandle);
 
-    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaStreamSynchronize(_stream));
 
     // Free temp buffers
     cudaFree(reinterpret_cast<void*>(d_temp));
@@ -1404,8 +1420,8 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
                 launchDensifyNanoVDB(
                     reinterpret_cast<void*>(d_nano), d_dense,
                     targetResX, targetResY, targetResZ,
-                    bmin.x, bmin.y, bmin.z, bmax.x, bmax.y, bmax.z, nullptr);
-                cudaDeviceSynchronize();
+                    bmin.x, bmin.y, bmin.z, bmax.x, bmax.y, bmax.z, _stream);
+                CUDA_CHECK(cudaStreamSynchronize(_stream));
 
                 // Create/reuse 3D texture, copy device→device (no host bounce)
                 bool resChanged = (targetResX != cachedRX || targetResY != cachedRY || targetResZ != cachedRZ);
@@ -1706,12 +1722,12 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
         }
 
         OPTIX_CHECK(optixLaunch(
-            _pipeline, 0,
+            _pipeline, _stream,
             _d_params, sizeof(spectral_gpu::LaunchParams),
             &_sbt,
             width, sh, 1));
 
-        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaStreamSynchronize(_stream));
 
         // Download this strip's pixels
         size_t rowBytes = size_t(width) * sizeof(float4);
@@ -1880,12 +1896,12 @@ bool SpectralGPU::ComputeAO(const SpectralCamera& camera,
 
     // Launch AO raygen
     OPTIX_CHECK(optixLaunch(
-        _pipeline, 0,
+        _pipeline, _stream,
         _d_params, sizeof(spectral_gpu::LaunchParams),
         &_sbtAO,
         width, height, 1));
 
-    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaStreamSynchronize(_stream));
 
     // Download
     CUDA_CHECK(cudaMemcpy(aoOut, reinterpret_cast<void*>(_d_aoBuffer),
