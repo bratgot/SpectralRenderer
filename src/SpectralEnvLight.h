@@ -73,7 +73,6 @@ public:
     int    dayOfYear = 172;
 
     // --- HDRI ---
-    const char* hdriFile = "";
     double hdriIntensity = 1.0;
     double hdriRotate = 0.0;
     double ndFilter = 0.0;     // ND filter in stops (0=none, 1=halve, 10=1/1024)

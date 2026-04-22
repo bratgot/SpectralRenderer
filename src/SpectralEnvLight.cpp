@@ -43,8 +43,7 @@ const char* SpectralEnvLight::node_help() const
            "Sun/sky model with 18 presets including planetary atmospheres.\n"
            "Solar position from latitude, longitude, and time of day.\n"
            "HDRI environment map loading with rotation and intensity.\n\n"
-           "Connect a Read node to the 'hdri' input for image-based lighting,\n"
-           "or use the HDRI file knob to load directly.\n\n"
+           "Connect a Read node to the 'hdri' input for image-based lighting.\n\n"
            "ND Filter: attenuates bright HDRIs by stops (1 stop = halve brightness).\n\n"
            "CONNECTION\n"
            "  Connect directly to GeoScene as a separate input.\n"
@@ -248,7 +247,10 @@ void SpectralEnvLight::draw_handle(ViewerContext* ctx)
 
     // --- HDRI rotation indicator ---
     // Shows where the HDRI's "front" (0°) is pointing and the rotation offset
-    if (hdriFile && strlen(hdriFile) > 0) {
+    // Draw the indicator whenever HDRI data is available -- either via
+    // the pipe input (input 1) or (historically) a file knob. Pipe-only
+    // now that the file knob is gone.
+    if (inputs() > 1 && input(1)) {
         float rotR = float(hdriRotate) * float(kPi) / 180.f;
         float frontX = R * std::sin(rotR);
         float frontZ = R * std::cos(rotR);
@@ -415,11 +417,10 @@ void SpectralEnvLight::knobs(Knob_Callback f)
 
     // ─── HDRI ─────────────────────────────────────────────────────────
     Divider(f, "HDRI");
-    File_knob(f, &hdriFile, "hdri_file", "file");
-    Tooltip(f, "Load an HDRI environment map (.hdr).\n"
-               "Or connect a Read node to the 'hdri' input pipe.\n"
-               "Input pipe takes priority over file knob.");
-
+    // HDRI image data comes from the 'hdri' input pipe -- connect a
+    // Read node. The file-browse knob was removed 2026-04-22; users
+    // load via the pipe now. Intensity/rotation/ND/softness apply to
+    // whatever comes through.
     Double_knob(f, &hdriIntensity, "hdri_intensity", "intensity");
     SetRange(f, 0, 20); SetFlags(f, Knob::LOG_SLIDER);
     Double_knob(f, &hdriRotate, "hdri_rotate", "rotate");

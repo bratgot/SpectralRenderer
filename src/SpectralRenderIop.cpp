@@ -8593,11 +8593,6 @@ void SpectralRenderIop::_BuildLightRig()
             }
         }
 
-        // Fall back to file knob
-        if (!hasHdri && el->hdriFile && strlen(el->hdriFile) > 0) {
-            texId = _scene->LoadTexture(el->hdriFile);
-            hasHdri = (texId >= 0);
-        }
 
         if (hasHdri && texId >= 0) {
             HdriDomeParams dp;
