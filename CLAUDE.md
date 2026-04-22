@@ -215,8 +215,11 @@ Diagnostic steps when "my patch didn't work":
 2. Check the DLL's filesystem timestamp (`Get-Item
    build\SpectralRender\SpectralRender.dll | Select LastWriteTime`). Compare
    to when you ran build.ps1.
-3. Compare the `SpectralRender: DLL build ...` log line with that filesystem
-   timestamp. They should match.
+3. **The `SpectralRender: DLL build ...` log line is not reliable** --
+   it's a cached string literal that can lag the actual binary by one
+   or more builds (seen 2026-04-23: DLL mtime was today 06:24, log
+   still reported the previous day's build). Trust the filesystem
+   mtime from step 2, not the log string.
 
 Mitigation: always fully close Nuke (not just the file) before rebuilding.
 Rebuild may need to be run from a fresh PowerShell if VS/MSBuild caches
