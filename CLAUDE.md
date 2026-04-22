@@ -452,13 +452,14 @@ the consuming Iop needs to hash the registry.
 
 ## Things we haven't done yet but should
 
-- Proper prim-path registration in `SpectralMeshPropertiesOp::processScenegraph`
-  (instead of the current `size() == 1` fallback).
 - Clean up registry entries on node destruction (currently leaks on rename/delete).
-- Wire up `doubleSided`, `castsShadows`, `visible`, `orientation`, `purpose`
-  from SpectralMeshProperties -- currently registered but unused.
 - Call `Iop::append(hash)` at the top of `SpectralRenderIop::append` to auto-
-  hash all knobs (would pre-empt a whole class of "toggle doesn't work" bugs).
+  hash all knobs. Considered 2026-04-22 but deferred: base-class append would
+  also sweep viewport-preview knobs (`vdb_point_density`, `vdb_show_points`,
+  `vdb_show_bbox`, `vp_*`), turning cheap viewport twiddles into render-cache
+  invalidations. Quick smoke-test felt fine but we decided the current
+  explicit hash list is cheap to maintain. Revisit only if a "toggle X does
+  nothing" bug resurfaces in practice.
 - HDRI intensity calibration post-MIS-fix. The `/pdfLight` bug fix
   (2026-04-22) makes every HDRI render substantially dimmer than pre-fix
   renders. After a few days of rendering at the new baseline, decide
