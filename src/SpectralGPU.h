@@ -163,11 +163,6 @@ private:
     DeviceVolume           _d_volumes[SPECTRAL_MAX_GPU_VOLUMES];
     int                    _numDeviceVolumes = 0;
 
-    // Async volume upload (pinned staging + dedicated stream)
-    CUstream               _uploadStream   = nullptr;
-    void*                  _pinnedStaging  = nullptr;
-    size_t                 _pinnedSize     = 0;
-
     // Legacy single-volume (kept for cleanup)
     CUdeviceptr            _d_volumeDensity = 0;
     CUdeviceptr            _d_volumeTemp    = 0;
