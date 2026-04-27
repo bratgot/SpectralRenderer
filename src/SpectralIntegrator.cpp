@@ -767,399 +767,90 @@ void SpectralIntegrator::RenderFrame(
                                 }
                             }
 
-                            // Volume ray marching — DIRECT RGB (not spectral)
-                            // Volumes render in RGB for proper color at any spp.
-                            // Surface radiance still uses spectral wavelength sampling.
-                            int effectiveVolSpp = (camera.volumeSpp > 0) ? camera.volumeSpp : spp;
-                            float volSppScale = float(spp) / float(effectiveVolSpp);
+                            // Volume ray marching: helper-based path for non-spectral
+                            // volumes; inline path for spectralVolumes-true volumes which
+                            // composite directly into per-wavelength radiance. Stage 1b
+                            // refactor of an originally ~390-line inline block.
                             float finalVolTrans = 1.f;
-                            GfVec3f totalVolRGB(0.f);
                             float vx = 0.f, vy = 0.f, vz = 0.f;
-                            float volFirstDenseT = 1e30f;  // distance to first dense voxel
+                            float volFirstDenseT = 1e30f;
+
+                            // Detect whether any volume in the list is in spectralVolumes
+                            // mode. If yes, route the whole block through the inline path
+                            // (preserves exact ordering / arithmetic for mixed scenes,
+                            // which is rare). Otherwise, use the helper.
+                            bool anySpectralVolume = false;
                             for (int vi = 0; vi < numVolumes; ++vi) {
-                                const SpectralVolume* volume = volumes[vi];
-                                if (!volume || !volume->IsValid()) continue;
-                                GfVec3f volRGB(0.f);  // per-volume scatter — reset each volume
-                                // Ray-AABB intersection
+                                if (volumes[vi] && volumes[vi]->IsValid() &&
+                                    volumes[vi]->spectralVolumes) {
+                                    anySpectralVolume = true;
+                                    break;
+                                }
+                            }
+
+                            if (anySpectralVolume) {
+                                // ---- Inline path (preserved verbatim) ----
+                                for (int vi = 0; vi < numVolumes; ++vi) {
+                                    const SpectralVolume* volume = volumes[vi];
+                                    if (!volume || !volume->IsValid()) continue;
+                                    GfVec3f volRGB(0.f);
+                                    GfVec3f ro(ray.GetStartPoint());
+                                    GfVec3f rd(ray.GetDirection());
+                                    float rdLen = rd.GetLength();
+                                    if (rdLen > 1e-8f) rd /= rdLen;
+                                    GfVec3f invDir(1.f/(std::abs(rd[0])>1e-8f?rd[0]:1e-8f),
+                                                   1.f/(std::abs(rd[1])>1e-8f?rd[1]:1e-8f),
+                                                   1.f/(std::abs(rd[2])>1e-8f?rd[2]:1e-8f));
+                                    GfVec3f t0v = GfVec3f(
+                                        (volume->GetBboxMin()[0]-ro[0])*invDir[0],
+                                        (volume->GetBboxMin()[1]-ro[1])*invDir[1],
+                                        (volume->GetBboxMin()[2]-ro[2])*invDir[2]);
+                                    GfVec3f t1v = GfVec3f(
+                                        (volume->GetBboxMax()[0]-ro[0])*invDir[0],
+                                        (volume->GetBboxMax()[1]-ro[1])*invDir[1],
+                                        (volume->GetBboxMax()[2]-ro[2])*invDir[2]);
+                                    float tNear = std::max({std::min(t0v[0],t1v[0]),
+                                                            std::min(t0v[1],t1v[1]),
+                                                            std::min(t0v[2],t1v[2])});
+                                    float tFar  = std::min({std::max(t0v[0],t1v[0]),
+                                                            std::max(t0v[1],t1v[1]),
+                                                            std::max(t0v[2],t1v[2])});
+                                    tNear = std::max(tNear, 0.f);
+                                    float surfaceT = hit.valid() ? float(hit.t) : 1e30f;
+                                    tFar = std::min(tFar, surfaceT);
+                                    if (tNear < tFar) {
+                                        // Single-volume helper call gives us this volume's
+                                        // (rgb, transmittance) without the inter-volume
+                                        // accumulation logic. We then apply per-volume
+                                        // spectral composite directly into radiance.
+                                        auto sub = _MarchVolumesAlongSegment(
+                                            ro, rd, tFar, lambda, seed, pixIdx,
+                                            &volume, 1, scene, bvh, camera);
+                                        if (sub.firstDenseT < volFirstDenseT)
+                                            volFirstDenseT = sub.firstDenseT;
+                                        // Per-wavelength composite (spectralVolumes mode)
+                                        int sc = (lambda < 500.f) ? 2 : (lambda < 580.f) ? 1 : 0;
+                                        float volSpec = sub.rgb[sc];
+                                        radiance = volSpec + sub.transmittance * radiance;
+                                        finalVolTrans *= sub.transmittance;
+                                    }
+                                }
+                            } else {
+                                // ---- Helper path (single call, all volumes) ----
                                 GfVec3f ro(ray.GetStartPoint());
                                 GfVec3f rd(ray.GetDirection());
                                 float rdLen = rd.GetLength();
                                 if (rdLen > 1e-8f) rd /= rdLen;
-
-                                GfVec3f invDir(1.f/(std::abs(rd[0])>1e-8f?rd[0]:1e-8f),
-                                               1.f/(std::abs(rd[1])>1e-8f?rd[1]:1e-8f),
-                                               1.f/(std::abs(rd[2])>1e-8f?rd[2]:1e-8f));
-                                GfVec3f t0v = GfVec3f(
-                                    (volume->GetBboxMin()[0]-ro[0])*invDir[0],
-                                    (volume->GetBboxMin()[1]-ro[1])*invDir[1],
-                                    (volume->GetBboxMin()[2]-ro[2])*invDir[2]);
-                                GfVec3f t1v = GfVec3f(
-                                    (volume->GetBboxMax()[0]-ro[0])*invDir[0],
-                                    (volume->GetBboxMax()[1]-ro[1])*invDir[1],
-                                    (volume->GetBboxMax()[2]-ro[2])*invDir[2]);
-                                float tNear = std::max({std::min(t0v[0],t1v[0]),
-                                                        std::min(t0v[1],t1v[1]),
-                                                        std::min(t0v[2],t1v[2])});
-                                float tFar  = std::min({std::max(t0v[0],t1v[0]),
-                                                        std::max(t0v[1],t1v[1]),
-                                                        std::max(t0v[2],t1v[2])});
-                                tNear = std::max(tNear, 0.f);
-
-                                // Surface hit limits the far distance
                                 float surfaceT = hit.valid() ? float(hit.t) : 1e30f;
-                                tFar = std::min(tFar, surfaceT);
-
-                                if (tNear < tFar) {
-                                    // Step size from quality parameter
-                                    GfVec3f bboxSize = volume->GetBboxMax() - volume->GetBboxMin();
-                                    float voxelSize = std::max({bboxSize[0]/volume->resX,
-                                                                bboxSize[1]/volume->resY,
-                                                                bboxSize[2]/volume->resZ});
-                                    float q = std::max(1.f, volume->quality);
-                                    float dt = (volume->stepSize > 0.01f) ? volume->stepSize
-                                               : voxelSize / (q * q * 0.25f);
-                                    int maxSteps = std::min(1024, int((tFar - tNear) / dt) + 1);
-
-                                    // Jitter first step
-                                    float jitterOff = volume->jitter ? _Hash(seed + 77) * dt : 0.f;
-                                    float t = tNear + jitterOff;
-
-                                    float volTransmittance = 1.f;
-
-                                    // Collect all non-dome lights for directional scatter
-                                    struct VolLight { GfVec3f dir; GfVec3f color; GfVec3f pos; int type; float radius; };
-                                    std::vector<VolLight> volLights;
-                                    if (scene.HasLights()) {
-                                        for (const auto& L : scene.GetLights()) {
-                                            if (L.type == SpectralLight::Type::Dome) {
-                                                // Add virtual lights extracted from HDRI
-                                                for (const auto& vl : L.envVirtualLights) {
-                                                    float li = vl.color.GetLength() * L.intensity;
-                                                    if (li < 0.001f) continue;
-                                                    GfVec3f vlDir(-vl.direction[0],-vl.direction[1],-vl.direction[2]);
-                                                    if (L.envShadowSoftness > 0.01f) {
-                                                        // Sphere light at distance for soft shadows
-                                                        float dist = 500.f;
-                                                        float sRadius = L.envShadowSoftness * 50.f;
-                                                        GfVec3f pos = GfVec3f(-vlDir[0]*dist, -vlDir[1]*dist, -vlDir[2]*dist);
-                                                        volLights.push_back({
-                                                            vlDir,
-                                                            vl.color * L.intensity * volume->envIntensity,
-                                                            pos, int(SpectralLight::Type::Sphere), sRadius
-                                                        });
-                                                    } else {
-                                                        volLights.push_back({
-                                                            vlDir,
-                                                            vl.color * L.intensity * volume->envIntensity,
-                                                            GfVec3f(0.f), int(SpectralLight::Type::Distant), 0.f
-                                                        });
-                                                    }
-                                                }
-                                                continue;
-                                            }
-                                            float li = L.color.GetLength() * L.intensity;
-                                            if (li < 0.001f) continue;
-                                            volLights.push_back({L.direction, L.color * L.intensity, L.position, int(L.type), L.radius});
-                                        }
-                                    }
-
-                                    for (int step = 0; step < maxSteps && t < tFar; ++step, t += dt) {
-                                        GfVec3f p = ro + rd * t;
-                                        GfVec3f uv = volume->WorldToNorm(p);
-                                        float density = volume->SampleDensity(uv[0], uv[1], uv[2]);
-
-                                        // Procedural fBm noise — perturbs density at render time
-                                        if (volume->noiseEnable && density > 1e-6f) {
-                                            float bboxDiag = (volume->GetBboxMax() - volume->GetBboxMin()).GetLength();
-                                            float ns = volume->noiseNormalize
-                                                ? volume->noiseScale / std::max(bboxDiag, 1e-4f)
-                                                : volume->noiseScale;
-                                            double n = _noiseFBm(p[0]*ns, p[1]*ns, p[2]*ns,
-                                                                 volume->noiseOctaves, volume->noiseRoughness);
-                                            density = std::max(0.f, density * float(1.0 + volume->noiseStrength * n));
-                                        }
-
-                                        // Adaptive stepping: skip faster in thin regions
-                                        if (density < 1e-5f) {
-                                            if (volume->adaptiveStep) t += dt * 3.f; // 4x step in empty
-                                            continue;
-                                        }
-
-                                        // Phase 17: flame opacity — fire burns away density
-                                        float flameVal = volume->SampleFlame(uv[0], uv[1], uv[2]) * volume->flameMix;
-                                        if (volume->flameOpacity > 0.01f && flameVal > 0.01f) {
-                                            density *= std::max(0.f, 1.f - flameVal * volume->flameOpacity);
-                                            if (density < 1e-5f) continue;
-                                        }
-
-                                        // Grid mixer: fade density
-                                        if (volume->densityMix < 0.99f) {
-                                            density *= volume->densityMix;
-                                            if (density < 1e-5f) continue;
-                                        }
-
-                                        // Track distance to first dense voxel (for depth AOV)
-                                        if (t < volFirstDenseT) volFirstDenseT = t;
-
-                                        // Beer-Lambert extinction
-                                        float sigma_t = density * volume->extinction;
-
-                                        // Chromatic extinction
-                                        if (volume->chromaticExtinction) {
-                                            float wt;
-                                            if (lambda < 500.f) wt = volume->sigmaB;
-                                            else if (lambda < 580.f) wt = volume->sigmaG;
-                                            else wt = volume->sigmaR;
-                                            sigma_t *= wt;
-                                        }
-
-                                        float stepTrans = std::exp(-sigma_t * dt);
-                                        float absorption = 1.f - stepTrans;
-
-                                        GfVec3f stepRGB(0.f);
-                                        int rmode = volume->renderMode;
-
-                                        if (rmode == 1) { // Greyscale
-                                            float v = density * volume->intensity;
-                                            stepRGB = GfVec3f(v);
-                                        } else if (rmode == 2) { // Heat ramp
-                                            float t = std::min(density * volume->extinction * 0.5f, 1.f) * volume->intensity;
-                                            stepRGB = GfVec3f(std::min(t*3.f,1.f), std::max(0.f,(t-.33f)*3.f), std::max(0.f,(t-.66f)*3.f));
-                                        } else if (rmode == 3) { // Cool ramp
-                                            float t = std::min(density * volume->extinction * 0.5f, 1.f) * volume->intensity;
-                                            stepRGB = GfVec3f(std::max(0.f,(t-.5f)*2.f), std::max(0.f,(t-.25f)*2.f), std::min(t*2.f,1.f));
-                                        } else if (rmode == 4) { // Blackbody RGB
-                                            float temp = volume->SampleTemperature(uv[0], uv[1], uv[2]);
-                                            if (temp > volume->tempMin) {
-                                                float tN = std::min((temp-volume->tempMin)/(volume->tempMax-volume->tempMin+1e-6f), 1.f);
-                                                float T = volume->tempMin + tN*(volume->tempMax-volume->tempMin);
-                                                float r=1,g=1,b=1, t100=T/100.f;
-                                                if (T<=6600.f) { r=1; g=std::max(0.f,std::min(0.39f*std::log(t100)-0.63f,1.f)); b=std::max(0.f,std::min(0.54f*std::log(t100-10.f)-1.19f,1.f)); }
-                                                else { r=std::max(0.f,std::min(1.29f*std::pow(t100-60.f,-0.13f),1.f)); g=std::max(0.f,std::min(1.13f*std::pow(t100-60.f,-0.07f),1.f)); b=1; }
-                                                stepRGB = GfVec3f(r,g,b) * volume->emissionIntensity * density * volume->intensity;
-                                            }
-                                        } else { // Lit (0) / Explosion (5) — full RGB lighting
-                                            float powder = 1.f;
-                                            if (volume->powderStrength > 0.01f) powder = 1.f - std::exp(-density * volume->powderStrength * 2.f);
-
-                                            GfVec3f scatRGB(0.f);
-                                            for (size_t li = 0; li < volLights.size(); ++li) {
-                                                const auto& vl = volLights[li];
-                                                GfVec3f lDir = vl.dir;
-                                                if (vl.type==int(SpectralLight::Type::Sphere)||vl.type==int(SpectralLight::Type::Spot)) {
-                                                    // Jitter target on sphere surface for soft shadows
-                                                    GfVec3f lightPos = vl.pos;
-                                                    if (vl.radius > 0.01f) {
-                                                        unsigned int js = unsigned(step*131 + li*37 + pixIdx*7) ^ 0x9e3779b9u;
-                                                        auto qhash = [](unsigned int s) -> float {
-                                                            s = (s ^ 61u) ^ (s >> 16u); s *= 9u; s ^= s >> 4u;
-                                                            s *= 0x27d4eb2du; s ^= s >> 15u;
-                                                            return float(s) / float(0xFFFFFFFFu);
-                                                        };
-                                                        float ju1 = qhash(js), ju2 = qhash(js + 1u);
-                                                        float jTheta = 6.28318f * ju1;
-                                                        float jPhi = std::acos(1.f - 2.f * ju2);
-                                                        float jsp = std::sin(jPhi);
-                                                        lightPos[0] += vl.radius * jsp * std::cos(jTheta);
-                                                        lightPos[1] += vl.radius * jsp * std::sin(jTheta);
-                                                        lightPos[2] += vl.radius * std::cos(jPhi);
-                                                    }
-                                                    lDir = p - lightPos; float len = lDir.GetLength(); if (len>1e-6f) lDir /= len;
-                                                }
-                                                float cosTheta = -(rd[0]*lDir[0]+rd[1]*lDir[1]+rd[2]*lDir[2]);
-
-                                                // Phase function — mode 0: dual-lobe HG, mode 1: Cornette-Shanks Mie
-                                                float phase;
-                                                if (volume->phaseMode == 1) {
-                                                    // Cornette-Shanks approximation to Mie scattering
-                                                    // g derived from droplet diameter (Jendersie & d'Eon 2023 fit)
-                                                    float d = volume->mieDropletD;
-                                                    float g = 0.85f * (1.f - std::exp(-d * 0.8f)); // saturates at ~0.85 for large drops
-                                                    float g2 = g*g;
-                                                    float num = (1.f-g2) * (1.f+cosTheta*cosTheta);
-                                                    float denom = (2.f+g2) * std::pow(std::max(1.f+g2-2.f*g*cosTheta, 1e-4f), 1.5f);
-                                                    phase = (3.f/(8.f*3.14159f)) * num / denom;
-                                                } else {
-                                                    float gF=volume->gForward, gB=volume->gBackward;
-                                                    float denomF=1.f+gF*gF-2.f*gF*cosTheta, denomB=1.f+gB*gB-2.f*gB*cosTheta;
-                                                    float phaseF=(1.f-gF*gF)/(4.f*3.14159f*std::pow(std::max(denomF,1e-4f),1.5f));
-                                                    float phaseB=(1.f-gB*gB)/(4.f*3.14159f*std::pow(std::max(denomB,1e-4f),1.5f));
-                                                    phase = volume->lobeMix*phaseF + (1.f-volume->lobeMix)*phaseB;
-                                                }
-                                                float shadowTrans = 1.f;
-                                                if (volume->shadowSteps>0 && volume->shadowDensity>0.01f) {
-                                                    GfVec3f sDir = GfVec3f(-lDir[0], -lDir[1], -lDir[2]);
-
-                                                    // Adaptive step size from voxel resolution (not bbox diagonal)
-                                                    float voxelSize = std::max({bboxSize[0]/std::max(1.f,float(volume->resX)),
-                                                                                bboxSize[1]/std::max(1.f,float(volume->resY)),
-                                                                                bboxSize[2]/std::max(1.f,float(volume->resZ))});
-                                                    float sDt = voxelSize * std::max(1.f, 32.f / std::max(1.f, float(volume->shadowSteps)));
-
-                                                    // Jitter first step to break banding
-                                                    unsigned int jSeed = unsigned(step*97 + li*53 + pixIdx*13) ^ 0xA3C59B2Du;
-                                                    auto qhash = [](unsigned int s) -> float {
-                                                        s = (s ^ 61u) ^ (s >> 16u); s *= 9u; s ^= s >> 4u;
-                                                        s *= 0x27d4eb2du; s ^= s >> 15u;
-                                                        return float(s) / float(0xFFFFFFFFu);
-                                                    };
-                                                    float jitter = qhash(jSeed) * sDt;
-
-                                                    // March through CURRENT volume toward light
-                                                    for (int ss=0; ss<volume->shadowSteps; ++ss) {
-                                                        float sT = sDt * (ss + 0.5f) + jitter;
-                                                        GfVec3f sp = p + sDir * sT;
-                                                        GfVec3f suv = volume->WorldToNorm(sp);
-                                                        if (suv[0]<0||suv[0]>1||suv[1]<0||suv[1]>1||suv[2]<0||suv[2]>1) break;
-                                                        float sd = volume->SampleDensity(suv[0],suv[1],suv[2]) * volume->densityMult;
-                                                        if (sd < 1e-5f) continue;  // skip empty — adaptive
-                                                        shadowTrans *= std::exp(-sd * volume->extinction * volume->shadowDensity * sDt);
-                                                        if (shadowTrans<0.001f) break;
-                                                    }
-
-                                                    // Cross-volume shadows: march through OTHER volumes toward light
-                                                    if (shadowTrans > 0.01f && numVolumes > 1) {
-                                                        for (int ovi = 0; ovi < numVolumes; ++ovi) {
-                                                            if (ovi == vi) continue;  // skip self
-                                                            const SpectralVolume* ovol = volumes[ovi];
-                                                            if (!ovol || !ovol->IsValid()) continue;
-
-                                                            // Ray-AABB test
-                                                            GfVec3f oInv(1.f/(std::abs(sDir[0])>1e-8f?sDir[0]:1e-8f),
-                                                                         1.f/(std::abs(sDir[1])>1e-8f?sDir[1]:1e-8f),
-                                                                         1.f/(std::abs(sDir[2])>1e-8f?sDir[2]:1e-8f));
-                                                            GfVec3f ot0((ovol->GetBboxMin()[0]-p[0])*oInv[0],
-                                                                        (ovol->GetBboxMin()[1]-p[1])*oInv[1],
-                                                                        (ovol->GetBboxMin()[2]-p[2])*oInv[2]);
-                                                            GfVec3f ot1((ovol->GetBboxMax()[0]-p[0])*oInv[0],
-                                                                        (ovol->GetBboxMax()[1]-p[1])*oInv[1],
-                                                                        (ovol->GetBboxMax()[2]-p[2])*oInv[2]);
-                                                            float otNear = std::max({std::min(ot0[0],ot1[0]),std::min(ot0[1],ot1[1]),std::min(ot0[2],ot1[2])});
-                                                            float otFar  = std::min({std::max(ot0[0],ot1[0]),std::max(ot0[1],ot1[1]),std::max(ot0[2],ot1[2])});
-                                                            otNear = std::max(otNear, 0.f);
-                                                            if (otNear >= otFar) continue;
-
-                                                            GfVec3f obSize = ovol->GetBboxMax() - ovol->GetBboxMin();
-                                                            float oVoxel = std::max({obSize[0]/std::max(1.f,float(ovol->resX)),
-                                                                                     obSize[1]/std::max(1.f,float(ovol->resY)),
-                                                                                     obSize[2]/std::max(1.f,float(ovol->resZ))});
-                                                            float oDt = oVoxel * 2.f;
-                                                            int oSteps = std::min(16, int((otFar-otNear)/oDt)+1);
-                                                            for (int os = 0; os < oSteps; ++os) {
-                                                                float ot = otNear + os * oDt;
-                                                                GfVec3f osp = p + sDir * ot;
-                                                                GfVec3f osuv = ovol->WorldToNorm(osp);
-                                                                if (osuv[0]<0||osuv[0]>1||osuv[1]<0||osuv[1]>1||osuv[2]<0||osuv[2]>1) continue;
-                                                                float od = ovol->SampleDensity(osuv[0],osuv[1],osuv[2]) * ovol->densityMult;
-                                                                if (od < 1e-5f) continue;
-                                                                shadowTrans *= std::exp(-od * ovol->extinction * oDt);
-                                                                if (shadowTrans < 0.001f) break;
-                                                            }
-                                                            if (shadowTrans < 0.001f) break;
-                                                        }
-                                                    }
-                                                }
-
-                                                // Geometry occlusion: trace BVH shadow ray from volume point toward light
-                                                if (shadowTrans > 0.01f && scene.TotalTriangles() > 0) {
-                                                    GfVec3f shadowDir = GfVec3f(-lDir[0], -lDir[1], -lDir[2]);
-                                                    GfRay geoShadowRay;
-                                                    geoShadowRay.SetPointAndDirection(GfVec3d(p + shadowDir * 0.01f), GfVec3d(shadowDir));
-                                                    SpectralBVH::Hit geoHit = bvh.Intersect(geoShadowRay, 0.f);
-                                                    // castsShadows=false: treat as no hit.
-                                                    if (geoHit.valid() &&
-                                                        camera.noShadowCastMatIds.count(geoHit.tri->materialId) == 0) {
-                                                        // Geometry blocks light — check opacity for glass
-                                                        const SpectralMaterial& gMat = scene.GetMaterial(geoHit.tri->materialId);
-                                                        if (gMat.opacity > 0.99f || gMat.metallic > 0.5f) {
-                                                            shadowTrans = 0.f;  // opaque geometry fully blocks
-                                                        } else {
-                                                            shadowTrans *= (1.f - gMat.opacity);  // glass partial block
-                                                        }
-                                                    }
-                                                }
-                                                GfVec3f lRGB(vl.color[0]*volume->scatterColor[0], vl.color[1]*volume->scatterColor[1], vl.color[2]*volume->scatterColor[2]);
-                                                scatRGB += lRGB * (volume->scattering*density*phase*shadowTrans*powder);
-                                            }
-                                            // Dome ambient RGB — SH or average
-                                            if (scene.HasLights()) for (const auto& L : scene.GetLights()) {
-                                                if (L.type!=SpectralLight::Type::Dome) continue;
-                                                GfVec3f domeCol;
-                                                if (L.envHasSH) {
-                                                    // SH L0+L1: evaluate at negative ray direction for incoming light
-                                                    GfVec3f evalDir(-rd[0], -rd[1], -rd[2]);
-                                                    domeCol = L.EvalSH(evalDir) * L.intensity * volume->envIntensity;
-                                                    // Clamp negative SH artifacts
-                                                    domeCol[0] = std::max(0.f, domeCol[0]);
-                                                    domeCol[1] = std::max(0.f, domeCol[1]);
-                                                    domeCol[2] = std::max(0.f, domeCol[2]);
-                                                } else if (L.envPixels && L.envWidth > 0) {
-                                                    domeCol = L.envAvgColor * L.intensity * volume->envIntensity;
-                                                } else {
-                                                    domeCol = L.color * L.intensity * volume->envIntensity;
-                                                }
-                                                scatRGB += domeCol*volume->envDiffuse * (volume->scattering*density); }
-                                            // Analytical MS RGB (Wrenninge 2015)
-                                            if (volume->msApprox && volume->scattering>0.01f) {
-                                                float albedo = volume->scattering/std::max(volume->extinction,0.01f);
-                                                float msB = albedo/std::max(1.f-albedo*volume->gForward*volume->lobeMix,0.01f);
-                                                scatRGB += volume->msTint*(density*volume->scattering*msB*0.3f); }
-                                            stepRGB = scatRGB * volume->intensity;
-                                        }
-
-                                        // Scatter through absorption
-                                        volRGB += stepRGB * (volTransmittance * absorption);
-
-                                        // Emission RGB — bypasses absorption
-                                        if (rmode==0||rmode==4||rmode==5||volume->emissionIntensity>0.01f) {
-                                            GfVec3f emRGB(0.f);
-                                            float temp = volume->SampleTemperature(uv[0],uv[1],uv[2]) * volume->tempMix;
-                                            if (temp > volume->tempMin) {
-                                                float tN = std::min((temp-volume->tempMin)/(volume->tempMax-volume->tempMin+1e-6f),1.f);
-                                                float T = volume->tempMin+tN*(volume->tempMax-volume->tempMin);
-                                                float r=1,g=1,b=1, t100=T/100.f;
-                                                if (T<=6600.f) { r=1; g=std::max(0.f,std::min(0.39f*std::log(t100)-0.63f,1.f)); b=std::max(0.f,std::min(0.54f*std::log(t100-10.f)-1.19f,1.f)); }
-                                                else { r=std::max(0.f,std::min(1.29f*std::pow(t100-60.f,-0.13f),1.f)); g=std::max(0.f,std::min(1.13f*std::pow(t100-60.f,-0.07f),1.f)); b=1; }
-                                                emRGB += GfVec3f(r,g,b)*(volume->emissionIntensity*tN); }
-                                            // Phase 17: flame grid emission with artist temp range
-                                            if (flameVal>0.01f) {
-                                                float T2=volume->flameTempMin+flameVal*(volume->flameTempMax-volume->flameTempMin);
-                                                float t100=T2/100.f;
-                                                float r=1,g=std::max(0.f,std::min(0.39f*std::log(t100)-0.63f,1.f)),
-                                                      b=std::max(0.f,std::min(0.54f*std::log(t100-10.f)-1.19f,1.f));
-                                                emRGB += GfVec3f(r,g,b)*(volume->flameIntensity*flameVal); }
-                                            // Phase 17: dense core glow — hot interior emission
-                                            if (volume->coreGlow > 0.01f && density > 0.3f) {
-                                                float coreFrac = std::min((density - 0.3f) / 0.7f, 1.f);
-                                                float T3 = volume->coreTemp, t100=T3/100.f;
-                                                float r=1,g=std::max(0.f,std::min(0.39f*std::log(t100)-0.63f,1.f)),
-                                                      b=std::max(0.f,std::min(0.54f*std::log(t100-10.f)-1.19f,1.f));
-                                                emRGB += GfVec3f(r,g,b)*(volume->coreGlow*coreFrac*coreFrac); }
-                                            // Phase 17: Cherenkov radiation — blue glow at high density
-                                            if (volume->cherenkov && density > volume->cherenkovThreshold) {
-                                                float chFrac = std::min((density - volume->cherenkovThreshold) / (1.f - volume->cherenkovThreshold + 1e-6f), 1.f);
-                                                emRGB += GfVec3f(0.15f, 0.4f, 1.f) * (volume->cherenkovStrength * chFrac * chFrac); }
-                                            volRGB += emRGB*(volTransmittance*density*dt*volume->intensity);
-                                        }
-                                        volTransmittance *= stepTrans;
-
-                                        if (volTransmittance < 0.001f) break;
-                                    }
-
-                                    // Composite volume over surface
-                                    if (volume->spectralVolumes) {
-                                        int sc = (lambda < 500.f) ? 2 : (lambda < 580.f) ? 1 : 0;
-                                        float volSpec = volRGB[sc];
-                                        radiance = volSpec + volTransmittance * radiance;
-                                    } else {
-                                        // Accumulate this volume's XYZ contribution
-                                        vx += (0.4124f*volRGB[0] + 0.3576f*volRGB[1] + 0.1805f*volRGB[2]) * finalVolTrans;
-                                        vy += (0.2126f*volRGB[0] + 0.7152f*volRGB[1] + 0.0722f*volRGB[2]) * finalVolTrans;
-                                        vz += (0.0193f*volRGB[0] + 0.1192f*volRGB[1] + 0.9505f*volRGB[2]) * finalVolTrans;
-                                        radiance *= volTransmittance;
-                                    }
-                                    finalVolTrans *= volTransmittance;  // multiply, don't overwrite
-                                }
+                                auto vr = _MarchVolumesAlongSegment(
+                                    ro, rd, surfaceT, lambda, seed, pixIdx,
+                                    volumes, numVolumes, scene, bvh, camera);
+                                volFirstDenseT = vr.firstDenseT;
+                                vx += (0.4124f*vr.rgb[0] + 0.3576f*vr.rgb[1] + 0.1805f*vr.rgb[2]);
+                                vy += (0.2126f*vr.rgb[0] + 0.7152f*vr.rgb[1] + 0.0722f*vr.rgb[2]);
+                                vz += (0.0193f*vr.rgb[0] + 0.1192f*vr.rgb[1] + 0.9505f*vr.rgb[2]);
+                                radiance *= vr.transmittance;
+                                finalVolTrans = vr.transmittance;
                             }
 
                             // Per-sample alpha (uses material opacity + texture alpha)
@@ -2462,6 +2153,422 @@ float SpectralIntegrator::_Hash(unsigned int seed)
     seed *= 0x27d4eb2du;
     seed = seed ^ (seed >> 15u);
     return float(seed) / float(0xFFFFFFFFu);
+}
+
+// ---------------------------------------------------------------------------
+// _MarchVolumesAlongSegment -- volume integration over a ray segment.
+//
+//   STAGE 1a STUB. Returns a no-op result. The full implementation lifts
+//   the primary-ray inline volume-marching code (currently in RenderFrame,
+//   ~lines 779-1163) into this helper so the bounce loop in _ShadeSpectral
+//   can call it too. Until Stage 1b lands, no call sites use this method.
+//
+//   Parameters:
+//     origin, dir, maxT  Segment to march. dir need not be normalized.
+//     lambda             For chromatic extinction selection.
+//     seed               Outer-loop seed; helper derives jitter from it.
+//     pixIdx             For shadow-ray jitter (matches existing pattern).
+//     volumes, numVolumes  Volume list to march through.
+//     scene              Lights + materials for in-scattering.
+//     bvh                Geometry occlusion of light rays inside volumes.
+//     camera             Carries noShadowCastMatIds.
+// ---------------------------------------------------------------------------
+SpectralIntegrator::VolumeMarchResult
+SpectralIntegrator::_MarchVolumesAlongSegment(
+    const GfVec3f& origin,
+    const GfVec3f& dir,
+    float maxT,
+    float lambda,
+    unsigned int seed,
+    int pixIdx,
+    const SpectralVolume* const* volumes,
+    int numVolumes,
+    const SpectralScene& scene,
+    const SpectralBVH& bvh,
+    const SpectralCamera& camera)
+{
+    VolumeMarchResult result;
+
+    for (int vi = 0; vi < numVolumes; ++vi) {
+        const SpectralVolume* volume = volumes[vi];
+        if (!volume || !volume->IsValid()) continue;
+        GfVec3f volRGB(0.f);  // per-volume scatter -- reset each volume
+        // Ray-AABB intersection
+        GfVec3f ro(origin);
+        GfVec3f rd(dir);
+        float rdLen = rd.GetLength();
+        if (rdLen > 1e-8f) rd /= rdLen;
+
+        GfVec3f invDir(1.f/(std::abs(rd[0])>1e-8f?rd[0]:1e-8f),
+                       1.f/(std::abs(rd[1])>1e-8f?rd[1]:1e-8f),
+                       1.f/(std::abs(rd[2])>1e-8f?rd[2]:1e-8f));
+        GfVec3f t0v = GfVec3f(
+            (volume->GetBboxMin()[0]-ro[0])*invDir[0],
+            (volume->GetBboxMin()[1]-ro[1])*invDir[1],
+            (volume->GetBboxMin()[2]-ro[2])*invDir[2]);
+        GfVec3f t1v = GfVec3f(
+            (volume->GetBboxMax()[0]-ro[0])*invDir[0],
+            (volume->GetBboxMax()[1]-ro[1])*invDir[1],
+            (volume->GetBboxMax()[2]-ro[2])*invDir[2]);
+        float tNear = std::max({std::min(t0v[0],t1v[0]),
+                                std::min(t0v[1],t1v[1]),
+                                std::min(t0v[2],t1v[2])});
+        float tFar  = std::min({std::max(t0v[0],t1v[0]),
+                                std::max(t0v[1],t1v[1]),
+                                std::max(t0v[2],t1v[2])});
+        tNear = std::max(tNear, 0.f);
+
+        // Surface hit limits the far distance (passed in as maxT)
+        tFar = std::min(tFar, maxT);
+
+        if (tNear < tFar) {
+            // Step size from quality parameter
+            GfVec3f bboxSize = volume->GetBboxMax() - volume->GetBboxMin();
+            float voxelSize = std::max({bboxSize[0]/volume->resX,
+                                        bboxSize[1]/volume->resY,
+                                        bboxSize[2]/volume->resZ});
+            float q = std::max(1.f, volume->quality);
+            float dt = (volume->stepSize > 0.01f) ? volume->stepSize
+                       : voxelSize / (q * q * 0.25f);
+            int maxSteps = std::min(1024, int((tFar - tNear) / dt) + 1);
+
+            // Jitter first step
+            float jitterOff = volume->jitter ? _Hash(seed + 77) * dt : 0.f;
+            float t = tNear + jitterOff;
+
+            float volTransmittance = 1.f;
+
+            // Collect all non-dome lights for directional scatter
+            struct VolLight { GfVec3f dir; GfVec3f color; GfVec3f pos; int type; float radius; };
+            std::vector<VolLight> volLights;
+            if (scene.HasLights()) {
+                for (const auto& L : scene.GetLights()) {
+                    if (L.type == SpectralLight::Type::Dome) {
+                        // Add virtual lights extracted from HDRI
+                        for (const auto& vl : L.envVirtualLights) {
+                            float li = vl.color.GetLength() * L.intensity;
+                            if (li < 0.001f) continue;
+                            GfVec3f vlDir(-vl.direction[0],-vl.direction[1],-vl.direction[2]);
+                            if (L.envShadowSoftness > 0.01f) {
+                                // Sphere light at distance for soft shadows
+                                float dist = 500.f;
+                                float sRadius = L.envShadowSoftness * 50.f;
+                                GfVec3f pos = GfVec3f(-vlDir[0]*dist, -vlDir[1]*dist, -vlDir[2]*dist);
+                                volLights.push_back({
+                                    vlDir,
+                                    vl.color * L.intensity * volume->envIntensity,
+                                    pos, int(SpectralLight::Type::Sphere), sRadius
+                                });
+                            } else {
+                                volLights.push_back({
+                                    vlDir,
+                                    vl.color * L.intensity * volume->envIntensity,
+                                    GfVec3f(0.f), int(SpectralLight::Type::Distant), 0.f
+                                });
+                            }
+                        }
+                        continue;
+                    }
+                    float li = L.color.GetLength() * L.intensity;
+                    if (li < 0.001f) continue;
+                    volLights.push_back({L.direction, L.color * L.intensity, L.position, int(L.type), L.radius});
+                }
+            }
+
+            for (int step = 0; step < maxSteps && t < tFar; ++step, t += dt) {
+                GfVec3f p = ro + rd * t;
+                GfVec3f uv = volume->WorldToNorm(p);
+                float density = volume->SampleDensity(uv[0], uv[1], uv[2]);
+
+                // Procedural fBm noise -- perturbs density at render time
+                if (volume->noiseEnable && density > 1e-6f) {
+                    float bboxDiag = (volume->GetBboxMax() - volume->GetBboxMin()).GetLength();
+                    float ns = volume->noiseNormalize
+                        ? volume->noiseScale / std::max(bboxDiag, 1e-4f)
+                        : volume->noiseScale;
+                    double n = _noiseFBm(p[0]*ns, p[1]*ns, p[2]*ns,
+                                         volume->noiseOctaves, volume->noiseRoughness);
+                    density = std::max(0.f, density * float(1.0 + volume->noiseStrength * n));
+                }
+
+                // Adaptive stepping: skip faster in thin regions
+                if (density < 1e-5f) {
+                    if (volume->adaptiveStep) t += dt * 3.f; // 4x step in empty
+                    continue;
+                }
+
+                // Phase 17: flame opacity -- fire burns away density
+                float flameVal = volume->SampleFlame(uv[0], uv[1], uv[2]) * volume->flameMix;
+                if (volume->flameOpacity > 0.01f && flameVal > 0.01f) {
+                    density *= std::max(0.f, 1.f - flameVal * volume->flameOpacity);
+                    if (density < 1e-5f) continue;
+                }
+
+                // Grid mixer: fade density
+                if (volume->densityMix < 0.99f) {
+                    density *= volume->densityMix;
+                    if (density < 1e-5f) continue;
+                }
+
+                // Track distance to first dense voxel (for depth AOV)
+                if (t < result.firstDenseT) result.firstDenseT = t;
+
+                // Beer-Lambert extinction
+                float sigma_t = density * volume->extinction;
+
+                // Chromatic extinction
+                if (volume->chromaticExtinction) {
+                    float wt;
+                    if (lambda < 500.f) wt = volume->sigmaB;
+                    else if (lambda < 580.f) wt = volume->sigmaG;
+                    else wt = volume->sigmaR;
+                    sigma_t *= wt;
+                }
+
+                float stepTrans = std::exp(-sigma_t * dt);
+                float absorption = 1.f - stepTrans;
+
+                GfVec3f stepRGB(0.f);
+                int rmode = volume->renderMode;
+
+                if (rmode == 1) { // Greyscale
+                    float v = density * volume->intensity;
+                    stepRGB = GfVec3f(v);
+                } else if (rmode == 2) { // Heat ramp
+                    float t = std::min(density * volume->extinction * 0.5f, 1.f) * volume->intensity;
+                    stepRGB = GfVec3f(std::min(t*3.f,1.f), std::max(0.f,(t-.33f)*3.f), std::max(0.f,(t-.66f)*3.f));
+                } else if (rmode == 3) { // Cool ramp
+                    float t = std::min(density * volume->extinction * 0.5f, 1.f) * volume->intensity;
+                    stepRGB = GfVec3f(std::max(0.f,(t-.5f)*2.f), std::max(0.f,(t-.25f)*2.f), std::min(t*2.f,1.f));
+                } else if (rmode == 4) { // Blackbody RGB
+                    float temp = volume->SampleTemperature(uv[0], uv[1], uv[2]);
+                    if (temp > volume->tempMin) {
+                        float tN = std::min((temp-volume->tempMin)/(volume->tempMax-volume->tempMin+1e-6f), 1.f);
+                        float T = volume->tempMin + tN*(volume->tempMax-volume->tempMin);
+                        float r=1,g=1,b=1, t100=T/100.f;
+                        if (T<=6600.f) { r=1; g=std::max(0.f,std::min(0.39f*std::log(t100)-0.63f,1.f)); b=std::max(0.f,std::min(0.54f*std::log(t100-10.f)-1.19f,1.f)); }
+                        else { r=std::max(0.f,std::min(1.29f*std::pow(t100-60.f,-0.13f),1.f)); g=std::max(0.f,std::min(1.13f*std::pow(t100-60.f,-0.07f),1.f)); b=1; }
+                        stepRGB = GfVec3f(r,g,b) * volume->emissionIntensity * density * volume->intensity;
+                    }
+                } else { // Lit (0) / Explosion (5) -- full RGB lighting
+                    float powder = 1.f;
+                    if (volume->powderStrength > 0.01f) powder = 1.f - std::exp(-density * volume->powderStrength * 2.f);
+
+                    GfVec3f scatRGB(0.f);
+                    for (size_t li = 0; li < volLights.size(); ++li) {
+                        const auto& vl = volLights[li];
+                        GfVec3f lDir = vl.dir;
+                        if (vl.type==int(SpectralLight::Type::Sphere)||vl.type==int(SpectralLight::Type::Spot)) {
+                            // Jitter target on sphere surface for soft shadows
+                            GfVec3f lightPos = vl.pos;
+                            if (vl.radius > 0.01f) {
+                                unsigned int js = unsigned(step*131 + li*37 + pixIdx*7) ^ 0x9e3779b9u;
+                                auto qhash = [](unsigned int s) -> float {
+                                    s = (s ^ 61u) ^ (s >> 16u); s *= 9u; s ^= s >> 4u;
+                                    s *= 0x27d4eb2du; s ^= s >> 15u;
+                                    return float(s) / float(0xFFFFFFFFu);
+                                };
+                                float ju1 = qhash(js), ju2 = qhash(js + 1u);
+                                float jTheta = 6.28318f * ju1;
+                                float jPhi = std::acos(1.f - 2.f * ju2);
+                                float jsp = std::sin(jPhi);
+                                lightPos[0] += vl.radius * jsp * std::cos(jTheta);
+                                lightPos[1] += vl.radius * jsp * std::sin(jTheta);
+                                lightPos[2] += vl.radius * std::cos(jPhi);
+                            }
+                            lDir = p - lightPos; float len = lDir.GetLength(); if (len>1e-6f) lDir /= len;
+                        }
+                        float cosTheta = -(rd[0]*lDir[0]+rd[1]*lDir[1]+rd[2]*lDir[2]);
+
+                        // Phase function -- mode 0: dual-lobe HG, mode 1: Cornette-Shanks Mie
+                        float phase;
+                        if (volume->phaseMode == 1) {
+                            // Cornette-Shanks approximation to Mie scattering
+                            // g derived from droplet diameter (Jendersie & d'Eon 2023 fit)
+                            float d = volume->mieDropletD;
+                            float g = 0.85f * (1.f - std::exp(-d * 0.8f)); // saturates at ~0.85 for large drops
+                            float g2 = g*g;
+                            float num = (1.f-g2) * (1.f+cosTheta*cosTheta);
+                            float denom = (2.f+g2) * std::pow(std::max(1.f+g2-2.f*g*cosTheta, 1e-4f), 1.5f);
+                            phase = (3.f/(8.f*3.14159f)) * num / denom;
+                        } else {
+                            float gF=volume->gForward, gB=volume->gBackward;
+                            float denomF=1.f+gF*gF-2.f*gF*cosTheta, denomB=1.f+gB*gB-2.f*gB*cosTheta;
+                            float phaseF=(1.f-gF*gF)/(4.f*3.14159f*std::pow(std::max(denomF,1e-4f),1.5f));
+                            float phaseB=(1.f-gB*gB)/(4.f*3.14159f*std::pow(std::max(denomB,1e-4f),1.5f));
+                            phase = volume->lobeMix*phaseF + (1.f-volume->lobeMix)*phaseB;
+                        }
+                        float shadowTrans = 1.f;
+                        if (volume->shadowSteps>0 && volume->shadowDensity>0.01f) {
+                            GfVec3f sDir = GfVec3f(-lDir[0], -lDir[1], -lDir[2]);
+
+                            // Adaptive step size from voxel resolution (not bbox diagonal)
+                            float voxelSize = std::max({bboxSize[0]/std::max(1.f,float(volume->resX)),
+                                                        bboxSize[1]/std::max(1.f,float(volume->resY)),
+                                                        bboxSize[2]/std::max(1.f,float(volume->resZ))});
+                            float sDt = voxelSize * std::max(1.f, 32.f / std::max(1.f, float(volume->shadowSteps)));
+
+                            // Jitter first step to break banding
+                            unsigned int jSeed = unsigned(step*97 + li*53 + pixIdx*13) ^ 0xA3C59B2Du;
+                            auto qhash = [](unsigned int s) -> float {
+                                s = (s ^ 61u) ^ (s >> 16u); s *= 9u; s ^= s >> 4u;
+                                s *= 0x27d4eb2du; s ^= s >> 15u;
+                                return float(s) / float(0xFFFFFFFFu);
+                            };
+                            float jitter = qhash(jSeed) * sDt;
+
+                            // March through CURRENT volume toward light
+                            for (int ss=0; ss<volume->shadowSteps; ++ss) {
+                                float sT = sDt * (ss + 0.5f) + jitter;
+                                GfVec3f sp = p + sDir * sT;
+                                GfVec3f suv = volume->WorldToNorm(sp);
+                                if (suv[0]<0||suv[0]>1||suv[1]<0||suv[1]>1||suv[2]<0||suv[2]>1) break;
+                                float sd = volume->SampleDensity(suv[0],suv[1],suv[2]) * volume->densityMult;
+                                if (sd < 1e-5f) continue;  // skip empty -- adaptive
+                                shadowTrans *= std::exp(-sd * volume->extinction * volume->shadowDensity * sDt);
+                                if (shadowTrans<0.001f) break;
+                            }
+
+                            // Cross-volume shadows: march through OTHER volumes toward light
+                            if (shadowTrans > 0.01f && numVolumes > 1) {
+                                for (int ovi = 0; ovi < numVolumes; ++ovi) {
+                                    if (ovi == vi) continue;  // skip self
+                                    const SpectralVolume* ovol = volumes[ovi];
+                                    if (!ovol || !ovol->IsValid()) continue;
+
+                                    // Ray-AABB test
+                                    GfVec3f oInv(1.f/(std::abs(sDir[0])>1e-8f?sDir[0]:1e-8f),
+                                                 1.f/(std::abs(sDir[1])>1e-8f?sDir[1]:1e-8f),
+                                                 1.f/(std::abs(sDir[2])>1e-8f?sDir[2]:1e-8f));
+                                    GfVec3f ot0((ovol->GetBboxMin()[0]-p[0])*oInv[0],
+                                                (ovol->GetBboxMin()[1]-p[1])*oInv[1],
+                                                (ovol->GetBboxMin()[2]-p[2])*oInv[2]);
+                                    GfVec3f ot1((ovol->GetBboxMax()[0]-p[0])*oInv[0],
+                                                (ovol->GetBboxMax()[1]-p[1])*oInv[1],
+                                                (ovol->GetBboxMax()[2]-p[2])*oInv[2]);
+                                    float otNear = std::max({std::min(ot0[0],ot1[0]),std::min(ot0[1],ot1[1]),std::min(ot0[2],ot1[2])});
+                                    float otFar  = std::min({std::max(ot0[0],ot1[0]),std::max(ot0[1],ot1[1]),std::max(ot0[2],ot1[2])});
+                                    otNear = std::max(otNear, 0.f);
+                                    if (otNear >= otFar) continue;
+
+                                    GfVec3f obSize = ovol->GetBboxMax() - ovol->GetBboxMin();
+                                    float oVoxel = std::max({obSize[0]/std::max(1.f,float(ovol->resX)),
+                                                             obSize[1]/std::max(1.f,float(ovol->resY)),
+                                                             obSize[2]/std::max(1.f,float(ovol->resZ))});
+                                    float oDt = oVoxel * 2.f;
+                                    int oSteps = std::min(16, int((otFar-otNear)/oDt)+1);
+                                    for (int os = 0; os < oSteps; ++os) {
+                                        float ot = otNear + os * oDt;
+                                        GfVec3f osp = p + sDir * ot;
+                                        GfVec3f osuv = ovol->WorldToNorm(osp);
+                                        if (osuv[0]<0||osuv[0]>1||osuv[1]<0||osuv[1]>1||osuv[2]<0||osuv[2]>1) continue;
+                                        float od = ovol->SampleDensity(osuv[0],osuv[1],osuv[2]) * ovol->densityMult;
+                                        if (od < 1e-5f) continue;
+                                        shadowTrans *= std::exp(-od * ovol->extinction * oDt);
+                                        if (shadowTrans < 0.001f) break;
+                                    }
+                                    if (shadowTrans < 0.001f) break;
+                                }
+                            }
+                        }
+
+                        // Geometry occlusion: trace BVH shadow ray from volume point toward light
+                        if (shadowTrans > 0.01f && scene.TotalTriangles() > 0) {
+                            GfVec3f shadowDir = GfVec3f(-lDir[0], -lDir[1], -lDir[2]);
+                            GfRay geoShadowRay;
+                            geoShadowRay.SetPointAndDirection(GfVec3d(p + shadowDir * 0.01f), GfVec3d(shadowDir));
+                            SpectralBVH::Hit geoHit = bvh.Intersect(geoShadowRay, 0.f);
+                            // castsShadows=false: treat as no hit.
+                            if (geoHit.valid() &&
+                                camera.noShadowCastMatIds.count(geoHit.tri->materialId) == 0) {
+                                // Geometry blocks light -- check opacity for glass
+                                const SpectralMaterial& gMat = scene.GetMaterial(geoHit.tri->materialId);
+                                if (gMat.opacity > 0.99f || gMat.metallic > 0.5f) {
+                                    shadowTrans = 0.f;  // opaque geometry fully blocks
+                                } else {
+                                    shadowTrans *= (1.f - gMat.opacity);  // glass partial block
+                                }
+                            }
+                        }
+                        GfVec3f lRGB(vl.color[0]*volume->scatterColor[0], vl.color[1]*volume->scatterColor[1], vl.color[2]*volume->scatterColor[2]);
+                        scatRGB += lRGB * (volume->scattering*density*phase*shadowTrans*powder);
+                    }
+                    // Dome ambient RGB -- SH or average
+                    if (scene.HasLights()) for (const auto& L : scene.GetLights()) {
+                        if (L.type!=SpectralLight::Type::Dome) continue;
+                        GfVec3f domeCol;
+                        if (L.envHasSH) {
+                            // SH L0+L1: evaluate at negative ray direction for incoming light
+                            GfVec3f evalDir(-rd[0], -rd[1], -rd[2]);
+                            domeCol = L.EvalSH(evalDir) * L.intensity * volume->envIntensity;
+                            // Clamp negative SH artifacts
+                            domeCol[0] = std::max(0.f, domeCol[0]);
+                            domeCol[1] = std::max(0.f, domeCol[1]);
+                            domeCol[2] = std::max(0.f, domeCol[2]);
+                        } else if (L.envPixels && L.envWidth > 0) {
+                            domeCol = L.envAvgColor * L.intensity * volume->envIntensity;
+                        } else {
+                            domeCol = L.color * L.intensity * volume->envIntensity;
+                        }
+                        scatRGB += domeCol*volume->envDiffuse * (volume->scattering*density); }
+                    // Analytical MS RGB (Wrenninge 2015)
+                    if (volume->msApprox && volume->scattering>0.01f) {
+                        float albedo = volume->scattering/std::max(volume->extinction,0.01f);
+                        float msB = albedo/std::max(1.f-albedo*volume->gForward*volume->lobeMix,0.01f);
+                        scatRGB += volume->msTint*(density*volume->scattering*msB*0.3f); }
+                    stepRGB = scatRGB * volume->intensity;
+                }
+
+                // Scatter through absorption
+                volRGB += stepRGB * (volTransmittance * absorption);
+
+                // Emission RGB -- bypasses absorption
+                if (rmode==0||rmode==4||rmode==5||volume->emissionIntensity>0.01f) {
+                    GfVec3f emRGB(0.f);
+                    float temp = volume->SampleTemperature(uv[0],uv[1],uv[2]) * volume->tempMix;
+                    if (temp > volume->tempMin) {
+                        float tN = std::min((temp-volume->tempMin)/(volume->tempMax-volume->tempMin+1e-6f),1.f);
+                        float T = volume->tempMin+tN*(volume->tempMax-volume->tempMin);
+                        float r=1,g=1,b=1, t100=T/100.f;
+                        if (T<=6600.f) { r=1; g=std::max(0.f,std::min(0.39f*std::log(t100)-0.63f,1.f)); b=std::max(0.f,std::min(0.54f*std::log(t100-10.f)-1.19f,1.f)); }
+                        else { r=std::max(0.f,std::min(1.29f*std::pow(t100-60.f,-0.13f),1.f)); g=std::max(0.f,std::min(1.13f*std::pow(t100-60.f,-0.07f),1.f)); b=1; }
+                        emRGB += GfVec3f(r,g,b)*(volume->emissionIntensity*tN); }
+                    // Phase 17: flame grid emission with artist temp range
+                    if (flameVal>0.01f) {
+                        float T2=volume->flameTempMin+flameVal*(volume->flameTempMax-volume->flameTempMin);
+                        float t100=T2/100.f;
+                        float r=1,g=std::max(0.f,std::min(0.39f*std::log(t100)-0.63f,1.f)),
+                              b=std::max(0.f,std::min(0.54f*std::log(t100-10.f)-1.19f,1.f));
+                        emRGB += GfVec3f(r,g,b)*(volume->flameIntensity*flameVal); }
+                    // Phase 17: dense core glow -- hot interior emission
+                    if (volume->coreGlow > 0.01f && density > 0.3f) {
+                        float coreFrac = std::min((density - 0.3f) / 0.7f, 1.f);
+                        float T3 = volume->coreTemp, t100=T3/100.f;
+                        float r=1,g=std::max(0.f,std::min(0.39f*std::log(t100)-0.63f,1.f)),
+                              b=std::max(0.f,std::min(0.54f*std::log(t100-10.f)-1.19f,1.f));
+                        emRGB += GfVec3f(r,g,b)*(volume->coreGlow*coreFrac*coreFrac); }
+                    // Phase 17: Cherenkov radiation -- blue glow at high density
+                    if (volume->cherenkov && density > volume->cherenkovThreshold) {
+                        float chFrac = std::min((density - volume->cherenkovThreshold) / (1.f - volume->cherenkovThreshold + 1e-6f), 1.f);
+                        emRGB += GfVec3f(0.15f, 0.4f, 1.f) * (volume->cherenkovStrength * chFrac * chFrac); }
+                    volRGB += emRGB*(volTransmittance*density*dt*volume->intensity);
+                }
+                volTransmittance *= stepTrans;
+
+                if (volTransmittance < 0.001f) break;
+            }
+
+            // Per-volume composite into segment-wide accumulator. Inter-volume
+            // darkening: each volume's RGB is attenuated by the cumulative
+            // transmittance of prior volumes, mirroring the inline finalVolTrans
+            // semantics (volume A's RGB unmodified, volume B's RGB darkened by
+            // T_A, etc.).
+            result.rgb += volRGB * result.transmittance;
+            result.transmittance *= volTransmittance;
+        }
+    }
+
+    return result;
 }
 
 // ---------------------------------------------------------------------------
