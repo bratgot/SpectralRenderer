@@ -183,11 +183,15 @@ Currently volume emission (fire, explosions) is visible but does not
 contribute to geometry lighting. Needs virtual-light extraction from
 emissive voxels, similar to how HDRI virtual lights already work.
 
-### Full path tracing
+### Full path tracing -- retired 2026-04-23
 
-Currently a hybrid direct-lighting + limited-bounce indirect. Unified
-path tracing with MIS would simplify the integrator, improve convergence
-for complex lighting, and match industry expectations.
+Already done. Verified by reading SpectralIntegrator.cpp:1899-2141 and
+the SpectralGPUKernel.cu raygen bounce loop: unified MIS path tracing
+with power heuristic (beta=2), Russian roulette after bounce 1, path
+regularization for rough glass, HDRI CDF importance sampling with
+proper MIS against BSDF-sampled-environment paths. The hardcoded 0.5f
+weights in the GPU kernel's non-CDF branches are intentional fallbacks
+for uniform domes where pdf-based MIS is mathematically undefined.
 
 ### SpectralSurface PBR expansion (Phase 21)
 
