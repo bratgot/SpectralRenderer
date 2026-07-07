@@ -74,8 +74,13 @@ static __forceinline__ __device__ float3 transformDir(const float* m, float3 d)
 
 static __forceinline__ __device__ void makeRay(
     float px, float py, float W, float H, float3& origin, float3& dir,
-    unsigned int seed = 0)
+    unsigned int seed = 0, float* outTime = nullptr)
 {
+    // Shutter time for this ray in [0,1) -- drives both camera and geometry
+    // motion blur so they stay in sync. Computed even without camera mblur so
+    // the caller can pass it to optixTrace for motion-GAS geometry blur.
+    const float shutterT = hashRNG(seed + 99u);
+    if (outTime) *outTime = shutterT;
     // Spherical (equirectangular) projection
     if (params.projectionMode == 2) {
         float u = px / W;  // 0..1 → longitude
@@ -101,7 +106,7 @@ static __forceinline__ __device__ void makeRay(
 
     // Camera motion blur: lerp between open and close camera positions
     if (params.camera.cameraMblur) {
-        float t = hashRNG(seed + 99u);
+        float t = shutterT;
         float3 nearClose = transformPoint(params.camera.viewToWorldClose, nearPos);
         float3 farClose  = transformPoint(params.camera.viewToWorldClose, farPos);
         worldNear.x += (nearClose.x - worldNear.x) * t;
@@ -2174,11 +2179,11 @@ extern "C" __global__ void __raygen__spectral()
                     jy = fmodf(hashRNG(pixSeed*2u+1u) + float(s)*0.5698402909f, 1.f);
                 }
 
-                float3 origin, dir;
-                makeRay(px+jx, py+jy, W, H, origin, dir, seed + 50u);
+                float3 origin, dir; float rayTime = 0.f;
+                makeRay(px+jx, py+jy, W, H, origin, dir, seed + 50u, &rayTime);
 
                 unsigned int p0=0,p1=0,p2=0,p3=__float_as_uint(1e30f),p4=0,p5=0,p6=0;
-                optixTraverse(params.traversable, origin, dir, 1e-4f,1e30f,0.f,
+                optixTraverse(params.traversable, origin, dir, 1e-4f,1e30f,rayTime,
                               OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0);
                 optixReorder();
                 optixInvoke(p0,p1,p2,p3,p4,p5,p6);
@@ -2407,12 +2412,12 @@ extern "C" __global__ void __raygen__spectral()
             }
             float lambda = 380.f + wu*400.f;
 
-            float3 origin, dir;
-            makeRay(px+jx, py+jy, W, H, origin, dir, seed + 50u);
+            float3 origin, dir; float rayTime = 0.f;
+            makeRay(px+jx, py+jy, W, H, origin, dir, seed + 50u, &rayTime);
 
             // Primary ray — Hit Object API for SER
             unsigned int p0=0,p1=0,p2=0,p3=__float_as_uint(1e30f),p4=0,p5=0,p6=0;
-            optixTraverse(params.traversable, origin, dir, 1e-4f,1e30f,0.f,
+            optixTraverse(params.traversable, origin, dir, 1e-4f,1e30f,rayTime,
                           OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0);
             optixReorder();
             optixInvoke(p0,p1,p2,p3,p4,p5,p6);
