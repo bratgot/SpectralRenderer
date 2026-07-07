@@ -271,7 +271,7 @@ bool SpectralGPU::Initialize(const std::string& ptxSource)
     }
 
     OptixPipelineCompileOptions pipelineOptions = {};
-    pipelineOptions.usesMotionBlur        = true;   // motion GAS for geometry blur
+    pipelineOptions.usesMotionBlur        = false;   // GPU motion blur reverted (froze placement)
     pipelineOptions.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
     pipelineOptions.numPayloadValues      = 7;  // nx,ny,nz,t,matId,uvX,uvY
     pipelineOptions.numAttributeValues    = 2;  // barycentrics
@@ -807,7 +807,10 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
         uvs.push_back(make_float2(0, 1));
         _triCount = 1;
     }
-    const bool hasMotion = anyMotion;
+    // GPU motion blur reverted (a motion-enabled pipeline stalled plain Render3D
+    // placement). Keep the two-key plumbing but disabled; MB runs on CPU.
+    (void)anyMotion;
+    const bool hasMotion = false;
 
     // Upload vertices (shutter open). For motion blur, also upload the close key.
     CUdeviceptr d_vertices = 0;

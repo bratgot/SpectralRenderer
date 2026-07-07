@@ -2179,11 +2179,11 @@ extern "C" __global__ void __raygen__spectral()
                     jy = fmodf(hashRNG(pixSeed*2u+1u) + float(s)*0.5698402909f, 1.f);
                 }
 
-                float3 origin, dir; float rayTime = 0.f;
-                makeRay(px+jx, py+jy, W, H, origin, dir, seed + 50u, &rayTime);
+                float3 origin, dir;
+                makeRay(px+jx, py+jy, W, H, origin, dir, seed + 50u);
 
                 unsigned int p0=0,p1=0,p2=0,p3=__float_as_uint(1e30f),p4=0,p5=0,p6=0;
-                optixTraverse(params.traversable, origin, dir, 1e-4f,1e30f,rayTime,
+                optixTraverse(params.traversable, origin, dir, 1e-4f,1e30f,0.f,
                               OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0);
                 optixReorder();
                 optixInvoke(p0,p1,p2,p3,p4,p5,p6);
@@ -2412,12 +2412,12 @@ extern "C" __global__ void __raygen__spectral()
             }
             float lambda = 380.f + wu*400.f;
 
-            float3 origin, dir; float rayTime = 0.f;
-            makeRay(px+jx, py+jy, W, H, origin, dir, seed + 50u, &rayTime);
+            float3 origin, dir;
+            makeRay(px+jx, py+jy, W, H, origin, dir, seed + 50u);
 
             // Primary ray — Hit Object API for SER
             unsigned int p0=0,p1=0,p2=0,p3=__float_as_uint(1e30f),p4=0,p5=0,p6=0;
-            optixTraverse(params.traversable, origin, dir, 1e-4f,1e30f,rayTime,
+            optixTraverse(params.traversable, origin, dir, 1e-4f,1e30f,0.f,
                           OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_NONE, 0,1,0);
             optixReorder();
             optixInvoke(p0,p1,p2,p3,p4,p5,p6);
