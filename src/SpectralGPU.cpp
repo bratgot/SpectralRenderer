@@ -55,6 +55,24 @@ static void _OptixLogCallback(unsigned int level, const char* tag, const char* m
         fprintf(stderr, "SpectralGPU [OptiX %s]: %s\n", tag, msg);
 }
 
+// Motion-blur investigation: enabled only when SPECTRAL_GPU_MB is set, so normal
+// rendering is untouched. MBLog appends flushed lines to a file so a hang leaves
+// the last completed step behind (%TEMP%\spectral_gpu_mb.log).
+static bool gpuMBEnabled() {
+    static int v = std::getenv("SPECTRAL_GPU_MB") ? 1 : 0;
+    return v != 0;
+}
+static void MBLog(const char* step) {
+    static FILE* f = nullptr;
+    if (!f) {
+        const char* t = std::getenv("TEMP"); if (!t) t = std::getenv("TMP"); if (!t) t = ".";
+        std::string p = std::string(t) + "\\spectral_gpu_mb.log";
+        f = fopen(p.c_str(), "a");
+    }
+    if (f) { fprintf(f, "MB: %s\n", step); fflush(f); }
+    fprintf(stderr, "SpectralGPU MB: %s\n", step); fflush(stderr);
+}
+
 // SBT record template
 template<typename T>
 struct SbtRecord {
@@ -271,7 +289,8 @@ bool SpectralGPU::Initialize(const std::string& ptxSource)
     }
 
     OptixPipelineCompileOptions pipelineOptions = {};
-    pipelineOptions.usesMotionBlur        = false;   // GPU motion blur reverted (froze placement)
+    pipelineOptions.usesMotionBlur        = gpuMBEnabled();   // off unless SPECTRAL_GPU_MB set
+    if (gpuMBEnabled()) MBLog("optixModuleCreate START (usesMotionBlur=1)");
     pipelineOptions.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
     pipelineOptions.numPayloadValues      = 7;  // nx,ny,nz,t,matId,uvX,uvY
     pipelineOptions.numAttributeValues    = 2;  // barycentrics
@@ -289,6 +308,7 @@ bool SpectralGPU::Initialize(const std::string& ptxSource)
         fprintf(stderr, "SpectralGPU: module log: %s\n", log);
 
     fprintf(stderr, "SpectralGPU: module compiled\n");
+    if (gpuMBEnabled()) MBLog("optixModuleCreate DONE; pipeline create next");
 
     // Program groups
     OptixProgramGroupOptions pgOptions = {};
@@ -361,6 +381,7 @@ bool SpectralGPU::Initialize(const std::string& ptxSource)
         1));  // max traversal depth
 
     fprintf(stderr, "SpectralGPU: pipeline created\n");
+    if (gpuMBEnabled()) MBLog("optixPipelineCreate + stack DONE");
 
     // SBT — raygen record
     RayGenSbtRecord raygenRec = {};
@@ -807,10 +828,9 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
         uvs.push_back(make_float2(0, 1));
         _triCount = 1;
     }
-    // GPU motion blur reverted (a motion-enabled pipeline stalled plain Render3D
-    // placement). Keep the two-key plumbing but disabled; MB runs on CPU.
-    (void)anyMotion;
-    const bool hasMotion = false;
+    // Motion GAS only when the investigation flag is on AND the scene has motion.
+    const bool hasMotion = anyMotion && gpuMBEnabled();
+    if (hasMotion) MBLog("motion GAS: 2 keys, building");
 
     // Upload vertices (shutter open). For motion blur, also upload the close key.
     CUdeviceptr d_vertices = 0;
@@ -1143,12 +1163,14 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
 
     // Build
     fprintf(stderr, "SpectralGPU: [DIAG] about to optixAccelBuild\n");
+    if (hasMotion) MBLog("optixAccelBuild START");
     OPTIX_CHECK(optixAccelBuild(
         _optixContext, 0,  // stream
         &accelOptions, &buildInput, 1,
         d_temp, bufferSizes.tempSizeInBytes,
         _gasBuffer, bufferSizes.outputSizeInBytes,
         &_gasHandle, nullptr, 0));
+    if (hasMotion) MBLog("optixAccelBuild DONE");
     fprintf(stderr, "SpectralGPU: [DIAG] optixAccelBuild OK, handle=%llu\n",
             (unsigned long long)_gasHandle);
 
@@ -1755,6 +1777,7 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
                                   sizeof(spectral_gpu::LaunchParams), cudaMemcpyHostToDevice));
         }
 
+        if (gpuMBEnabled()) MBLog("optixLaunch (beauty) START");
         OPTIX_CHECK(optixLaunch(
             _pipeline, _stream,
             _d_params, sizeof(spectral_gpu::LaunchParams),
@@ -1762,6 +1785,7 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
             width, sh, 1));
 
         CUDA_CHECK(cudaStreamSynchronize(_stream));
+        if (gpuMBEnabled()) MBLog("optixLaunch (beauty) DONE (stream synced)");
 
         // Download this strip's pixels
         size_t rowBytes = size_t(width) * sizeof(float4);
