@@ -475,9 +475,24 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
     // Stream-scoped so other Iops sharing the device aren't stalled.
     CUDA_CHECK(cudaStreamSynchronize(_stream));
 
+    // Motion-blur scenes carry a per-triangle second (shutter-close) key that the
+    // geometry checksum below does not sample, and the close key changes every
+    // frame under animation. The CPU BVH rebuilds every RenderFrame, so it always
+    // tracks the motion; the GPU caches its GAS by that checksum, so a scrubbed
+    // MB scene would replay a stale GAS (frozen render). Detect any motion here
+    // and skip the unchanged fast-path so MB always rebuilds against this frame.
+    bool sceneHasMotion = false;
+    if (gpuMBEnabled()) {   // hasMotion is only ever set on the GPU MB path
+        for (const auto& mesh : scene.GetMeshes()) {
+            for (const auto& tri : mesh.second.triangles)
+                if (tri.hasMotion) { sceneHasMotion = true; break; }
+            if (sceneHasMotion) break;
+        }
+    }
+
     // Skip full rebuild if geometry hasn't changed (volume-only scenes)
     unsigned int newTriCount = scene.TotalTriangles();
-    if (_gasBuilt && newTriCount == _cachedSceneTriCount) {
+    if (_gasBuilt && newTriCount == _cachedSceneTriCount && !sceneHasMotion) {
         // Checksum vertex positions to detect transforms
         unsigned int geoCheck = 0;
         {
