@@ -78,8 +78,16 @@ static __forceinline__ __device__ void makeRay(
 {
     // Shutter time for this ray in [0,1) -- drives both camera and geometry
     // motion blur so they stay in sync. Computed even without camera mblur so
-    // the caller can pass it to optixTrace for motion-GAS geometry blur.
-    const float shutterT = hashRNG(seed + 99u);
+    // the caller can pass it to optixTrace for motion-GAS geometry blur. The MB
+    // bias LUT (if enabled) remaps the uniform sample to weight blur in time.
+    float shutterT = hashRNG(seed + 99u);
+    if (params.camera.mbBiasOn) {
+        const int N = 32;   // matches SpectralCamera::kMbBiasLut / CameraParams::mbBias
+        float g = shutterT * (N - 1);
+        int i0 = int(g); if (i0 > N - 2) i0 = N - 2; if (i0 < 0) i0 = 0;
+        float f = g - i0;
+        shutterT = params.camera.mbBias[i0] * (1.f - f) + params.camera.mbBias[i0 + 1] * f;
+    }
     if (outTime) *outTime = shutterT;
     // Spherical (equirectangular) projection
     if (params.projectionMode == 2) {

@@ -1809,6 +1809,11 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     if (camera.cameraMblur) {
         copyMatrixTransposed(camera.viewToWorldClose, launchParams.camera.viewToWorldClose);
     }
+    // Motion-blur temporal bias LUT (remaps the shutter sample). Identity if off.
+    launchParams.camera.mbBiasOn = camera.mbBiasOn ? 1 : 0;
+    if (camera.mbBiasOn)
+        for (int i = 0; i < SpectralCamera::kMbBiasLut; ++i)
+            launchParams.camera.mbBias[i] = camera.mbBias[i];
 
     // Camera basis vectors for lens disk sampling
     pxr::GfVec3d right = camera.viewToWorld.TransformDir(pxr::GfVec3d(1, 0, 0));
@@ -2017,6 +2022,7 @@ bool SpectralGPU::ComputeAO(const SpectralCamera& camera,
     launchParams.camera.focusDistance  = camera.focusDistance;
     launchParams.camera.focalLength    = camera.focalLength;
     launchParams.camera.cameraMblur    = 0;  // motion blur not relevant for AO AOV
+    launchParams.camera.mbBiasOn       = 0;
     launchParams.projectionMode        = camera.projectionMode;
 
     // Upload params

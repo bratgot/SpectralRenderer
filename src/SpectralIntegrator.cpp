@@ -76,6 +76,17 @@ static const std::unordered_set<int>* s_noShadowCastMatIds = nullptr;
 // at the shading-site (receiver) rather than the ray-hit site (blocker).
 static const std::unordered_set<int>* s_noShadowReceiveMatIds = nullptr;
 
+// Remap a uniform shutter sample u in [0,1] through the camera's MB bias LUT
+// (temporal motion-blur weighting). Identity when mbBiasOn is false.
+static inline float _MbBiasRemap(const SpectralCamera& cam, float u) {
+    const int N = SpectralCamera::kMbBiasLut;
+    u = u < 0.f ? 0.f : (u > 1.f ? 1.f : u);
+    const float g = u * (N - 1);
+    int i0 = int(g); if (i0 > N - 2) i0 = N - 2; if (i0 < 0) i0 = 0;
+    const float f = g - i0;
+    return cam.mbBias[i0] * (1.f - f) + cam.mbBias[i0 + 1] * f;
+}
+
 void SpectralIntegrator::RenderFrame(
     const SpectralScene&  scene,
     const SpectralCamera& camera,
@@ -344,8 +355,10 @@ void SpectralIntegrator::RenderFrame(
                             }
                             float lambda = SpectralSpectrum::SampleWavelength(wu);
 
+                            float mbU = _Hash(seed + 3);
+                            if (camera.mbBiasOn) mbU = _MbBiasRemap(camera, mbU);
                             float rayTime = camera.shutterOpen +
-                                _Hash(seed + 3) * (camera.shutterClose - camera.shutterOpen);
+                                mbU * (camera.shutterClose - camera.shutterOpen);
 
                             GfRay ray = _MakeRay(camera, imageX, imageY, jx, jy);
                             SpectralBVH::Hit hit = bvh.Intersect(ray, rayTime);
@@ -672,7 +685,8 @@ void SpectralIntegrator::RenderFrame(
                                     static_cast<double>(hit.v),
                                     lambda, mat, scene, hitPos, rayDir,
                                     shadeBounces, bounceSeed, bvh, rayTime, &comps,
-                                    photonMap, gatherRadius, volumes, numVolumes);
+                                    photonMap, gatherRadius, volumes, numVolumes,
+                                    int(pixIdx), &camera);
 
                                 // Premultiply by opacity (texture alpha modulates this)
                                 {
@@ -1451,7 +1465,8 @@ float SpectralIntegrator::_ShadeSpectral(
     unsigned int& rngSeed, const SpectralBVH& bvh, float rayTime,
     ShadeComponents* comps, const SpectralPhotonMap* photonMap,
     float gatherRadius,
-    const SpectralVolume* const* volumes, int numVolumes)
+    const SpectralVolume* const* volumes, int numVolumes,
+    int pixIdx, const SpectralCamera* camera)
 {
     // DIAG1: confirm _ShadeSpectral is being called, show matId
     {
@@ -1932,6 +1947,23 @@ float SpectralIntegrator::_ShadeSpectral(
 
         SpectralBVH::Hit bounceHit = bvh.Intersect(bounceRay, rayTime);
 
+        // Volume marching along bounce-ray segment. DISABLED for diagnosis.
+#if 0
+        if (numVolumes > 0 && bounceHit.valid() && camera) {
+            auto vr = _MarchVolumesAlongSegment(
+                GfVec3f(bounceRay.GetStartPoint()),
+                GfVec3f(bounceRay.GetDirection()),
+                float(bounceHit.t),
+                lambda, rngSeed + unsigned(bounce)*97u, pixIdx,
+                volumes, numVolumes, scene, bvh, *camera);
+            int sc = (lambda < 500.f) ? 2 : (lambda < 580.f) ? 1 : 0;
+            float volSpec = vr.rgb[sc];
+            radiance += pathThroughput * volSpec;
+            pathThroughput *= vr.transmittance;
+            if (comps) comps->indirect += pathThroughput * volSpec;
+        }
+#endif
+
         // Beer-Lambert absorption: attenuate for distance traveled inside volume
         if (insideVolumeMat && bounceHit.valid()) {
             float T = insideVolumeMat->SpectralTransmittance(lambda, float(bounceHit.t));
@@ -1940,6 +1972,23 @@ float SpectralIntegrator::_ShadeSpectral(
         }
 
         if (!bounceHit.valid()) {
+            // Volume marching along bounce-miss segment. DISABLED for diagnosis.
+#if 0
+            if (numVolumes > 0 && camera) {
+                auto vr = _MarchVolumesAlongSegment(
+                    GfVec3f(bounceRay.GetStartPoint()),
+                    GfVec3f(bounceRay.GetDirection()),
+                    1e30f,
+                    lambda, rngSeed + unsigned(bounce)*97u, pixIdx,
+                    volumes, numVolumes, scene, bvh, *camera);
+                int sc = (lambda < 500.f) ? 2 : (lambda < 580.f) ? 1 : 0;
+                float volSpec = vr.rgb[sc];
+                radiance += pathThroughput * volSpec;
+                pathThroughput *= vr.transmittance;
+                if (comps) comps->indirect += pathThroughput * volSpec;
+            }
+#endif
+
             // Miss — check dome lights for BSDF-side MIS contribution
             if (!scene.GetLights().empty()) {
                 for (const SpectralLight& light : scene.GetLights()) {

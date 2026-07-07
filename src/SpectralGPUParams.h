@@ -97,6 +97,8 @@ struct CameraParams {
     float viewToWorld[16];
     float viewToWorldClose[16]; // camera at shutter close (motion blur)
     int   cameraMblur;          // 0 = off, 1 = on
+    int   mbBiasOn;             // 1 = apply mbBias LUT to the shutter sample
+    float mbBias[32];           // shutter-time remap LUT (matches SpectralCamera::kMbBiasLut)
     float fStop;            // 0 = pinhole
     float focusDistance;
     float focalLength;      // mm

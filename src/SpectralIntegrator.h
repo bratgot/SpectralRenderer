@@ -57,6 +57,12 @@ struct SpectralCamera {
     double pixelAspect       = 1.0;   // pixel aspect ratio from format
     float  shutterOpen       = 0.f;   // motion blur shutter [0,1] for Embree
     float  shutterClose      = 0.f;   // 0,0 = no motion blur
+    // Motion-blur temporal bias: a remap LUT for the [0,1] shutter sample so blur
+    // can be weighted toward the leading/trailing edge. mbBias[i] = remapped time
+    // at i/(kMbBiasLut-1). mbBiasOn=false -> identity (uniform shutter).
+    static const int kMbBiasLut = 32;
+    float  mbBias[kMbBiasLut] = {};
+    bool   mbBiasOn          = false;
     float  adaptiveThreshold = 0.05f; // 0 = disabled, 0.05 = default
     bool   blueNoise         = true;  // R2 quasi-random sampling
     bool   scanlineCompat    = true;  // Direct RGB shading (no spectral XYZ)
@@ -286,11 +292,45 @@ private:
                                  const SpectralPhotonMap* photonMap = nullptr,
                                  float gatherRadius = 0.5f,
                                  const SpectralVolume* const* volumes = nullptr,
-                                 int numVolumes = 0);
+                                 int numVolumes = 0,
+                                 int pixIdx = 0,
+                                 const SpectralCamera* camera = nullptr);
     static float _SkySpectral(const GfVec3f& dir, float lambda);
 
     // Simple hash-based RNG for per-pixel, per-sample jitter
     static float _Hash(unsigned int seed);
+
+    // -----------------------------------------------------------------------
+    // Volume marching along a ray segment.
+    //
+    // Returns the accumulated RGB radiance and transmittance for the
+    // segment [origin, origin + dir*maxT]. Used by both the primary-ray
+    // pass (RenderFrame) and bounce rays (_ShadeSpectral) so that
+    // refraction through glass containing fire/smoke shows the volume
+    // correctly. Mirrors the GPU kernel's marchVolume.
+    //
+    // The returned firstDenseT is the distance to the first non-empty
+    // voxel encountered, or 1e30 if none -- used by the primary pass
+    // for the volume depth AOV; bounce callers may discard it.
+    // -----------------------------------------------------------------------
+    struct VolumeMarchResult {
+        GfVec3f rgb           = GfVec3f(0.f);
+        float   transmittance = 1.f;
+        float   firstDenseT   = 1e30f;
+    };
+
+    static VolumeMarchResult _MarchVolumesAlongSegment(
+        const GfVec3f& origin,
+        const GfVec3f& dir,
+        float maxT,
+        float lambda,
+        unsigned int seed,
+        int pixIdx,
+        const SpectralVolume* const* volumes,
+        int numVolumes,
+        const SpectralScene& scene,
+        const SpectralBVH& bvh,
+        const SpectralCamera& camera);
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE
