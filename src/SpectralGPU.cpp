@@ -278,11 +278,15 @@ bool SpectralGPU::Initialize(const std::string& ptxSource)
     // OptiX's -O0 compile ceiling (error 7299). LEVEL_1 enables just
     // enough DCE/block-merging to fit, while staying cheap to compile.
     const char* fastCompile = std::getenv("SPECTRAL_FAST_COMPILE");
-    if (fastCompile && fastCompile[0] == '1') {
+    // Motion blur (usesMotionBlur) pushes optixModuleCreate to ~60s at DEFAULT
+    // optimization -- the traversal permutations explode the compile. LEVEL_1
+    // cuts that to a few seconds; the runtime cost is negligible next to the
+    // extra time samples MB needs anyway. So force LEVEL_1 whenever motion is on.
+    if ((fastCompile && fastCompile[0] == '1') || gpuMBEnabled()) {
         moduleOptions.optLevel   = OPTIX_COMPILE_OPTIMIZATION_LEVEL_1;
         moduleOptions.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
-        fprintf(stderr, "SpectralGPU: SPECTRAL_FAST_COMPILE=1 -- using LEVEL_1 "
-                        "optimization (faster compile, slower runtime)\n");
+        fprintf(stderr, "SpectralGPU: LEVEL_1 optimization (fast compile%s)\n",
+                gpuMBEnabled() ? ", motion blur" : "");
     } else {
         moduleOptions.optLevel   = OPTIX_COMPILE_OPTIMIZATION_DEFAULT;
         moduleOptions.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
