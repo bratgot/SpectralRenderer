@@ -90,6 +90,12 @@ public:
     bool IsValid() const { return _pipeline != nullptr; }
 
 private:
+    // Build (or rebuild) the module + program groups + pipeline + SBT records.
+    // motion=false is the cheap static pipeline built at Initialize; motion=true
+    // is compiled lazily the first time a scene actually needs geometry blur, so
+    // normal renders never pay the ~seconds motion-module compile.
+    bool buildPipeline(bool motion);
+
     // CUDA
     CUcontext              _cudaContext = nullptr;
     CUstream               _stream     = nullptr;
@@ -98,6 +104,8 @@ private:
     OptixDeviceContext     _optixContext = nullptr;
     OptixModule            _module      = nullptr;
     OptixPipeline          _pipeline    = nullptr;
+    bool                   _pipelineMotion = false;  // is _pipeline motion-capable?
+    std::string            _ptxSource;               // kept for the lazy motion rebuild
 
     // Program groups
     OptixProgramGroup      _raygenPG    = nullptr;
@@ -162,11 +170,6 @@ private:
     };
     DeviceVolume           _d_volumes[SPECTRAL_MAX_GPU_VOLUMES];
     int                    _numDeviceVolumes = 0;
-
-    // Legacy single-volume (kept for cleanup)
-    CUdeviceptr            _d_volumeDensity = 0;
-    CUdeviceptr            _d_volumeTemp    = 0;
-    size_t                 _volCachedSize   = 0;
 
     // Current allocation sizes
     unsigned int           _allocW = 0;

@@ -269,6 +269,42 @@ bool SpectralGPU::Initialize(const std::string& ptxSource)
             (serFlags & OPTIX_DEVICE_PROPERTY_SHADER_EXECUTION_REORDERING_FLAG_STANDARD)
             ? "YES (standard)" : "NO (will be no-op)");
 
+    // Build the cheap static pipeline now; the motion pipeline is compiled
+    // lazily the first time a scene actually needs geometry blur (BuildAccel),
+    // so normal renders never pay the motion-module compile.
+    _ptxSource = ptxSource;
+    if (!buildPipeline(/*motion=*/false)) return false;
+
+    // Allocate params buffer
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_params),
+                          sizeof(spectral_gpu::LaunchParams)));
+
+    fprintf(stderr, "SpectralGPU: initialization complete\n");
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// buildPipeline -- compile module + program groups + pipeline + SBT records.
+// motion=false: cheap static pipeline (Initialize). motion=true: geometry-blur
+// pipeline, compiled lazily the first time a scene needs it. Safe to call again
+// to switch (tears the previous objects down first); caller must sync the stream.
+// ---------------------------------------------------------------------------
+bool SpectralGPU::buildPipeline(bool motion)
+{
+    // Tear down any previous pipeline objects (lazy motion rebuild path). The
+    // raygen/miss/AO SBT record buffers are freed and reallocated below; the
+    // hitgroup record is (re)packed against the new _hitgroupPG in BuildAccel.
+    if (_pipeline)   { optixPipelineDestroy(_pipeline);       _pipeline = nullptr; }
+    if (_raygenAOPG) { optixProgramGroupDestroy(_raygenAOPG); _raygenAOPG = nullptr; }
+    if (_hitgroupPG) { optixProgramGroupDestroy(_hitgroupPG); _hitgroupPG = nullptr; }
+    if (_missPG)     { optixProgramGroupDestroy(_missPG);     _missPG = nullptr; }
+    if (_raygenPG)   { optixProgramGroupDestroy(_raygenPG);   _raygenPG = nullptr; }
+    if (_module)     { optixModuleDestroy(_module);           _module = nullptr; }
+    if (_sbtRaygenRecord)   { cudaFree(reinterpret_cast<void*>(_sbtRaygenRecord));   _sbtRaygenRecord = 0; }
+    if (_sbtMissRecord)     { cudaFree(reinterpret_cast<void*>(_sbtMissRecord));     _sbtMissRecord = 0; }
+    if (_sbtRaygenAORecord) { cudaFree(reinterpret_cast<void*>(_sbtRaygenAORecord)); _sbtRaygenAORecord = 0; }
+    const std::string& ptxSource = _ptxSource;
+
     // Module
     OptixModuleCompileOptions moduleOptions = {};
     moduleOptions.maxRegisterCount = OPTIX_COMPILE_DEFAULT_MAX_REGISTER_COUNT;
@@ -282,19 +318,19 @@ bool SpectralGPU::Initialize(const std::string& ptxSource)
     // optimization -- the traversal permutations explode the compile. LEVEL_1
     // cuts that to a few seconds; the runtime cost is negligible next to the
     // extra time samples MB needs anyway. So force LEVEL_1 whenever motion is on.
-    if ((fastCompile && fastCompile[0] == '1') || gpuMBEnabled()) {
+    if ((fastCompile && fastCompile[0] == '1') || motion) {
         moduleOptions.optLevel   = OPTIX_COMPILE_OPTIMIZATION_LEVEL_1;
         moduleOptions.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
         fprintf(stderr, "SpectralGPU: LEVEL_1 optimization (fast compile%s)\n",
-                gpuMBEnabled() ? ", motion blur" : "");
+                motion ? ", motion blur" : "");
     } else {
         moduleOptions.optLevel   = OPTIX_COMPILE_OPTIMIZATION_DEFAULT;
         moduleOptions.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
     }
 
     OptixPipelineCompileOptions pipelineOptions = {};
-    pipelineOptions.usesMotionBlur        = gpuMBEnabled();   // off unless SPECTRAL_GPU_MB set
-    if (gpuMBEnabled()) MBLog("optixModuleCreate START (usesMotionBlur=1)");
+    pipelineOptions.usesMotionBlur        = motion;
+    if (motion) MBLog("optixModuleCreate START (usesMotionBlur=1)");
     pipelineOptions.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
     pipelineOptions.numPayloadValues      = 7;  // nx,ny,nz,t,matId,uvX,uvY
     pipelineOptions.numAttributeValues    = 2;  // barycentrics
@@ -312,7 +348,7 @@ bool SpectralGPU::Initialize(const std::string& ptxSource)
         fprintf(stderr, "SpectralGPU: module log: %s\n", log);
 
     fprintf(stderr, "SpectralGPU: module compiled\n");
-    if (gpuMBEnabled()) MBLog("optixModuleCreate DONE; pipeline create next");
+    if (motion) MBLog("optixModuleCreate DONE; pipeline create next");
 
     // Program groups
     OptixProgramGroupOptions pgOptions = {};
@@ -385,7 +421,7 @@ bool SpectralGPU::Initialize(const std::string& ptxSource)
         1));  // max traversal depth
 
     fprintf(stderr, "SpectralGPU: pipeline created\n");
-    if (gpuMBEnabled()) MBLog("optixPipelineCreate + stack DONE");
+    if (motion) MBLog("optixPipelineCreate + stack DONE");
 
     // SBT — raygen record
     RayGenSbtRecord raygenRec = {};
@@ -421,11 +457,8 @@ bool SpectralGPU::Initialize(const std::string& ptxSource)
     _sbtAO.missRecordStrideInBytes     = sizeof(MissSbtRecord);
     _sbtAO.missRecordCount             = 1;
 
-    // Allocate params buffer
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_params),
-                          sizeof(spectral_gpu::LaunchParams)));
-
-    fprintf(stderr, "SpectralGPU: initialization complete\n");
+    _pipelineMotion = motion;
+    fprintf(stderr, "SpectralGPU: pipeline built (motion=%d)\n", motion ? 1 : 0);
     return true;
 }
 
@@ -835,6 +868,22 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
     // Motion GAS only when the investigation flag is on AND the scene has motion.
     const bool hasMotion = anyMotion && gpuMBEnabled();
     if (hasMotion) MBLog("motion GAS: 2 keys, building");
+
+    // Lazily upgrade to the motion-capable pipeline the first time a scene
+    // actually needs geometry blur. Normal renders keep the cheap static
+    // pipeline built at Initialize, so they never pay the motion-module compile.
+    // The motion pipeline renders static scenes fine, so we never switch back.
+    // (Stream already synced at the top of BuildAccel.) This must run before the
+    // hitgroup SBT is packed below, so it binds against the new program groups.
+    if (hasMotion && !_pipelineMotion) {
+        MBLog("motion pipeline: compiling (first MB render)");
+        fprintf(stderr, "SpectralGPU: upgrading to motion pipeline (one-time compile)\n");
+        if (!buildPipeline(/*motion=*/true)) {
+            fprintf(stderr, "SpectralGPU: motion pipeline build failed\n");
+            return false;
+        }
+        MBLog("motion pipeline: ready");
+    }
 
     // Upload vertices (shutter open). For motion blur, also upload the close key.
     CUdeviceptr d_vertices = 0;
