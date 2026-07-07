@@ -59,7 +59,10 @@ static void _OptixLogCallback(unsigned int level, const char* tag, const char* m
 // rendering is untouched. MBLog appends flushed lines to a file so a hang leaves
 // the last completed step behind (%TEMP%\spectral_gpu_mb.log).
 static bool gpuMBEnabled() {
-    static int v = std::getenv("SPECTRAL_GPU_MB") ? 1 : 0;
+    // GPU motion blur is ON by default; set SPECTRAL_GPU_MB=0 to force MB back to
+    // the CPU path (fallback if a GPU MB regression appears).
+    static int v = [](){ const char* e = std::getenv("SPECTRAL_GPU_MB");
+                         return (e && e[0] == '0') ? 0 : 1; }();
     return v != 0;
 }
 static void MBLog(const char* step) {
