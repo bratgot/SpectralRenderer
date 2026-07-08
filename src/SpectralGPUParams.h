@@ -212,6 +212,9 @@ struct LaunchParams {
     int                scanlineCompat;   // 1 = direct RGB shading (no spectral XYZ)
     int                projectionMode;   // 0=perspective, 1=UV, 2=spherical
     int                edgeSamples;      // edge AA supersamples (0=disabled)
+    int                geoNormalsForMotion; // 1 = shade from the motion-interpolated
+                                            // geometric normal (base-pose vertex
+                                            // normals don't follow moved geometry)
 
     // Wireframe overlay
     int                wireframeEnable;

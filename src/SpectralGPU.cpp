@@ -885,6 +885,7 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
     }
     // Motion GAS only when the investigation flag is on AND the scene has motion.
     const bool hasMotion = anyMotion && gpuMBEnabled();
+    _hasMotionGAS = hasMotion;   // drives motion-geometric-normal shading in the kernel
     if (hasMotion) MBLog("motion GAS: 2 keys, building");
 
     // Lazily upgrade to the motion-capable pipeline the first time a scene
@@ -1355,6 +1356,10 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     launchParams.scanlineCompat = camera.scanlineCompat ? 1 : 0;
     launchParams.projectionMode = camera.projectionMode;
     launchParams.edgeSamples    = camera.edgeSamples;
+    // With a motion GAS the base-pose vertex normals no longer match the moved
+    // geometry (rotated/animated faces shade black); fall back to the motion-
+    // interpolated geometric normal for those renders only.
+    launchParams.geoNormalsForMotion = _hasMotionGAS ? 1 : 0;
     launchParams.wireframeEnable = camera.wireframeEnable ? 1 : 0;
     launchParams.wireThickness  = camera.wireThickness;
     launchParams.wireOpacity    = camera.wireOpacity;

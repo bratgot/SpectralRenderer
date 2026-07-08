@@ -598,7 +598,22 @@ static __forceinline__ __device__ float3 getHitNormal()
     float u=bary.x, v=bary.y, w=1.f-u-v;
     const HitGroupData* d = reinterpret_cast<const HitGroupData*>(optixGetSbtDataPointer());
     float3 n0=d->normals[pi*3], n1=d->normals[pi*3+1], n2=d->normals[pi*3+2];
-    return make_float3(n0.x*w+n1.x*u+n2.x*v, n0.y*w+n1.y*u+n2.y*v, n0.z*w+n1.z*u+n2.z*v);
+    float3 sn = make_float3(n0.x*w+n1.x*u+n2.x*v, n0.y*w+n1.y*u+n2.y*v, n0.z*w+n1.z*u+n2.z*v);
+    // Motion blur: the interpolated base-pose vertex normals do not follow the
+    // moved geometry, so animated/rotated faces shade black. Use the geometric
+    // normal of the time-interpolated triangle instead (flat, but correctly
+    // oriented). Keep the smooth normal's hemisphere so winding stays consistent.
+    if (params.geoNormalsForMotion) {
+        float3 vtx[3];
+        optixGetTriangleVertexData(optixGetGASTraversableHandle(), pi,
+                                   optixGetSbtGASIndex(), optixGetRayTime(), vtx);
+        float3 e1 = make_float3(vtx[1].x - vtx[0].x, vtx[1].y - vtx[0].y, vtx[1].z - vtx[0].z);
+        float3 e2 = make_float3(vtx[2].x - vtx[0].x, vtx[2].y - vtx[0].y, vtx[2].z - vtx[0].z);
+        float3 gn = normalize3(cross3(e1, e2));
+        if (dot3(gn, sn) < 0.f) gn = neg3(gn);
+        return gn;
+    }
+    return sn;
 }
 
 static __forceinline__ __device__ int getHitMaterialId()
