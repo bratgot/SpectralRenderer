@@ -2323,6 +2323,10 @@ extern "C" __global__ void __raygen__spectral()
             float r = 3.2406f*X-1.5372f*Y-0.4986f*Z;
             float g = -0.9689f*X+1.8758f*Y+0.0415f*Z;
             float b = 0.0557f*X-0.2040f*Y+1.0570f*Z;
+            // Neutral white balance (CPU wbCorrection parity, spectral only)
+            r *= params.wbCorrection.x;
+            g *= params.wbCorrection.y;
+            b *= params.wbCorrection.z;
             params.framebuffer[pixIdx] = make_float4(fmaxf(0.f,r),fmaxf(0.f,g),fmaxf(0.f,b), mat.opacity);
             if (params.depthbuffer) params.depthbuffer[pixIdx] = 0.f;
             return;
@@ -3096,6 +3100,10 @@ extern "C" __global__ void __raygen__spectral()
             g=-0.9689f*X+1.8758f*Y+0.0415f*Z;
             b= 0.0557f*X-0.2040f*Y+1.0570f*Z;
         }
+        // Neutral white balance (CPU wbCorrection parity, spectral only)
+        r *= params.wbCorrection.x;
+        g *= params.wbCorrection.y;
+        b *= params.wbCorrection.z;
         params.framebuffer[pixIdx] = make_float4(fmaxf(0.f,r),fmaxf(0.f,g),fmaxf(0.f,b),
                                                     alphaAccum / float(spp));
         if (params.depthbuffer) {

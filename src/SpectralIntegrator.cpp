@@ -1961,7 +1961,9 @@ float SpectralIntegrator::_ShadeSpectral(
                         GfVec3f sp = sOrig + L * st;
                         GfVec3f suv = vol->WorldToNorm(sp);
                         if (suv[0]<0||suv[0]>1||suv[1]<0||suv[1]>1||suv[2]<0||suv[2]>1) continue;
-                        float d = vol->SampleDensity(suv[0], suv[1], suv[2]) * vol->densityMult;
+                        // SampleDensity already applies densityMult -- multiplying
+                        // again squared it (GPU shadow march applies it once).
+                        float d = vol->SampleDensity(suv[0], suv[1], suv[2]);
                         if (d < 1e-5f) continue;
                         shadowTransmit *= std::exp(-d * vol->extinction
                                                    * VolChromaW(vol, lambda) * sDt);
@@ -2391,7 +2393,8 @@ float SpectralIntegrator::_ShadeSpectral(
                             GfVec3f sp = bounceOrigin + L * st;
                             GfVec3f suv = vol->WorldToNorm(sp);
                             if (suv[0]<0||suv[0]>1||suv[1]<0||suv[1]>1||suv[2]<0||suv[2]>1) continue;
-                            float d = vol->SampleDensity(suv[0], suv[1], suv[2]) * vol->densityMult;
+                            // SampleDensity already applies densityMult (see above).
+                            float d = vol->SampleDensity(suv[0], suv[1], suv[2]);
                             if (d < 1e-5f) continue;
                             shadowTransmit *= std::exp(-d * vol->extinction
                                                    * VolChromaW(vol, lambda) * sDt);

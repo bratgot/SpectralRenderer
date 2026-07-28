@@ -9896,7 +9896,8 @@ bool SpectralRenderIop::doDeepEngine(DD::Image::Box box,
                     pxr::GfVec3f uv = vol->WorldToNorm(p);
                     float density = 0.f;
                     if (uv[0]>=0&&uv[0]<=1&&uv[1]>=0&&uv[1]<=1&&uv[2]>=0&&uv[2]<=1)
-                        density = vol->SampleDensity(uv[0], uv[1], uv[2]) * vol->densityMult;
+                        // SampleDensity already applies densityMult.
+                        density = vol->SampleDensity(uv[0], uv[1], uv[2]);
 
                     if (density < 1e-5f) {
                         t += dt * 4.f;

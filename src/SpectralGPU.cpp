@@ -2,6 +2,9 @@
 
 #include "SpectralGPU.h"
 #include "SpectralIntegrator.h"  // full SpectralCamera definition
+#include "SpectralSpectrum.h"    // wbCorrection (neutral white balance) parity
+#include <algorithm>
+#include <cmath>
 
 #include <optix_function_table_definition.h>
 #include <optix_stubs.h>
@@ -1371,6 +1374,34 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     launchParams.volumeSpp   = camera.volumeSpp > 0 ? camera.volumeSpp : spp;
     launchParams.maxBounces  = maxBounces;
     launchParams.colorSpace  = colorSpace;
+    // Neutral white-balance correction -- EXACT copy of the CPU RenderFrame
+    // wbCorrection preamble (SpectralIntegrator.cpp): pre-compute what white
+    // (1,1,1) produces through the spectral round-trip and invert it. The CPU
+    // applies this to every final spectral pixel; without it the GPU beauty
+    // sat a uniform ~13% dim (scene-wide surface offset, parity item 13).
+    launchParams.wbCorrection = make_float3(1.f, 1.f, 1.f);
+    if (camera.neutralBalance && !camera.scanlineCompat) {
+        float wbX = 0.f, wbY = 0.f, wbZ = 0.f;
+        const int wbN = std::max(spp, 64);
+        for (int s = 0; s < wbN; ++s) {
+            float wu = (float(s) + 0.5f) / float(wbN);
+            float lambda = SpectralSpectrum::SampleWavelength(wu);
+            auto gauss = [](float l, float c, float sig) {
+                float t = (l - c) / sig; return std::exp(-0.5f * t * t);
+            };
+            float spectralW = gauss(lambda, 630.f, 30.f)
+                            + gauss(lambda, 532.f, 30.f)
+                            + gauss(lambda, 460.f, 25.f);
+            pxr::GfVec3f xyz = SpectralSpectrum::RadianceToXYZ(spectralW, lambda);
+            wbX += xyz[0]; wbY += xyz[1]; wbZ += xyz[2];
+        }
+        wbX /= wbN; wbY /= wbN; wbZ /= wbN;
+        pxr::GfVec3f wbRGB = SpectralSpectrum::XYZtoRGB(wbX, wbY, wbZ,
+            static_cast<SpectralSpectrum::ColorSpace>(colorSpace));
+        if (wbRGB[0] > 0.01f) launchParams.wbCorrection.x = 1.f / wbRGB[0];
+        if (wbRGB[1] > 0.01f) launchParams.wbCorrection.y = 1.f / wbRGB[1];
+        if (wbRGB[2] > 0.01f) launchParams.wbCorrection.z = 1.f / wbRGB[2];
+    }
     launchParams.previewMode = (spp <= 8) ? 1 : 0;  // shadows only at high spp
     launchParams.normals     = reinterpret_cast<float3*>(_d_normals);
     launchParams.materialIds = reinterpret_cast<int*>(_d_materialIds);

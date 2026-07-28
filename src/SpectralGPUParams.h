@@ -194,6 +194,10 @@ struct LaunchParams {
     int                volumeSpp;     // 0 = use spp, else separate vol samples
     int                maxBounces;
     int                colorSpace;   // 0=sRGB, 1=ACEScg, 2=ACES2065
+    // Neutral white-balance correction (CPU RenderFrame wbCorrection parity):
+    // multiplies the final spectral RGB write; (1,1,1) when disabled or in
+    // scanlineCompat mode.
+    float3             wbCorrection;
     int                previewMode;  // 1=scrub preview (no shadows, 2× step)
 
     float3*            normals;
