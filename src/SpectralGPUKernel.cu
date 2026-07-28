@@ -1084,9 +1084,47 @@ static __device__ float evalSSSWalk(
 
 
 // ---------------------------------------------------------------------------
+// CPU-parity port of SpectralLight::SamplePdf -- the light-sampling pdf used
+// for NEE MIS weighting. Distant and radius-0 point/spot lights are DELTA
+// distributions: pdf 0 by design (they take no pdf divide and no MIS).
+static __forceinline__ __device__ float lightSamplePdfGPU(
+    const GPULight& light, float3 hitPos, float3 L, float3 N)
+{
+    if (light.type == 0) return 0.f;                       // distant: delta
+    if (light.type == 3) {                                 // dome
+        if (params.envHasCDF && params.envTexId >= 0) return envSamplePdf(L);
+        float NdL = N.x*L.x + N.y*L.y + N.z*L.z;           // cosine fallback
+        return fmaxf(0.f, NdL) / 3.14159f;
+    }
+    if (light.type == 1 || light.type == 4) {              // sphere / spot
+        if (light.radius <= 0.f) return 0.f;               // point: delta
+        float3 d = make_float3(light.position.x-hitPos.x,
+                               light.position.y-hitPos.y,
+                               light.position.z-hitPos.z);
+        float dist = sqrtf(d.x*d.x+d.y*d.y+d.z*d.z);
+        if (dist < 1e-6f) return 0.f;
+        float sinMax = fminf(1.f, light.radius / dist);
+        float cosMax = sqrtf(fmaxf(0.f, 1.f - sinMax*sinMax));
+        float solidAngle = 6.28318530718f * (1.f - cosMax);
+        return (solidAngle > 1e-7f) ? 1.f / solidAngle : 0.f;
+    }
+    if (light.type == 2) {                                 // rect
+        float area = light.width * light.height;
+        if (area < 1e-7f) return 0.f;
+        float3 d = make_float3(light.position.x-hitPos.x,
+                               light.position.y-hitPos.y,
+                               light.position.z-hitPos.z);
+        float dist2 = d.x*d.x+d.y*d.y+d.z*d.z;
+        float cosL = fabsf(L.x*light.direction.x + L.y*light.direction.y +
+                           L.z*light.direction.z);
+        return dist2 / (area * fmaxf(cosL, 1e-6f));
+    }
+    return 0.f;
+}
+
 static __forceinline__ __device__ float shadeHit(
     const GPUMaterial& mat, float3 N, float3 V, float3 hitPos, float lambda,
-    unsigned int& rngSeed, int matId)
+    unsigned int& rngSeed, int matId, bool primary)
 {
     float radiance = 0.f;
 
@@ -1250,18 +1288,54 @@ static __forceinline__ __device__ float shadeHit(
                         radiance += bsdf * emission * misW * shadowTransmit / pdfLight;
                     }
                 } else {
-                    // Non-CDF path: keep the hardcoded 0.5 factor for dome
-                    // (matches pre-CDF CPU-compat fallback for domes without
-                    // a built CDF).
-                    if (light.type == 3) emission *= 0.5f;
-                    radiance += bsdf * emission * shadowTransmit;
+                    // CPU _NeeContrib parity (SpectralIntegrator.cpp:1728):
+                    // delta lights (distant, radius-0 point/spot) evaluate
+                    // directly; area-sampled lights (sphere/spot r>0, rect)
+                    // use emitter radiance with the solid-angle/area pdf and
+                    // a power-heuristic MIS weight -- this is what suppresses
+                    // specular-NEE fireflies the old delta-style estimator
+                    // produced (GPU-bright glass/grating spheres, item 13).
+                    float pdfL = lightSamplePdfGPU(light, hitPos, L, N);
+                    if (pdfL <= 1e-10f) {
+                        radiance += bsdf * emission * shadowTransmit;
+                    } else {
+                        float pdfB = bsdfPdfGPU(mat, N, V, L);
+                        float a2 = pdfL * pdfL;
+                        float b2 = pdfB * pdfB;
+                        float misW = a2 / (a2 + b2 + 1e-10f);
+                        float contrib;
+                        if (light.type == 1 || light.type == 4) {
+                            // Sphere/Spot: le = I/(pi r^2) * atten * d^2
+                            float3 dv = make_float3(light.position.x-hitPos.x,
+                                                    light.position.y-hitPos.y,
+                                                    light.position.z-hitPos.z);
+                            float d2 = fmaxf(1e-6f, dv.x*dv.x+dv.y*dv.y+dv.z*dv.z);
+                            float le = lightEmission(light, lambda)
+                                     / fmaxf(3.14159f * light.radius * light.radius, 1e-6f)
+                                     * lightAttenuation(light, hitPos) * d2;
+                            contrib = bsdf * le * misW * shadowTransmit / pdfL;
+                        } else if (light.type == 2) {
+                            float area = fmaxf(light.width * light.height, 1e-6f);
+                            contrib = bsdf * (lightEmission(light, lambda) / area)
+                                    * misW * shadowTransmit / pdfL;
+                        } else {
+                            // Dome without CDF (cosine pdf): emission already
+                            // carries atten (== 1 for domes).
+                            contrib = bsdf * emission * misW * shadowTransmit / pdfL;
+                        }
+                        radiance += contrib;
+                    }
                 }
             }
         }
     }
 
-    // Phase 14: Diffraction grating
-    if (mat.gratingSpacing > 0.f && mat.gratingStrength > 0.f) {
+    // Phase 14: Diffraction grating -- PRIMARY hits only: the CPU reference
+    // evaluates grating/fluorescence/SSS in _ShadeSpectral's primary-hit
+    // section; its bounce direct lighting is plain BSDF NEE. Evaluating
+    // these at bounce hits made every reflection of the grating sphere
+    // ~0.18 too bright per bounce (GPU-bright spheres, item 13).
+    if (primary && mat.gratingSpacing > 0.f && mat.gratingStrength > 0.f) {
         float d = mat.gratingSpacing;  // um
         float lambdaUm = lambda * 0.001f;
         float cosI = fabsf(N.x*V.x + N.y*V.y + N.z*V.z);
@@ -1283,8 +1357,8 @@ static __forceinline__ __device__ float shadeHit(
         }
     }
 
-    // Phase 14: Fluorescence (Stokes shift)
-    if (mat.fluorStrength > 0.f && mat.fluorAbsorb > 0.f) {
+    // Phase 14: Fluorescence (Stokes shift) -- primary only (see grating note)
+    if (primary && mat.fluorStrength > 0.f && mat.fluorAbsorb > 0.f) {
         float absCenter = mat.fluorAbsorb;
         float emCenter = mat.fluorEmit;
         float dAbs = lambda - absCenter;
@@ -1302,7 +1376,9 @@ static __forceinline__ __device__ float shadeHit(
 
     // Subsurface scattering (spectral random walk, matches CPU path).
     // Early-exits when sssRadius<=0 so non-SSS surfaces pay nothing.
-    radiance += evalSSSWalk(mat, hitPos, N, lambda, rngSeed);
+    // Primary only (see grating note).
+    if (primary)
+        radiance += evalSSSWalk(mat, hitPos, N, lambda, rngSeed);
 
     return radiance;
 }
@@ -2311,7 +2387,7 @@ extern "C" __global__ void __raygen__spectral()
                 if (params.scanlineCompat && params.lightCount == 0) {
                     radiance = spectralReflectance(mat, lambda);
                 } else {
-                    radiance = shadeHit(mat, N, V, hitPos, lambda, seed, matId);
+                    radiance = shadeHit(mat, N, V, hitPos, lambda, seed, matId, /*primary=*/true);
                 }
                 radiance *= mat.opacity;
 
@@ -2822,7 +2898,7 @@ extern "C" __global__ void __raygen__spectral()
                 unsigned int shadowSeed = seed + 50u;
                 radiance = (params.debugStage == 21)
                     ? 0.2f * mat.opacity   // [DBGSTAGE] 21: skip shadeHit
-                    : shadeHit(mat, N, V, hitPos, lambda, shadowSeed, matId) * mat.opacity;
+                    : shadeHit(mat, N, V, hitPos, lambda, shadowSeed, matId, /*primary=*/true) * mat.opacity;
 
                 // Bounce rays with refraction support
                 float throughput = 1.f;
@@ -2984,7 +3060,7 @@ extern "C" __global__ void __raygen__spectral()
                     // Skip direct lighting inside transparent objects
                     bool insideGlass = (!isEntering && bMat->opacity < 0.99f);
                     if (!insideGlass)
-                        radiance += throughput * shadeHit(*bMat, bN, bV, bOrigin, lambda, bSeed, bMatId);
+                        radiance += throughput * shadeHit(*bMat, bN, bV, bOrigin, lambda, bSeed, bMatId, /*primary=*/false);
                 }
             } else {
             spectral_miss:
