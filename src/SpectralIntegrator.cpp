@@ -62,6 +62,35 @@ static double _noiseFBm(double x, double y, double z, int octaves, double roughn
 // Hard shadow (Distant, Point, radius=0 Sphere) always takes 1 sample.
 static constexpr int SOFT_SHADOW_SAMPLES_CPU = 4;
 
+// Smooth RGB -> single-wavelength response: overlapping raised-cosine bands
+// centred on B/G/R. The old hard 3-band pick (B<500, G<580, else R) deposited
+// a PURE colour channel per sample in the volume bounce composites, producing
+// saturated HDR chroma spikes ("rainbow confetti") that no denoiser treats as
+// noise. Weights are normalized, so grey input returns exactly its value at
+// every wavelength (energy preserved).
+static inline float RgbAtLambda(const GfVec3f& rgb, float lambda) {
+    auto band = [](float x) {
+        const float t = std::min(std::abs(x), 1.f);
+        return 0.5f + 0.5f * std::cos(t * 3.14159265f);
+    };
+    const float wB = band((lambda - 460.f) / 80.f);
+    const float wG = band((lambda - 545.f) / 80.f);
+    const float wR = band((lambda - 625.f) / 80.f);
+    const float sum = wR + wG + wB;
+    if (sum < 1e-6f) return (rgb[0] + rgb[1] + rgb[2]) / 3.f;
+    return (rgb[0] * wR + rgb[1] * wG + rgb[2] * wB) / sum;
+}
+
+// Smooth per-wavelength chromatic-extinction weight for a volume: raised-
+// cosine interpolation of the sigmaR/G/B knobs (same bands as RgbAtLambda),
+// 1 when the volume's chromaticExtinction is off. Replaces the old hard
+// 3-band pick (l<500?B:l<580?G:R) which stair-stepped the tint; smooth
+// bands keep grey volumes grey and converge without chroma spikes.
+static inline float VolChromaW(const SpectralVolume* v, float lambda) {
+    if (!v || !v->chromaticExtinction) return 1.f;
+    return RgbAtLambda(GfVec3f(v->sigmaR, v->sigmaG, v->sigmaB), lambda);
+}
+
 // File-scoped flag set by RenderFrame, read by _ShadeSpectral
 static bool s_scanlineCompat = false;
 // Pointer to the current render's no-shadow-cast material set. Owned by
@@ -147,7 +176,10 @@ void SpectralIntegrator::RenderFrame(
 
     const unsigned int W = camera.imageWidth;
     const unsigned int H = camera.imageHeight;
-    const bool spectral = (spp > 1);
+    // spp=1 normally routes to the legacy normal-as-colour preview mode, which
+    // never fills the AOV/id/depth buffers -- a geometry-only AOV pass must
+    // still take the main loop (where it short-circuits after the first hit).
+    const bool spectral = (spp > 1) || (aovs && aovs->geometryOnly);
 
     // World-to-camera matrix for converting hit points to camera-space Z.
     // Nuke deep expects Z depth along the camera's view axis, not ray distance.
@@ -353,6 +385,20 @@ void SpectralIntegrator::RenderFrame(
                                 jy = _Hash(seed + 1);
                                 wu = (float(s) + _Hash(seed + 2)) / float(spp);
                             }
+                            // TENT reconstruction filter (edge AA): warp the
+                            // uniform [0,1] jitter to a triangular footprint on
+                            // [-0.5, 1.5] centred in the pixel. The old uniform
+                            // jitter was an implicit 1-px BOX filter that never
+                            // smoothed across pixel boundaries, so silhouettes
+                            // stair-stepped at any spp. Same sample count, no
+                            // buffer changes -- neighbours just share edge
+                            // energy the way a tent filter should.
+                            auto tent = [](float u) {
+                                return (u < 0.5f) ? (std::sqrt(2.f * u) - 0.5f)
+                                                  : (1.5f - std::sqrt(2.f * (1.f - u)));
+                            };
+                            jx = tent(jx);
+                            jy = tent(jy);
                             float lambda = SpectralSpectrum::SampleWavelength(wu);
 
                             float mbU = _Hash(seed + 3);
@@ -507,10 +553,42 @@ void SpectralIntegrator::RenderFrame(
                                                 // Double-sided: abs(N.y) so down-facing back faces still
                                                 // receive some sky ambient instead of clamping to zero.
                                                 float wrap = 0.5f + 0.5f * std::abs(N[1]);
+                                                // Dome ambient OCCLUSION: without this the sky term
+                                                // was constant and contact areas showed no darkening
+                                                // at all ("AO from the dome doesn't appear"). Trace a
+                                                // few short cosine-ish hemisphere rays capped at the
+                                                // camera AO radius; the unoccluded fraction scales
+                                                // the ambient.
+                                                {
+                                                    const float aoR = camera.aoRadius > 0.f ? camera.aoRadius : 5.f;
+                                                    const int aoN = 4;
+                                                    GfVec3f Nn = (N[1] >= 0.f) ? N : -N;   // sky side
+                                                    GfVec3f refA = (std::abs(Nn[1]) < 0.99f)
+                                                                   ? GfVec3f(0.f, 1.f, 0.f) : GfVec3f(1.f, 0.f, 0.f);
+                                                    GfVec3f Ta = GfCross(Nn, refA);
+                                                    float tl = Ta.GetLength();
+                                                    Ta = (tl > 1e-6f) ? Ta / tl : GfVec3f(1.f, 0.f, 0.f);
+                                                    GfVec3f Ba = GfCross(Nn, Ta);
+                                                    float open = 0.f;
+                                                    for (int ai = 0; ai < aoN; ++ai) {
+                                                        unsigned int aseed = seed + 77u + unsigned(ai) * 53u;
+                                                        float u1 = _Hash(aseed), u2 = _Hash(aseed + 1u);
+                                                        float rr = std::sqrt(u1);
+                                                        float ph = 2.f * float(M_PI) * u2;
+                                                        float z = std::sqrt(std::max(0.f, 1.f - u1));
+                                                        GfVec3f d = Ta * (rr * std::cos(ph)) +
+                                                                    Ba * (rr * std::sin(ph)) + Nn * z;
+                                                        GfRay aoRay(GfVec3d(hitPos) + GfVec3d(Nn) * 0.005,
+                                                                    GfVec3d(d));
+                                                        SpectralBVH::Hit aoHit = bvh.Intersect(aoRay, rayTime);
+                                                        if (!(aoHit.valid() && aoHit.t < aoR)) open += 1.f;
+                                                    }
+                                                    wrap *= 0.15f + 0.85f * (open / float(aoN));
+                                                }
                                                 rgb[0] += baseCol[0] * light.color[0] * intensity * wrap * float(1.0 / M_PI);
                                                 rgb[1] += baseCol[1] * light.color[1] * intensity * wrap * float(1.0 / M_PI);
                                                 rgb[2] += baseCol[2] * light.color[2] * intensity * wrap * float(1.0 / M_PI);
-                                                continue;  // no shadow-ray test for sky ambient
+                                                continue;  // sky ambient occluded above; no hard shadow ray
                                             } else {
                                                 // Sphere / Point / Spot: positional with 1/r^2 falloff.
                                                 // (Sphere-as-sun at >100 unit distance: treat as distant for falloff.)
@@ -523,6 +601,11 @@ void SpectralIntegrator::RenderFrame(
                                                 } else {
                                                     atten = 1.f / (dist * dist);
                                                 }
+                                                // Spot cone + penumbra: without this the compat path lit
+                                                // the whole hemisphere and a Spot behaved as a POINT light
+                                                // (the GPU kernel already applies spotAttenuation).
+                                                atten *= light.SpotAttenuation(hitPos);
+                                                if (atten <= 0.f) continue;
                                                 shadowMax = dist - 0.002f;
                                             }
 
@@ -540,14 +623,20 @@ void SpectralIntegrator::RenderFrame(
                                             GfVec3f Ns = (N[0]*L[0] + N[1]*L[1] + N[2]*L[2] >= 0.f) ? N : -N;
                                             GfVec3f sOrig = hitPos + Ns * 0.001f;
 
-                                            // Soft shadows: Sphere lights with radius > 0 take N samples
-                                            // jittered across a disc on the light's surface facing the
-                                            // shading point. All other lights take one hard ray.
-                                            // No new knob: SpectralEnvLight's sunShadowSoftness already
-                                            // drives sphere-light radius, so dialing that in automatically
-                                            // softens the shadow.
-                                            bool softShadow = (light.type == SpectralLight::Type::Sphere)
-                                                              && (light.radius > 1e-4f);
+                                            // Soft shadows: every FINITE emitter takes N jittered samples --
+                                            // Sphere/Spot across a disc of the light's radius, Rect across
+                                            // its width x height. Only Distant (and radius-0 sphere/spot)
+                                            // stays a single hard ray.
+                                            const bool rectSoft = (light.type == SpectralLight::Type::Rect)
+                                                                  && (light.width > 1e-4f || light.height > 1e-4f);
+                                            // Distant: radius = the sun's ANGULAR size in degrees
+                                            // (umbra/penumbra control); jitter the ray DIRECTION.
+                                            const bool sunSoft = (light.type == SpectralLight::Type::Distant)
+                                                                 && (light.radius > 1e-3f);
+                                            bool softShadow = rectSoft || sunSoft ||
+                                                              ((light.type == SpectralLight::Type::Sphere ||
+                                                                light.type == SpectralLight::Type::Spot)
+                                                               && (light.radius > 1e-4f));
                                             int numShadowSamples = softShadow ? SOFT_SHADOW_SAMPLES_CPU : 1;
                                             float shadowAccum = 0.f;
 
@@ -576,15 +665,35 @@ void SpectralIntegrator::RenderFrame(
                                             for (int ss = 0; ss < numShadowSamples; ++ss) {
                                                 GfVec3f sL = L;
                                                 float sMax = shadowMax;
-                                                if (softShadow) {
-                                                    // Uniform disc sample in tangent plane at light center.
+                                                if (softShadow && sunSoft) {
+                                                    // Sun: perturb the DIRECTION within a cone of
+                                                    // `radius` degrees; distance stays infinite.
                                                     unsigned int sseed = seed + 11u + unsigned(ss) * 31u;
                                                     float r1 = _Hash(sseed);
                                                     float r2 = _Hash(sseed + 1u);
-                                                    float r = std::sqrt(r1) * light.radius;
+                                                    float spread = std::tan(light.radius * float(M_PI) / 180.f);
+                                                    float r = std::sqrt(r1) * spread;
                                                     float phi = 2.f * float(M_PI) * r2;
-                                                    GfVec3f offset = Tu * (r * std::cos(phi))
+                                                    GfVec3f jl = L + Tu * (r * std::cos(phi))
                                                                    + Tv * (r * std::sin(phi));
+                                                    float jlen = jl.GetLength();
+                                                    if (jlen > 1e-6f) sL = jl / jlen;
+                                                } else if (softShadow) {
+                                                    unsigned int sseed = seed + 11u + unsigned(ss) * 31u;
+                                                    float r1 = _Hash(sseed);
+                                                    float r2 = _Hash(sseed + 1u);
+                                                    GfVec3f offset;
+                                                    if (rectSoft) {
+                                                        // Uniform sample across the rectangle's extent.
+                                                        offset = Tu * ((r1 - 0.5f) * light.width)
+                                                               + Tv * ((r2 - 0.5f) * light.height);
+                                                    } else {
+                                                        // Uniform disc sample in tangent plane at light center.
+                                                        float r = std::sqrt(r1) * light.radius;
+                                                        float phi = 2.f * float(M_PI) * r2;
+                                                        offset = Tu * (r * std::cos(phi))
+                                                               + Tv * (r * std::sin(phi));
+                                                    }
                                                     GfVec3f samplePos = light.position + offset;
                                                     GfVec3f toSample = samplePos - hitPos;
                                                     float sdist = toSample.GetLength();
@@ -607,10 +716,59 @@ void SpectralIntegrator::RenderFrame(
                                                 : 1.f;  // skipShadow path: no samples taken, fully lit
                                             if (visibility < 1e-4f) continue;
 
-                                            float contrib = NdotL * atten * intensity * float(1.0 / M_PI) * visibility;
-                                            rgb[0] += baseCol[0] * light.color[0] * contrib;
-                                            rgb[1] += baseCol[1] * light.color[1] * contrib;
-                                            rgb[2] += baseCol[2] * light.color[2] * contrib;
+                                            // Cook-Torrance GGX specular + energy-conserving diffuse,
+                                            // mirroring Fred's GPU viewport PBR (scene.frag distGGX/
+                                            // geomSmith/fresnelSchlick) so the viewport and the render
+                                            // agree at high intensity -- the compat path used to be
+                                            // diffuse-only, so the viewport's spec lobe read as
+                                            // "viewport too bright". Diffuse keeps the double-sided
+                                            // abs(N.L); spec uses the view-facing normal only (a baked
+                                            // two-sided card gets no phantom back-side highlight).
+                                            const GfVec3f Vv = -GfVec3f(rayDir).GetNormalized();
+                                            const GfVec3f Nv = (GfDot(N, Vv) >= 0.f) ? N : -N;
+                                            const float roughP = std::min(1.f, std::max(0.04f, mat.roughness));
+                                            const float metalP = std::min(1.f, std::max(0.f, mat.metallic));
+                                            const GfVec3f F0 = GfVec3f(0.04f) * (1.f - metalP) + baseCol * metalP;
+                                            float kdR = 1.f - metalP, kdG = kdR, kdB = kdR;
+                                            float spR = 0.f, spG = 0.f, spB = 0.f;
+                                            const float ndlS = std::max(GfDot(Nv, L), 0.f);
+                                            const float ndv  = std::max(GfDot(Nv, Vv), 0.f);
+                                            GfVec3f Hh = Vv + L;
+                                            const float hlen = Hh.GetLength();
+                                            if (hlen > 1e-6f && ndlS > 0.f) {
+                                                Hh = Hh / hlen;
+                                                const float aP = roughP * roughP, a2P = aP * aP;
+                                                const float ndh = std::max(GfDot(Nv, Hh), 0.f);
+                                                const float dd = ndh * ndh * (a2P - 1.f) + 1.f;
+                                                const float D = a2P / std::max(float(M_PI) * dd * dd, 1e-7f);
+                                                const float kk = (roughP + 1.f) * (roughP + 1.f) / 8.f;
+                                                const float G = (ndv / (ndv * (1.f - kk) + kk)) *
+                                                                (ndlS / (ndlS * (1.f - kk) + kk));
+                                                const float hv = std::max(GfDot(Hh, Vv), 0.f);
+                                                const float fr5 = std::pow(std::min(1.f, std::max(0.f, 1.f - hv)), 5.f);
+                                                const float sBase = D * G / std::max(4.f * ndv * ndlS, 1e-4f);
+                                                const float FR = F0[0] + (1.f - F0[0]) * fr5;
+                                                const float FG = F0[1] + (1.f - F0[1]) * fr5;
+                                                const float FB = F0[2] + (1.f - F0[2]) * fr5;
+                                                spR = FR * sBase; spG = FG * sBase; spB = FB * sBase;
+                                                kdR = (1.f - FR) * (1.f - metalP);
+                                                kdG = (1.f - FG) * (1.f - metalP);
+                                                kdB = (1.f - FB) * (1.f - metalP);
+                                            }
+                                            const float lite = atten * intensity * visibility;
+                                            const float invPi = float(1.0 / M_PI);
+                                            rgb[0] += (kdR * baseCol[0] * invPi * NdotL + spR * ndlS) * light.color[0] * lite;
+                                            rgb[1] += (kdG * baseCol[1] * invPi * NdotL + spG * ndlS) * light.color[1] * lite;
+                                            rgb[2] += (kdB * baseCol[2] * invPi * NdotL + spB * ndlS) * light.color[2] * lite;
+                                        }
+                                        // Constant hemispherical ambient fill (Fred
+                                        // Render3D "Ambient"): parity with the viewport's
+                                        // amb * albedo * (0.5 + 0.5*N.y) term.
+                                        if (camera.ambient > 0.f) {
+                                            float aw = camera.ambient * (0.5f + 0.5f * N[1]);
+                                            rgb[0] += baseCol[0] * aw;
+                                            rgb[1] += baseCol[1] * aw;
+                                            rgb[2] += baseCol[2] * aw;
                                         }
                                     }
                                     // Emissive
@@ -621,6 +779,23 @@ void SpectralIntegrator::RenderFrame(
                                     rgb[0] *= hitOpacity;
                                     rgb[1] *= hitOpacity;
                                     rgb[2] *= hitOpacity;
+                                    // Volumes: this compat branch `continue`s before the shared
+                                    // volume block far below, so geometry-hit rays NEVER reached
+                                    // the march (smoke only showed against the sky). March the
+                                    // camera->hit segment HERE and composite the volume OVER the
+                                    // premultiplied surface. hit.t is in RAY-parameter units; the
+                                    // helper converts via |dir| internally.
+                                    if (numVolumes > 0) {
+                                        auto vres = _MarchVolumesAlongSegment(
+                                            GfVec3f(ray.GetStartPoint()),
+                                            GfVec3f(ray.GetDirection()),
+                                            float(hit.t), 550.f, seed, int(pixIdx),
+                                            volumes, numVolumes, scene, bvh, camera);
+                                        rgb[0] = vres.rgb[0] + vres.transmittance * rgb[0];
+                                        rgb[1] = vres.rgb[1] + vres.transmittance * rgb[1];
+                                        rgb[2] = vres.rgb[2] + vres.transmittance * rgb[2];
+                                        hitOpacity = 1.f - vres.transmittance * (1.f - hitOpacity);
+                                    }
                                     // Accumulate directly as RGB (bypass spectral)
                                     accX[pixIdx] += rgb[0];
                                     accY[pixIdx] += rgb[1];
@@ -679,30 +854,32 @@ void SpectralIntegrator::RenderFrame(
                                     continue;
                                 }
 
-                                radiance = _ShadeSpectral(
-                                    *hit.tri,
-                                    static_cast<double>(hit.u),
-                                    static_cast<double>(hit.v),
-                                    lambda, mat, scene, hitPos, rayDir,
-                                    shadeBounces, bounceSeed, bvh, rayTime, &comps,
-                                    photonMap, gatherRadius, volumes, numVolumes,
-                                    int(pixIdx), &camera);
-
-                                // Premultiply by opacity (texture alpha modulates this)
-                                {
-                                    float hitOpacity = mat.opacity;
-                                    if (mat.baseColorTexId >= 0 && mat.textureBlend > 0.f) {
-                                        const SpectralTexture* oTex = scene.GetTexture(mat.baseColorTexId);
-                                        if (oTex && oTex->IsValid() && oTex->_channels >= 4) {
-                                            float w3 = 1.f - float(hit.u) - float(hit.v);
-                                            GfVec2f oUV = hit.tri->uv0 * w3 + hit.tri->uv1 * float(hit.u) + hit.tri->uv2 * float(hit.v);
-                                            int opx = std::max(0, std::min(int(oUV[0] * oTex->_width), oTex->_width - 1));
-                                            int opy = std::max(0, std::min(int(oUV[1] * oTex->_height), oTex->_height - 1));
-                                            size_t oIdx = (size_t(opy) * oTex->_width + opx) * oTex->_channels + 3;
-                                            if (oIdx < oTex->_pixels.size())
-                                                hitOpacity *= oTex->_pixels[oIdx];
-                                        }
+                                // Opacity (texture alpha modulates this): premultiplies
+                                // radiance below, and is the sample alpha for the
+                                // geometry-only fast path.
+                                float hitOpacity = mat.opacity;
+                                if (mat.baseColorTexId >= 0 && mat.textureBlend > 0.f) {
+                                    const SpectralTexture* oTex = scene.GetTexture(mat.baseColorTexId);
+                                    if (oTex && oTex->IsValid() && oTex->_channels >= 4) {
+                                        float w3 = 1.f - float(hit.u) - float(hit.v);
+                                        GfVec2f oUV = hit.tri->uv0 * w3 + hit.tri->uv1 * float(hit.u) + hit.tri->uv2 * float(hit.v);
+                                        int opx = std::max(0, std::min(int(oUV[0] * oTex->_width), oTex->_width - 1));
+                                        int opy = std::max(0, std::min(int(oUV[1] * oTex->_height), oTex->_height - 1));
+                                        size_t oIdx = (size_t(opy) * oTex->_width + opx) * oTex->_channels + 3;
+                                        if (oIdx < oTex->_pixels.size())
+                                            hitOpacity *= oTex->_pixels[oIdx];
                                     }
+                                }
+
+                                if (!(aovs && aovs->geometryOnly)) {
+                                    radiance = _ShadeSpectral(
+                                        *hit.tri,
+                                        static_cast<double>(hit.u),
+                                        static_cast<double>(hit.v),
+                                        lambda, mat, scene, hitPos, rayDir,
+                                        shadeBounces, bounceSeed, bvh, rayTime, &comps,
+                                        photonMap, gatherRadius, volumes, numVolumes,
+                                        int(pixIdx), &camera);
                                     radiance *= hitOpacity;
                                 }
 
@@ -753,9 +930,24 @@ void SpectralIntegrator::RenderFrame(
                                         }
                                     }
                                 }
+
+                                // Geometry-only pass: depth/ids/AOVs filled above; skip
+                                // light transport and the shared volume march. Alpha still
+                                // accumulates (the AOV image derives coverage from it).
+                                if (aovs && aovs->geometryOnly) {
+                                    accAlpha[pixIdx] += hitOpacity;
+                                    accCount[pixIdx]++;
+                                    continue;
+                                }
                             } else {
                                 // Primary ray miss
                                 radiance = 0.f;
+                                // Geometry-only pass: nothing to record on a miss
+                                // (alpha stays 0); skip dome + volume march.
+                                if (aovs && aovs->geometryOnly) {
+                                    accCount[pixIdx]++;
+                                    continue;
+                                }
                                 // Show HDRI background only when no volumes
                                 // (volume scenes use transparent BG for compositing)
                                 bool hasAnyVolume = false;
@@ -787,6 +979,7 @@ void SpectralIntegrator::RenderFrame(
                             // refactor of an originally ~390-line inline block.
                             float finalVolTrans = 1.f;
                             float vx = 0.f, vy = 0.f, vz = 0.f;
+                            float volLambda = 0.f;   // per-wavelength in-scatter (spectralVolumes)
                             float volFirstDenseT = 1e30f;
 
                             // Detect whether any volume in the list is in spectralVolumes
@@ -830,7 +1023,9 @@ void SpectralIntegrator::RenderFrame(
                                                             std::max(t0v[1],t1v[1]),
                                                             std::max(t0v[2],t1v[2])});
                                     tNear = std::max(tNear, 0.f);
-                                    float surfaceT = hit.valid() ? float(hit.t) : 1e30f;
+                                    // hit.t is in GfRay units (unnormalized camera dir);
+                                    // the slab t above is world (rd normalized) -- convert.
+                                    float surfaceT = hit.valid() ? float(hit.t) * rdLen : 1e30f;
                                     tFar = std::min(tFar, surfaceT);
                                     if (tNear < tFar) {
                                         // Single-volume helper call gives us this volume's
@@ -842,10 +1037,28 @@ void SpectralIntegrator::RenderFrame(
                                             &volume, 1, scene, bvh, camera);
                                         if (sub.firstDenseT < volFirstDenseT)
                                             volFirstDenseT = sub.firstDenseT;
-                                        // Per-wavelength composite (spectralVolumes mode)
-                                        int sc = (lambda < 500.f) ? 2 : (lambda < 580.f) ? 1 : 0;
-                                        float volSpec = sub.rgb[sc];
-                                        radiance = volSpec + sub.transmittance * radiance;
+                                        if (volume->spectralVolumes) {
+                                            // TRUE per-wavelength accumulation (Shading =
+                                            // Spectral): the marched in-scatter becomes this
+                                            // sample's wavelength response via the SMOOTH
+                                            // normalized bands (grey-preserving -- the old hard
+                                            // 3-band pick was the "rainbow confetti") and joins
+                                            // `radiance`, flowing through the same CIE observer /
+                                            // white-balance pipeline as surface light. Combined
+                                            // with the per-lambda chromatic extinction and
+                                            // chromatic shadow marches, volume colour is now
+                                            // wavelength-resolved instead of RGB-composited.
+                                            volLambda += finalVolTrans * RgbAtLambda(sub.rgb, lambda);
+                                        } else {
+                                            // FULL-RGB composite (RGB shading / per-volume flag
+                                            // off): accumulate all three channels into the RGB
+                                            // volume accumulators (nearer-volume transmittance
+                                            // weighted) exactly like the helper path.
+                                            vx += finalVolTrans * (0.4124f*sub.rgb[0] + 0.3576f*sub.rgb[1] + 0.1805f*sub.rgb[2]);
+                                            vy += finalVolTrans * (0.2126f*sub.rgb[0] + 0.7152f*sub.rgb[1] + 0.0722f*sub.rgb[2]);
+                                            vz += finalVolTrans * (0.0193f*sub.rgb[0] + 0.1192f*sub.rgb[1] + 0.9505f*sub.rgb[2]);
+                                        }
+                                        radiance *= sub.transmittance;
                                         finalVolTrans *= sub.transmittance;
                                     }
                                 }
@@ -855,7 +1068,9 @@ void SpectralIntegrator::RenderFrame(
                                 GfVec3f rd(ray.GetDirection());
                                 float rdLen = rd.GetLength();
                                 if (rdLen > 1e-8f) rd /= rdLen;
-                                float surfaceT = hit.valid() ? float(hit.t) : 1e30f;
+                                // hit.t is in GfRay units (unnormalized camera dir);
+                                // the helper marches world units -- convert.
+                                float surfaceT = hit.valid() ? float(hit.t) * rdLen : 1e30f;
                                 auto vr = _MarchVolumesAlongSegment(
                                     ro, rd, surfaceT, lambda, seed, pixIdx,
                                     volumes, numVolumes, scene, bvh, camera);
@@ -866,6 +1081,10 @@ void SpectralIntegrator::RenderFrame(
                                 radiance *= vr.transmittance;
                                 finalVolTrans = vr.transmittance;
                             }
+
+                            // Spectral-volume in-scatter joins the wavelength sample here so
+                            // the firefly clamp and RadianceToXYZ below cover it.
+                            radiance += volLambda;
 
                             // Per-sample alpha (uses material opacity + texture alpha)
                             {
@@ -909,6 +1128,12 @@ void SpectralIntegrator::RenderFrame(
                                           / (3.f * accCount[pixIdx] + 1e-6f);
                                 float maxVal = std::max(100.f, avg * 100.f);
                                 radiance = std::min(radiance, maxVal);
+                                // Volume energy skipped this clamp entirely -- bounce-lit
+                                // fog spikes reached the buffer unclamped and read as
+                                // "detail" to the denoiser. Same cap, per channel.
+                                vx = std::min(vx, maxVal);
+                                vy = std::min(vy, maxVal);
+                                vz = std::min(vz, maxVal);
                             }
 
                             GfVec3f xyz = SpectralSpectrum::RadianceToXYZ(radiance, lambda);
@@ -981,6 +1206,35 @@ void SpectralIntegrator::RenderFrame(
                             convergedCount, numPixels,
                             100.f * convergedCount / numPixels);
                 }
+            }
+
+            // Progressive viewport: publish the CURRENT running averages
+            // (RGB + alpha only -- AOVs/depth wait for the final write) and
+            // let the host show them / cancel.
+            if (camera.progressCb && passEnd < spp) {
+                for (size_t i = 0; i < numPixels; ++i) {
+                    int n = accCount[i];
+                    if (n == 0) n = 1;
+                    const float invN = 1.f / float(n);
+                    GfVec3f rgb;
+                    if (s_scanlineCompat) {
+                        rgb = GfVec3f(accX[i] * invN, accY[i] * invN, accZ[i] * invN);
+                    } else {
+                        rgb = SpectralSpectrum::XYZtoRGB(
+                            accX[i] * invN, accY[i] * invN, accZ[i] * invN,
+                            static_cast<SpectralSpectrum::ColorSpace>(colorSpace));
+                        rgb[0] *= wbCorrection[0];
+                        rgb[1] *= wbCorrection[1];
+                        rgb[2] *= wbCorrection[2];
+                    }
+                    float* px = pixels + i * 4;
+                    px[0] = std::max(0.f, rgb[0]);
+                    px[1] = std::max(0.f, rgb[1]);
+                    px[2] = std::max(0.f, rgb[2]);
+                    px[3] = (accCount[i] > 0)
+                        ? std::min(1.f, accAlpha[i] / float(accCount[i])) : 0.f;
+                }
+                if (!camera.progressCb(passEnd, spp)) break;   // host cancelled
             }
         }
 
@@ -1456,6 +1710,42 @@ static SpectralMaterial _ResolveMaterial(
 }
 
 // ---------------------------------------------------------------------------
+// NEE contribution for one sampled light. SamplePdf returns 0 for DELTA
+// lights (Distant sun, radius-0 point/spot) BY DESIGN -- those take no pdf
+// divide and no MIS (BSDF sampling can never hit a delta light), so the
+// old "pdfLight > 1e-10f ? ... : 0" guard silently killed every sun and
+// point light. Area-sampled lights (Sphere/Spot r>0, Rect) use a
+// solid-angle/area pdf that already encodes the distance geometry, so
+// 'intensity' must become emitter radiance instead of ALSO taking the
+// 1/d^2 Attenuation() -- applying both was a double distance penalty that
+// left scenes lit only by Dome lights. Sphere: le*solidAngle/pdf reduces
+// to I/d^2 (and the >100-unit "distant sphere, no falloff" design case
+// still comes out constant because Attenuation()==1 there). Spot keeps
+// its cone factor via atten*d^2.
+static inline float _NeeContrib(const SpectralLight& light,
+                                const GfVec3f& hitPos,
+                                float bsdf, float lightRad, float atten,
+                                float misW, float shadowTransmit,
+                                float pdfLight)
+{
+    if (pdfLight <= 1e-10f)   // delta light: evaluate directly
+        return bsdf * lightRad * atten * shadowTransmit;
+    if (light.type == SpectralLight::Type::Sphere ||
+        light.type == SpectralLight::Type::Spot) {
+        const float r2 = light.radius * light.radius;
+        const GfVec3f d = light.position - hitPos;
+        const float d2 = std::max(1e-6f, d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
+        const float le = lightRad / std::max(3.14159f * r2, 1e-6f) * atten * d2;
+        return bsdf * le * misW * shadowTransmit / pdfLight;
+    }
+    if (light.type == SpectralLight::Type::Rect) {
+        const float area = std::max(light.width * light.height, 1e-6f);
+        return bsdf * (lightRad / area) * misW * shadowTransmit / pdfLight;
+    }
+    // Dome: EnvironmentEmission is already radiance; Attenuation() == 1.
+    return bsdf * lightRad * atten * misW * shadowTransmit / pdfLight;
+}
+
 // _ShadeSpectral — iterative path tracing with Disney BSDF
 // ---------------------------------------------------------------------------
 float SpectralIntegrator::_ShadeSpectral(
@@ -1468,18 +1758,6 @@ float SpectralIntegrator::_ShadeSpectral(
     const SpectralVolume* const* volumes, int numVolumes,
     int pixIdx, const SpectralCamera* camera)
 {
-    // DIAG1: confirm _ShadeSpectral is being called, show matId
-    {
-        static int _d1 = 0;
-        if (_d1 < 4) {
-            _d1++;
-            fprintf(stderr, "DIAG1 _ShadeSpectral call: matId=%d setSize=%zu inSet=%d\n",
-                 tri.materialId,
-                 s_noShadowReceiveMatIds ? s_noShadowReceiveMatIds->size() : (size_t)0,
-                 (s_noShadowReceiveMatIds && s_noShadowReceiveMatIds->count(tri.materialId) > 0) ? 1 : 0);
-        }
-    }
-
     // ScanlineRender compat: no lights = constant shader (full material colour)
     if (s_scanlineCompat && scene.GetLights().empty()) {
         // Resolve texture before returning constant colour
@@ -1685,7 +1963,8 @@ float SpectralIntegrator::_ShadeSpectral(
                         if (suv[0]<0||suv[0]>1||suv[1]<0||suv[1]>1||suv[2]<0||suv[2]>1) continue;
                         float d = vol->SampleDensity(suv[0], suv[1], suv[2]) * vol->densityMult;
                         if (d < 1e-5f) continue;
-                        shadowTransmit *= std::exp(-d * vol->extinction * sDt);
+                        shadowTransmit *= std::exp(-d * vol->extinction
+                                                   * VolChromaW(vol, lambda) * sDt);
                         if (shadowTransmit < 0.01f) break;
                     }
                     if (shadowTransmit < 0.01f) break;
@@ -1705,9 +1984,8 @@ float SpectralIntegrator::_ShadeSpectral(
                     ? SpectralBSDF::MISWeight(pdfLight, pdfBsdf)
                     : 1.f;
 
-                float contrib = (pdfLight > 1e-10f)
-                              ? bsdf * lightRad * atten * misW * shadowTransmit / pdfLight
-                              : 0.f;
+                float contrib = _NeeContrib(light, hitPos, bsdf, lightRad,
+                                            atten, misW, shadowTransmit, pdfLight);
                 radiance += contrib;
                 if (comps) {
                     comps->direct += contrib;
@@ -1947,8 +2225,9 @@ float SpectralIntegrator::_ShadeSpectral(
 
         SpectralBVH::Hit bounceHit = bvh.Intersect(bounceRay, rayTime);
 
-        // Volume marching along bounce-ray segment. DISABLED for diagnosis.
-#if 0
+        // Volume marching along bounce-ray segment. RE-ENABLED 2026-07-27: the
+        // "volume renders nothing" diagnosis this was parked for turned out to
+        // be the spp==1 preview path in the caller, not the march.
         if (numVolumes > 0 && bounceHit.valid() && camera) {
             auto vr = _MarchVolumesAlongSegment(
                 GfVec3f(bounceRay.GetStartPoint()),
@@ -1956,13 +2235,12 @@ float SpectralIntegrator::_ShadeSpectral(
                 float(bounceHit.t),
                 lambda, rngSeed + unsigned(bounce)*97u, pixIdx,
                 volumes, numVolumes, scene, bvh, *camera);
-            int sc = (lambda < 500.f) ? 2 : (lambda < 580.f) ? 1 : 0;
-            float volSpec = vr.rgb[sc];
+            // Smooth-band response, not a hard channel pick (chroma-spike fix).
+            float volSpec = RgbAtLambda(vr.rgb, lambda);
             radiance += pathThroughput * volSpec;
             pathThroughput *= vr.transmittance;
             if (comps) comps->indirect += pathThroughput * volSpec;
         }
-#endif
 
         // Beer-Lambert absorption: attenuate for distance traveled inside volume
         if (insideVolumeMat && bounceHit.valid()) {
@@ -1972,8 +2250,8 @@ float SpectralIntegrator::_ShadeSpectral(
         }
 
         if (!bounceHit.valid()) {
-            // Volume marching along bounce-miss segment. DISABLED for diagnosis.
-#if 0
+            // Volume marching along bounce-miss segment. RE-ENABLED 2026-07-27
+            // (see the bounce-hit march above).
             if (numVolumes > 0 && camera) {
                 auto vr = _MarchVolumesAlongSegment(
                     GfVec3f(bounceRay.GetStartPoint()),
@@ -1981,13 +2259,12 @@ float SpectralIntegrator::_ShadeSpectral(
                     1e30f,
                     lambda, rngSeed + unsigned(bounce)*97u, pixIdx,
                     volumes, numVolumes, scene, bvh, *camera);
-                int sc = (lambda < 500.f) ? 2 : (lambda < 580.f) ? 1 : 0;
-                float volSpec = vr.rgb[sc];
+                // Smooth-band response, not a hard channel pick (chroma-spike fix).
+                float volSpec = RgbAtLambda(vr.rgb, lambda);
                 radiance += pathThroughput * volSpec;
                 pathThroughput *= vr.transmittance;
                 if (comps) comps->indirect += pathThroughput * volSpec;
             }
-#endif
 
             // Miss — check dome lights for BSDF-side MIS contribution
             if (!scene.GetLights().empty()) {
@@ -2116,7 +2393,8 @@ float SpectralIntegrator::_ShadeSpectral(
                             if (suv[0]<0||suv[0]>1||suv[1]<0||suv[1]>1||suv[2]<0||suv[2]>1) continue;
                             float d = vol->SampleDensity(suv[0], suv[1], suv[2]) * vol->densityMult;
                             if (d < 1e-5f) continue;
-                            shadowTransmit *= std::exp(-d * vol->extinction * sDt);
+                            shadowTransmit *= std::exp(-d * vol->extinction
+                                                   * VolChromaW(vol, lambda) * sDt);
                             if (shadowTransmit < 0.01f) break;
                         }
                         if (shadowTransmit < 0.01f) break;
@@ -2136,9 +2414,9 @@ float SpectralIntegrator::_ShadeSpectral(
                         ? SpectralBSDF::MISWeight(pdfLight, pdfBsdf)
                         : 1.f;
 
-                    if (pdfLight > 1e-10f) {
-                        bounceRadiance += bsdf * lightRad * atten * misW * shadowTransmit / pdfLight;
-                    }
+                    bounceRadiance += _NeeContrib(light, bounceOrigin, bsdf,
+                                                  lightRad, atten, misW,
+                                                  shadowTransmit, pdfLight);
                 }
             }
         }
@@ -2247,6 +2525,13 @@ SpectralIntegrator::_MarchVolumesAlongSegment(
         GfVec3f rd(dir);
         float rdLen = rd.GetLength();
         if (rdLen > 1e-8f) rd /= rdLen;
+        // maxT arrives in the CALLER'S ray-parameter units ("dir need not be
+        // normalized" -- e.g. a GfRay hit.t against an unnormalized camera
+        // direction). The march works in WORLD units along the normalized rd,
+        // so convert: world = t_param * |dir|. For unit-dir callers this is a
+        // no-op. Without it every geometry-bounded ray clamped tFar to ~hit.t/
+        // |dir| (a fraction of tNear) and the volume marched ONLY on sky rays.
+        const float maxTw = (maxT < 1e29f && rdLen > 1e-8f) ? maxT * rdLen : maxT;
 
         GfVec3f invDir(1.f/(std::abs(rd[0])>1e-8f?rd[0]:1e-8f),
                        1.f/(std::abs(rd[1])>1e-8f?rd[1]:1e-8f),
@@ -2267,8 +2552,8 @@ SpectralIntegrator::_MarchVolumesAlongSegment(
                                 std::max(t0v[2],t1v[2])});
         tNear = std::max(tNear, 0.f);
 
-        // Surface hit limits the far distance (passed in as maxT)
-        tFar = std::min(tFar, maxT);
+        // Surface hit limits the far distance (converted to world units above)
+        tFar = std::min(tFar, maxTw);
 
         if (tNear < tFar) {
             // Step size from quality parameter
@@ -2362,17 +2647,9 @@ SpectralIntegrator::_MarchVolumesAlongSegment(
                 // Track distance to first dense voxel (for depth AOV)
                 if (t < result.firstDenseT) result.firstDenseT = t;
 
-                // Beer-Lambert extinction
-                float sigma_t = density * volume->extinction;
-
-                // Chromatic extinction
-                if (volume->chromaticExtinction) {
-                    float wt;
-                    if (lambda < 500.f) wt = volume->sigmaB;
-                    else if (lambda < 580.f) wt = volume->sigmaG;
-                    else wt = volume->sigmaR;
-                    sigma_t *= wt;
-                }
+                // Beer-Lambert extinction (chromatic: smooth per-lambda weight)
+                float sigma_t = density * volume->extinction
+                              * VolChromaW(volume, lambda);
 
                 float stepTrans = std::exp(-sigma_t * dt);
                 float absorption = 1.f - stepTrans;
@@ -2472,9 +2749,13 @@ SpectralIntegrator::_MarchVolumesAlongSegment(
                                 GfVec3f sp = p + sDir * sT;
                                 GfVec3f suv = volume->WorldToNorm(sp);
                                 if (suv[0]<0||suv[0]>1||suv[1]<0||suv[1]>1||suv[2]<0||suv[2]>1) break;
-                                float sd = volume->SampleDensity(suv[0],suv[1],suv[2]) * volume->densityMult;
+                                // SampleDensity already applies densityMult -- multiplying
+                                // again squared it in the self-shadow march (16x over-
+                                // extinction at mult 4: smoke rendered far too dark).
+                                float sd = volume->SampleDensity(suv[0],suv[1],suv[2]);
                                 if (sd < 1e-5f) continue;  // skip empty -- adaptive
-                                shadowTrans *= std::exp(-sd * volume->extinction * volume->shadowDensity * sDt);
+                                shadowTrans *= std::exp(-sd * volume->extinction * volume->shadowDensity
+                                                        * VolChromaW(volume, lambda) * sDt);
                                 if (shadowTrans<0.001f) break;
                             }
 
@@ -2511,9 +2792,10 @@ SpectralIntegrator::_MarchVolumesAlongSegment(
                                         GfVec3f osp = p + sDir * ot;
                                         GfVec3f osuv = ovol->WorldToNorm(osp);
                                         if (osuv[0]<0||osuv[0]>1||osuv[1]<0||osuv[1]>1||osuv[2]<0||osuv[2]>1) continue;
-                                        float od = ovol->SampleDensity(osuv[0],osuv[1],osuv[2]) * ovol->densityMult;
+                                        float od = ovol->SampleDensity(osuv[0],osuv[1],osuv[2]);   // densityMult already applied
                                         if (od < 1e-5f) continue;
-                                        shadowTrans *= std::exp(-od * ovol->extinction * oDt);
+                                        shadowTrans *= std::exp(-od * ovol->extinction
+                                                                * VolChromaW(ovol, lambda) * oDt);
                                         if (shadowTrans < 0.001f) break;
                                     }
                                     if (shadowTrans < 0.001f) break;

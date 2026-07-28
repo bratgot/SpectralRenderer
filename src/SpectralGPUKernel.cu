@@ -243,6 +243,30 @@ static __forceinline__ __device__ float3 shadeNormal(float3 n)
 // ---------------------------------------------------------------------------
 // Light emission
 // ---------------------------------------------------------------------------
+// Smooth RGB -> single-wavelength response (raised-cosine bands): the hard
+// 3-band pick deposited a PURE channel per sample in the volume bounce
+// composites -- saturated chroma spikes no denoiser cleans. CPU parity:
+// SpectralIntegrator.cpp RgbAtLambda.
+static __forceinline__ __device__ float rgbAtLambdaGPU(float3 rgb, float lambda) {
+    float tB = fminf(fabsf((lambda - 460.f) / 80.f), 1.f);
+    float tG = fminf(fabsf((lambda - 545.f) / 80.f), 1.f);
+    float tR = fminf(fabsf((lambda - 625.f) / 80.f), 1.f);
+    float wB = 0.5f + 0.5f * cosf(tB * 3.14159265f);
+    float wG = 0.5f + 0.5f * cosf(tG * 3.14159265f);
+    float wR = 0.5f + 0.5f * cosf(tR * 3.14159265f);
+    float sum = wR + wG + wB;
+    if (sum < 1e-6f) return (rgb.x + rgb.y + rgb.z) / 3.f;
+    return (rgb.x * wR + rgb.y * wG + rgb.z * wB) / sum;
+}
+
+// CPU parity: SpectralIntegrator.cpp VolChromaW -- smooth normalized
+// chromatic-extinction weight (grey-preserving; hard 3-band = confetti).
+static __forceinline__ __device__ float volChromaWGPU(
+    const spectral_gpu::GPUVolume& v, float lambda) {
+    if (!v.chromaticExtinction) return 1.f;
+    return rgbAtLambdaGPU(make_float3(v.sigmaR, v.sigmaG, v.sigmaB), lambda);
+}
+
 static __forceinline__ __device__ float blackbodyNorm(float lambda_nm, float temp)
 {
     if (temp < 100.f) return 0.f;
@@ -306,6 +330,49 @@ static __forceinline__ __device__ float lightAttenuation(const GPULight& light, 
     float atten = 1.f / fmaxf(dist2, 0.001f);
     if (light.type == 4) atten *= spotAttenuation(light, hitPos);
     return atten;
+}
+
+// Dome ambient OCCLUSION factor (CPU parity, SpectralIntegrator.cpp compat
+// dome branch): 4 short cosine hemisphere rays capped at aoRadius scale the
+// sky term down to 15% when fully blocked. Without this the GPU dome was
+// UNOCCLUDED and GPU blacks sat visibly lighter than CPU.
+static __forceinline__ __device__ float domeAmbientOcclusion(float3 hitPos, float3 N,
+                                                             unsigned int seedBase)
+{
+    const float aoR = params.aoRadius > 0.f ? params.aoRadius : 5.f;
+    const int aoN = 4;
+    float3 Nn = (N.y >= 0.f) ? N : make_float3(-N.x, -N.y, -N.z);   // sky side
+    float3 refA = (fabsf(Nn.y) < 0.99f) ? make_float3(0.f, 1.f, 0.f)
+                                        : make_float3(1.f, 0.f, 0.f);
+    float3 Ta = make_float3(Nn.y*refA.z - Nn.z*refA.y,
+                            Nn.z*refA.x - Nn.x*refA.z,
+                            Nn.x*refA.y - Nn.y*refA.x);
+    float tl = sqrtf(Ta.x*Ta.x + Ta.y*Ta.y + Ta.z*Ta.z);
+    if (tl > 1e-6f) { Ta.x/=tl; Ta.y/=tl; Ta.z/=tl; }
+    else            { Ta = make_float3(1.f, 0.f, 0.f); }
+    float3 Ba = make_float3(Nn.y*Ta.z - Nn.z*Ta.y,
+                            Nn.z*Ta.x - Nn.x*Ta.z,
+                            Nn.x*Ta.y - Nn.y*Ta.x);
+    float3 aOrig = make_float3(hitPos.x + Nn.x*0.005f,
+                               hitPos.y + Nn.y*0.005f,
+                               hitPos.z + Nn.z*0.005f);
+    float open = 0.f;
+    for (int ai = 0; ai < aoN; ++ai) {
+        unsigned int aseed = seedBase + 77u + (unsigned)ai*53u;
+        float u1 = hashRNG(aseed), u2 = hashRNG(aseed + 1u);
+        float rr = sqrtf(u1);
+        float ph = 6.28318530718f * u2;
+        float zz = sqrtf(fmaxf(0.f, 1.f - u1));
+        float3 d = make_float3(Ta.x*(rr*cosf(ph)) + Ba.x*(rr*sinf(ph)) + Nn.x*zz,
+                               Ta.y*(rr*cosf(ph)) + Ba.y*(rr*sinf(ph)) + Nn.y*zz,
+                               Ta.z*(rr*cosf(ph)) + Ba.z*(rr*sinf(ph)) + Nn.z*zz);
+        unsigned int ap0=0,ap1=0,ap2=0,ap3=__float_as_uint(1e30f),ap4=0,ap5=0,ap6=0;
+        optixTrace(params.traversable, aOrig, d, 0.001f, aoR, 0.f,
+                   OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
+                   0,1,0, ap0,ap1,ap2,ap3,ap4,ap5,ap6);
+        if (ap4 == 0u) open += 1.f;
+    }
+    return 0.15f + 0.85f * (open / float(aoN));
 }
 
 // ---------------------------------------------------------------------------
@@ -1138,6 +1205,7 @@ static __forceinline__ __device__ float shadeHit(
                             (svol.bboxMax.z-svol.bboxMin.z)/svol.resZ);
                         float sDt = svoxel * 2.f;
                         int maxSS = min(32, int((stFar-stNear)/sDt)+1);
+                        const float svolW = volChromaWGPU(svol, lambda);
                         for (int ss = 0; ss < maxSS; ++ss) {
                             float st = stNear + ss * sDt;
                             if (st >= stFar) break;
@@ -1147,7 +1215,7 @@ static __forceinline__ __device__ float shadeHit(
                             if (su<0||su>1||sv<0||sv>1||sw<0||sw>1) continue;
                             float d = sampleDensity(svol, su, sv, sw);
                             if (d < 1e-5f) continue;
-                            shadowTransmit *= expf(-d * svol.extinction * sDt);
+                            shadowTransmit *= expf(-d * svol.extinction * svolW * sDt);
                             if (shadowTransmit < 0.01f) break;
                         }
                         if (shadowTransmit < 0.01f) break;
@@ -1265,13 +1333,24 @@ static __forceinline__ __device__ float sampleNanoGrid(
 }
 #endif
 
+// CPU parity: SpectralVolume::_SampleTrilinear is CORNER-aligned
+// (fx = u*(N-1)), while tex3D normalized coords are texel-CENTER-aligned
+// (texel = u*N - 0.5). Remap so the hardware fetch lands on the CPU's
+// sample position: u' = (u*(N-1)+0.5)/N  =>  u'*N-0.5 = u*(N-1). Without
+// this the GPU samples a slightly compressed field (~13% low density at
+// steep fog shells -> ~17% dimmer fog glow than CPU).
+static __forceinline__ __device__ float cornerU(float u, int n)
+{
+    return (u * (n - 1) + 0.5f) / n;
+}
+
 static __forceinline__ __device__ float sampleDensity(const spectral_gpu::GPUVolume& vol, float u, float v, float w)
 {
 #ifdef SPECTRAL_USE_NANOVDB
     if (vol.nanoGridDensity)
         return sampleNanoGrid(vol.nanoGridDensity, u, v, w, vol) * vol.densityMult;
 #endif
-    return tex3D<float>(vol.densityTex, u, v, w) * vol.densityMult;
+    return tex3D<float>(vol.densityTex, cornerU(u, vol.resX), cornerU(v, vol.resY), cornerU(w, vol.resZ)) * vol.densityMult;
 }
 
 static __forceinline__ __device__ float sampleTemp(const spectral_gpu::GPUVolume& vol, float u, float v, float w)
@@ -1281,7 +1360,7 @@ static __forceinline__ __device__ float sampleTemp(const spectral_gpu::GPUVolume
         return sampleNanoGrid(vol.nanoGridTemp, u, v, w, vol);
 #endif
     if (!vol.temperatureTex) return 0.f;
-    return tex3D<float>(vol.temperatureTex, u, v, w);
+    return tex3D<float>(vol.temperatureTex, cornerU(u, vol.resX), cornerU(v, vol.resY), cornerU(w, vol.resZ));
 }
 
 static __forceinline__ __device__ float sampleFlame(const spectral_gpu::GPUVolume& vol, float u, float v, float w)
@@ -1291,7 +1370,7 @@ static __forceinline__ __device__ float sampleFlame(const spectral_gpu::GPUVolum
         return sampleNanoGrid(vol.nanoGridFlame, u, v, w, vol);
 #endif
     if (!vol.flameTex) return 0.f;
-    return tex3D<float>(vol.flameTex, u, v, w);
+    return tex3D<float>(vol.flameTex, cornerU(u, vol.resX), cornerU(v, vol.resY), cornerU(w, vol.resZ));
 }
 
 static __forceinline__ __device__ void worldToVolUV(
@@ -1371,9 +1450,10 @@ static __forceinline__ __device__ float gpuNoiseFBm(float x, float y, float z, i
 static __forceinline__ __device__ void marchSingleVolume(
     const spectral_gpu::GPUVolume& vol,
     float3 ro, float3 rdRaw, float surfaceT, float lambda, unsigned int seed,
-    float3& outRGB, float& outTransmittance)
+    float3& outRGB, float& outTransmittance, int spectralOn, float& outLambda)
 {
     outRGB = make_float3(0.f, 0.f, 0.f);
+    outLambda = 0.f;
     outTransmittance = 1.f;
 
     float rdLen = sqrtf(rdRaw.x*rdRaw.x + rdRaw.y*rdRaw.y + rdRaw.z*rdRaw.z);
@@ -1405,6 +1485,10 @@ static __forceinline__ __device__ void marchSingleVolume(
     float jitterOff=vol.jitter?hashRNG(seed)*dt:0.f;
     float t=tNear+jitterOff;
     int rmode=vol.renderMode;
+    // CPU parity: chromatic extinction weight is per (volume, lambda) --
+    // constant across the march, hoisted out of the step loop.
+    const float chromaW = volChromaWGPU(vol, lambda);
+    const bool perLambda = spectralOn && vol.spectralVolumes;
 
     for (int step=0; step<maxSteps && t<tFar; ++step, t+=dt) {
         float px=ro.x+rd.x*t, py=ro.y+rd.y*t, pz=ro.z+rd.z*t;
@@ -1436,12 +1520,7 @@ static __forceinline__ __device__ void marchSingleVolume(
             if (density < 1e-5f) continue;
         }
 
-        float sigma_t = density * vol.extinction;
-        // Phase 14: chromatic extinction — wavelength-dependent absorption
-        if (vol.chromaticExtinction) {
-            float wt = (lambda < 500.f) ? vol.sigmaB : (lambda < 580.f) ? vol.sigmaG : vol.sigmaR;
-            sigma_t *= wt;
-        }
+        float sigma_t = density * vol.extinction * chromaW;
         float stepTrans = expf(-sigma_t*dt);
         float absorption = 1.f - stepTrans;
         float3 stepRGB = make_float3(0.f, 0.f, 0.f);
@@ -1532,7 +1611,7 @@ static __forceinline__ __device__ void marchSingleVolume(
                         if(su<0||su>1||sv<0||sv>1||sw<0||sw>1) break;
                         float sd = sampleDensity(vol,su,sv,sw);
                         if (sd < 1e-5f) continue;
-                        shadowTrans*=expf(-sd*vol.extinction*vol.shadowDensity*sDt);
+                        shadowTrans*=expf(-sd*vol.extinction*chromaW*vol.shadowDensity*sDt);
                         if(shadowTrans<0.001f) break;
                     }
                     // Cross-volume shadows
@@ -1550,6 +1629,7 @@ static __forceinline__ __device__ void marchSingleVolume(
                             if (otNear >= otFar) continue;
                             float oVoxel=fmaxf(fmaxf((ovol.bboxMax.x-ovol.bboxMin.x)/ovol.resX,(ovol.bboxMax.y-ovol.bboxMin.y)/ovol.resY),(ovol.bboxMax.z-ovol.bboxMin.z)/ovol.resZ);
                             float oDt=oVoxel*2.f;
+                            const float ovolW = volChromaWGPU(ovol,lambda);
                             int oSteps=min(16,int((otFar-otNear)/oDt)+1);
                             for (int os=0;os<oSteps;++os) {
                                 float ot=otNear+os*oDt;
@@ -1559,7 +1639,7 @@ static __forceinline__ __device__ void marchSingleVolume(
                                 if(osu<0||osu>1||osv<0||osv>1||osw<0||osw>1) continue;
                                 float od=sampleDensity(ovol,osu,osv,osw);
                                 if(od<1e-5f) continue;
-                                shadowTrans*=expf(-od*ovol.extinction*oDt);
+                                shadowTrans*=expf(-od*ovol.extinction*ovolW*oDt);
                                 if(shadowTrans<0.001f) break;
                             }
                             if(shadowTrans<0.001f) break;
@@ -1610,7 +1690,12 @@ static __forceinline__ __device__ void marchSingleVolume(
             // HDRI virtual lights — directional or sphere for soft shadows
             for (int vli = 0; vli < params.numVirtualLights; ++vli) {
                 float3 vlDir = params.gpuVirtualLights[vli].dir;
-                float3 vlCol = params.gpuVirtualLights[vli].color;
+                // CPU parity: HDRI virtual-light colour is scaled by the
+                // volume's envIntensity response knob (volLights build).
+                float3 vlCol = make_float3(
+                    params.gpuVirtualLights[vli].color.x * vol.envIntensity,
+                    params.gpuVirtualLights[vli].color.y * vol.envIntensity,
+                    params.gpuVirtualLights[vli].color.z * vol.envIntensity);
                 float vlRadius = params.gpuVirtualLights[vli].radius;
 
                 float3 lDir;
@@ -1673,7 +1758,7 @@ static __forceinline__ __device__ void marchSingleVolume(
                         if(su<0||su>1||sv<0||sv>1||sw<0||sw>1) break;
                         float sd = sampleDensity(vol,su,sv,sw);
                         if (sd < 1e-5f) continue;
-                        shadowTrans*=expf(-sd*vol.extinction*vol.shadowDensity*sDt);
+                        shadowTrans*=expf(-sd*vol.extinction*chromaW*vol.shadowDensity*sDt);
                         if(shadowTrans<0.001f) break;
                     }
                     // Cross-volume shadows for virtual lights
@@ -1691,6 +1776,7 @@ static __forceinline__ __device__ void marchSingleVolume(
                             if (otNear >= otFar) continue;
                             float oVoxel=fmaxf(fmaxf((ovol.bboxMax.x-ovol.bboxMin.x)/ovol.resX,(ovol.bboxMax.y-ovol.bboxMin.y)/ovol.resY),(ovol.bboxMax.z-ovol.bboxMin.z)/ovol.resZ);
                             float oDt=oVoxel*2.f;
+                            const float ovolW = volChromaWGPU(ovol,lambda);
                             int oSteps=min(16,int((otFar-otNear)/oDt)+1);
                             for (int os=0;os<oSteps;++os) {
                                 float ot=otNear+os*oDt;
@@ -1700,7 +1786,7 @@ static __forceinline__ __device__ void marchSingleVolume(
                                 if(osu<0||osu>1||osv<0||osv>1||osw<0||osw>1) continue;
                                 float od=sampleDensity(ovol,osu,osv,osw);
                                 if(od<1e-5f) continue;
-                                shadowTrans*=expf(-od*ovol.extinction*oDt);
+                                shadowTrans*=expf(-od*ovol.extinction*ovolW*oDt);
                                 if(shadowTrans<0.001f) break;
                             }
                             if(shadowTrans<0.001f) break;
@@ -1750,7 +1836,9 @@ static __forceinline__ __device__ void marchSingleVolume(
                 if (params.lights[li].type==3) {
                     float domeI = params.lights[li].intensity;
                     if (domeI < 0.001f) break;  // dome disabled
-                    float dW=vol.scattering*density;
+                    // CPU parity: dome ambient is scaled by the volume's
+                    // envDiffuse weight and envIntensity response knobs.
+                    float dW=vol.scattering*density*vol.envDiffuse*vol.envIntensity;
                     float3 domeCol;
                     if (params.hasEnvSH) {
                         // SH L0+L1 evaluated at negative ray direction
@@ -1776,23 +1864,31 @@ static __forceinline__ __device__ void marchSingleVolume(
                     break;
                 }
             }
-            // Phase 14: analytical MS approximation (Wrenninge 2015)
-            // Only applies when there's actual incident light (not self-illuminating)
-            if (vol.msApprox && vol.scattering > 0.01f && (stepRGB.x + stepRGB.y + stepRGB.z) > 0.001f) {
+            // Phase 14: analytical MS approximation (Wrenninge 2015).
+            // CPU parity (SpectralIntegrator march): unconditional, NO
+            // incident-light gate and NO lightScale -- the old gated/scaled
+            // form left GPU fog ~40x dimmer than CPU (MS dominates fog glow
+            // ~70:1 over single-scatter in thin directional-lit media).
+            if (vol.msApprox && vol.scattering > 0.01f) {
                 float albedo = vol.scattering / fmaxf(vol.extinction, 0.01f);
                 float msB = albedo / fmaxf(1.f - albedo * vol.gForward * vol.lobeMix, 0.01f);
-                // Scale MS by ratio of actual light to expected light (so it's proportional)
-                float lightScale = fminf((stepRGB.x + stepRGB.y + stepRGB.z) * 0.5f, 1.f);
-                stepRGB.x += vol.msTint.x * density * vol.scattering * msB * 0.3f * lightScale;
-                stepRGB.y += vol.msTint.y * density * vol.scattering * msB * 0.3f * lightScale;
-                stepRGB.z += vol.msTint.z * density * vol.scattering * msB * 0.3f * lightScale;
+                stepRGB.x += vol.msTint.x * density * vol.scattering * msB * 0.3f;
+                stepRGB.y += vol.msTint.y * density * vol.scattering * msB * 0.3f;
+                stepRGB.z += vol.msTint.z * density * vol.scattering * msB * 0.3f;
             }
             stepRGB.x*=vol.intensity; stepRGB.y*=vol.intensity; stepRGB.z*=vol.intensity;
         }
 
-        outRGB.x += outTransmittance * absorption * stepRGB.x;
-        outRGB.y += outTransmittance * absorption * stepRGB.y;
-        outRGB.z += outTransmittance * absorption * stepRGB.z;
+        if (perLambda) {
+            // CPU parity (SpectralIntegrator volLambda): spectral volumes
+            // deposit per-lambda in-scatter that rides the caller's radiance
+            // accumulator (CIE observer + white balance), not the RGB composite.
+            outLambda += outTransmittance * absorption * rgbAtLambdaGPU(stepRGB, lambda);
+        } else {
+            outRGB.x += outTransmittance * absorption * stepRGB.x;
+            outRGB.y += outTransmittance * absorption * stepRGB.y;
+            outRGB.z += outTransmittance * absorption * stepRGB.z;
+        }
 
         // Emission — only in Temperature (4), Explosion (5), or if render mode explicitly uses emission
         if (rmode==4||rmode==5) {
@@ -1836,7 +1932,8 @@ static __forceinline__ __device__ void marchSingleVolume(
                 emRGB.x+=0.15f*chE; emRGB.y+=0.4f*chE; emRGB.z+=1.f*chE;
             }
             float emW=outTransmittance*density*dt*vol.intensity;
-            outRGB.x+=emRGB.x*emW; outRGB.y+=emRGB.y*emW; outRGB.z+=emRGB.z*emW;
+            if (perLambda) outLambda += rgbAtLambdaGPU(emRGB, lambda) * emW;
+            else { outRGB.x+=emRGB.x*emW; outRGB.y+=emRGB.y*emW; outRGB.z+=emRGB.z*emW; }
         }
 
         outTransmittance *= stepTrans;
@@ -1844,12 +1941,15 @@ static __forceinline__ __device__ void marchSingleVolume(
     }
 }
 
+// rgbAtLambdaGPU moved above shadeHit (per-lambda volume parity port).
+
 // Multi-volume compositing wrapper - matches CPU logic (Phase 13)
 static __forceinline__ __device__ void marchVolume(
     float3 ro, float3 rd, float surfaceT, float lambda, unsigned int seed,
-    float3& outRGB, float& outTransmittance)
+    float3& outRGB, float& outTransmittance, int spectralOn, float& outLambda)
 {
     outRGB = make_float3(0.f, 0.f, 0.f);
+    outLambda = 0.f;
     outTransmittance = 1.f;
 
     for (int vi = 0; vi < params.numGpuVolumes; ++vi) {
@@ -1858,13 +1958,15 @@ static __forceinline__ __device__ void marchVolume(
 
         float3 volRGB = make_float3(0.f, 0.f, 0.f);
         float volTrans = 1.f;
+        float volLam = 0.f;
         marchSingleVolume(vol, ro, rd, surfaceT, lambda, seed + vi * 31u,
-                          volRGB, volTrans);
+                          volRGB, volTrans, spectralOn, volLam);
 
         // Composite: accumulate scatter, multiply transmittance
         outRGB.x += outTransmittance * volRGB.x;
         outRGB.y += outTransmittance * volRGB.y;
         outRGB.z += outTransmittance * volRGB.z;
+        outLambda += outTransmittance * volLam;
         outTransmittance *= volTrans;
     }
 }
@@ -2059,8 +2161,9 @@ extern "C" __global__ void __raygen__spectral()
                             float Llen = sqrtf(L.x*L.x+L.y*L.y+L.z*L.z);
                             if (Llen < 1e-6f) continue;
                             L.x/=Llen; L.y/=Llen; L.z/=Llen;
-                        } else if (ltype == 3) {  // Dome -- unshadowed ambient, double-sided via abs(N.y)
+                        } else if (ltype == 3) {  // Dome -- AO-occluded ambient, double-sided via abs(N.y)
                             float wrap = 0.5f + 0.5f * fabsf(N.y);
+                            wrap *= domeAmbientOcclusion(hitPos, N, pixIdx*1031u);
                             float k = intensity * wrap * 0.31830988618f;
                             rgb.x += baseCol.x * params.lights[li].color.x * k;
                             rgb.y += baseCol.y * params.lights[li].color.y * k;
@@ -2077,6 +2180,11 @@ extern "C" __global__ void __raygen__spectral()
                             } else {
                                 atten = 1.f/(dist*dist);
                             }
+                            // Spot cone + penumbra: this inline compat block never
+                            // called spotAttenuation (unlike lightAttenuation users),
+                            // so a Spot lit the whole hemisphere -- looked like a
+                            // POINT light on GPU while CPU was already fixed.
+                            if (ltype == 4) atten *= spotAttenuation(params.lights[li], hitPos);
                             rayMax = dist - 0.002f;
                         }
 
@@ -2090,8 +2198,13 @@ extern "C" __global__ void __raygen__spectral()
                                                    hitPos.y + N.y*shSign*0.001f,
                                                    hitPos.z + N.z*shSign*0.001f);
 
-                        // Soft shadows for Sphere lights with radius > 0.
-                        bool softShadow = (ltype == 1) && (params.lights[li].radius > 1e-4f);
+                        // Soft shadows for every finite emitter (Sphere/Spot disc, Rect extent).
+                        bool rectSoft = (ltype == 2) && (params.lights[li].width > 1e-4f ||
+                                                         params.lights[li].height > 1e-4f);
+                        // Distant: radius = sun ANGULAR size in degrees (direction jitter).
+                        bool sunSoft = (ltype == 0) && (params.lights[li].radius > 1e-3f);
+                        bool softShadow = rectSoft || sunSoft ||
+                            ((ltype == 1 || ltype == 4) && (params.lights[li].radius > 1e-4f));
                         int numShadowSamples = softShadow ? SOFT_SHADOW_SAMPLES_GPU : 1;
                         float shadowAccum = 0.f;
 
@@ -2115,12 +2228,31 @@ extern "C" __global__ void __raygen__spectral()
                         for (int ss = 0; ss < numShadowSamples; ++ss) {
                             float3 sL = L;
                             float sMax = rayMax;
-                            if (softShadow) {
+                            if (softShadow && sunSoft) {
+                                // Sun: jitter the ray DIRECTION in a cone of `radius` deg.
                                 float r1 = hashRNG(sseedBase + (unsigned)ss*13u);
                                 float r2 = hashRNG(sseedBase + (unsigned)ss*13u + 1u);
-                                float r = sqrtf(r1) * params.lights[li].radius;
+                                float spread = tanf(params.lights[li].radius * 0.0174533f);
+                                float r = sqrtf(r1) * spread;
                                 float phi = 6.28318530718f * r2;
-                                float sx = r * cosf(phi), sy = r * sinf(phi);
+                                float jx = r * cosf(phi), jy = r * sinf(phi);
+                                float3 jl = make_float3(sL.x + Tu.x*jx + Tv.x*jy,
+                                                        sL.y + Tu.y*jx + Tv.y*jy,
+                                                        sL.z + Tu.z*jx + Tv.z*jy);
+                                float jlen = sqrtf(jl.x*jl.x + jl.y*jl.y + jl.z*jl.z);
+                                if (jlen > 1e-6f) sL = make_float3(jl.x/jlen, jl.y/jlen, jl.z/jlen);
+                            } else if (softShadow) {
+                                float r1 = hashRNG(sseedBase + (unsigned)ss*13u);
+                                float r2 = hashRNG(sseedBase + (unsigned)ss*13u + 1u);
+                                float sx, sy;
+                                if (rectSoft) {   // jitter across the rect's extent
+                                    sx = (r1 - 0.5f) * params.lights[li].width;
+                                    sy = (r2 - 0.5f) * params.lights[li].height;
+                                } else {          // disc of the emitter radius
+                                    float r = sqrtf(r1) * params.lights[li].radius;
+                                    float phi = 6.28318530718f * r2;
+                                    sx = r * cosf(phi); sy = r * sinf(phi);
+                                }
                                 float3 lp2 = params.lights[li].position;
                                 float3 samplePos = make_float3(lp2.x + Tu.x*sx + Tv.x*sy,
                                                                lp2.y + Tu.y*sx + Tv.y*sy,
@@ -2153,6 +2285,14 @@ extern "C" __global__ void __raygen__spectral()
                         rgb.x += baseCol.x*params.lights[li].color.x*contrib;
                         rgb.y += baseCol.y*params.lights[li].color.y*contrib;
                         rgb.z += baseCol.z*params.lights[li].color.z*contrib;
+                    }
+                    // Constant hemispherical ambient fill (Fred Render3D "Ambient"):
+                    // parity with the viewport's amb * albedo * (0.5 + 0.5*N.y).
+                    if (params.ambient > 0.f) {
+                        float aw = params.ambient * (0.5f + 0.5f * N.y);
+                        rgb.x += baseCol.x * aw;
+                        rgb.y += baseCol.y * aw;
+                        rgb.z += baseCol.z * aw;
                     }
                 }
                 rgb.x *= mat.opacity; rgb.y *= mat.opacity; rgb.z *= mat.opacity;
@@ -2215,7 +2355,20 @@ extern "C" __global__ void __raygen__spectral()
 
                 float depth = __uint_as_float(p3);
                 bool isHit = (p4 > 0u);
-                if (!isHit) continue;
+                if (!isHit) {
+                    // Miss rays still see any volume against the background
+                    // (CPU compat parity -- without this the compat path
+                    // rendered NO volume at all: misses skipped here and the
+                    // hit path below never marched the primary segment).
+                    if (params.numGpuVolumes > 0) {
+                        float3 volRGB; float volTrans; float volLamC = 0.f;
+                        marchVolume(origin, dir, 1e30f, 550.f, seed + 200u, volRGB, volTrans,
+                                    /*spectralOn=*/0, volLamC);
+                        rAcc += volRGB.x; gAcc += volRGB.y; bAcc += volRGB.z;
+                        alphaAccum += 1.f - volTrans;
+                    }
+                    continue;
+                }
 
                 int matId = int(p4)-1;
                 if (matId<0||matId>=int(params.materialCount)) matId=0;
@@ -2234,6 +2387,10 @@ extern "C" __global__ void __raygen__spectral()
                     mat.opacity *= sampleTextureAlphaGPU(mat.baseColorTexId, hitUV);
                 }
                 if (mat.opacity < 0.01f) continue;
+                // Roughness / metallic maps (CPU parity: G scales rough, B metal)
+                // -- feeds the compat GGX specular below.
+                if (mat.roughnessTexId >= 0) mat.roughness = sampleTextureGPU(mat.roughnessTexId, hitUV).y;
+                if (mat.metallicTexId >= 0)  mat.metallic  = sampleTextureGPU(mat.metallicTexId, hitUV).z;
 
                 float3 N = normalize3(make_float3(
                     __uint_as_float(p0),__uint_as_float(p1),__uint_as_float(p2)));
@@ -2309,8 +2466,9 @@ extern "C" __global__ void __raygen__spectral()
                             float Llen = sqrtf(L.x*L.x+L.y*L.y+L.z*L.z);
                             if (Llen < 1e-6f) continue;
                             L.x/=Llen; L.y/=Llen; L.z/=Llen;
-                        } else if (ltype == 3) {  // Dome -- unshadowed ambient, double-sided
+                        } else if (ltype == 3) {  // Dome -- AO-occluded ambient, double-sided
                             float wrap = 0.5f + 0.5f * fabsf(N.y);
+                            wrap *= domeAmbientOcclusion(hitPos, N, seed);
                             float k = intensity * wrap * 0.31830988618f;
                             rgb.x += baseCol.x * params.lights[li].color.x * k;
                             rgb.y += baseCol.y * params.lights[li].color.y * k;
@@ -2327,6 +2485,11 @@ extern "C" __global__ void __raygen__spectral()
                             } else {
                                 atten = 1.f/(dist*dist);
                             }
+                            // Spot cone + penumbra: this inline compat block never
+                            // called spotAttenuation (unlike lightAttenuation users),
+                            // so a Spot lit the whole hemisphere -- looked like a
+                            // POINT light on GPU while CPU was already fixed.
+                            if (ltype == 4) atten *= spotAttenuation(params.lights[li], hitPos);
                             rayMax = dist - 0.002f;
                         }
 
@@ -2338,9 +2501,14 @@ extern "C" __global__ void __raygen__spectral()
                                                    hitPos.y + N.y*shSign*0.001f,
                                                    hitPos.z + N.z*shSign*0.001f);
 
-                        // Soft shadows for Sphere lights with radius > 0 (e.g. sun-as-sphere
+                        // Soft shadows for Sphere/Spot lights with radius > 0 (e.g. sun-as-sphere
                         // from SpectralEnvLight.sunShadowSoftness).
-                        bool softShadow = (ltype == 1) && (params.lights[li].radius > 1e-4f);
+                        bool rectSoft = (ltype == 2) && (params.lights[li].width > 1e-4f ||
+                                                         params.lights[li].height > 1e-4f);
+                        // Distant: radius = sun ANGULAR size in degrees (direction jitter).
+                        bool sunSoft = (ltype == 0) && (params.lights[li].radius > 1e-3f);
+                        bool softShadow = rectSoft || sunSoft ||
+                            ((ltype == 1 || ltype == 4) && (params.lights[li].radius > 1e-4f));
                         int numShadowSamples = softShadow ? SOFT_SHADOW_SAMPLES_GPU : 1;
                         float shadowAccum = 0.f;
 
@@ -2363,12 +2531,31 @@ extern "C" __global__ void __raygen__spectral()
                         for (int ss = 0; ss < numShadowSamples; ++ss) {
                             float3 sL = L;
                             float sMax = rayMax;
-                            if (softShadow) {
+                            if (softShadow && sunSoft) {
+                                // Sun: jitter the ray DIRECTION in a cone of `radius` deg.
                                 float r1 = hashRNG(sseedBase + (unsigned)ss*13u);
                                 float r2 = hashRNG(sseedBase + (unsigned)ss*13u + 1u);
-                                float r = sqrtf(r1) * params.lights[li].radius;
+                                float spread = tanf(params.lights[li].radius * 0.0174533f);
+                                float r = sqrtf(r1) * spread;
                                 float phi = 6.28318530718f * r2;
-                                float sx = r * cosf(phi), sy = r * sinf(phi);
+                                float jx = r * cosf(phi), jy = r * sinf(phi);
+                                float3 jl = make_float3(sL.x + Tu.x*jx + Tv.x*jy,
+                                                        sL.y + Tu.y*jx + Tv.y*jy,
+                                                        sL.z + Tu.z*jx + Tv.z*jy);
+                                float jlen = sqrtf(jl.x*jl.x + jl.y*jl.y + jl.z*jl.z);
+                                if (jlen > 1e-6f) sL = make_float3(jl.x/jlen, jl.y/jlen, jl.z/jlen);
+                            } else if (softShadow) {
+                                float r1 = hashRNG(sseedBase + (unsigned)ss*13u);
+                                float r2 = hashRNG(sseedBase + (unsigned)ss*13u + 1u);
+                                float sx, sy;
+                                if (rectSoft) {   // jitter across the rect's extent
+                                    sx = (r1 - 0.5f) * params.lights[li].width;
+                                    sy = (r2 - 0.5f) * params.lights[li].height;
+                                } else {          // disc of the emitter radius
+                                    float r = sqrtf(r1) * params.lights[li].radius;
+                                    float phi = 6.28318530718f * r2;
+                                    sx = r * cosf(phi); sy = r * sinf(phi);
+                                }
                                 float3 lp2 = params.lights[li].position;
                                 float3 samplePos = make_float3(lp2.x + Tu.x*sx + Tv.x*sy,
                                                                lp2.y + Tu.y*sx + Tv.y*sy,
@@ -2397,17 +2584,83 @@ extern "C" __global__ void __raygen__spectral()
                         float visibility = 1.f - shadowAccum / float(numShadowSamples);
                         if (visibility < 1e-4f) continue;
 
-                        float contrib = NdotL*atten*intensity*0.31830988618f*visibility;
-                        rgb.x += baseCol.x*params.lights[li].color.x*contrib;
-                        rgb.y += baseCol.y*params.lights[li].color.y*contrib;
-                        rgb.z += baseCol.z*params.lights[li].color.z*contrib;
+                        // Cook-Torrance GGX spec + energy-conserving diffuse
+                        // (viewport parity; mirrors the CPU compat block and
+                        // scene.frag). Diffuse keeps double-sided abs(N.L);
+                        // spec uses the view-facing normal. UV-bake block stays
+                        // diffuse-only (baked maps must be view-independent).
+                        float3 Vv = make_float3(-dir.x, -dir.y, -dir.z);
+                        {   float vl = sqrtf(Vv.x*Vv.x+Vv.y*Vv.y+Vv.z*Vv.z);
+                            if (vl > 1e-6f) { Vv.x/=vl; Vv.y/=vl; Vv.z/=vl; } }
+                        float nvd = N.x*Vv.x+N.y*Vv.y+N.z*Vv.z;
+                        float3 Nv = (nvd >= 0.f) ? N : make_float3(-N.x,-N.y,-N.z);
+                        float roughP = fminf(1.f, fmaxf(0.04f, mat.roughness));
+                        float metalP = fminf(1.f, fmaxf(0.f, mat.metallic));
+                        float F0r = 0.04f*(1.f-metalP) + baseCol.x*metalP;
+                        float F0g = 0.04f*(1.f-metalP) + baseCol.y*metalP;
+                        float F0b = 0.04f*(1.f-metalP) + baseCol.z*metalP;
+                        float kdR = 1.f-metalP, kdG = kdR, kdB = kdR;
+                        float spR = 0.f, spG = 0.f, spB = 0.f;
+                        float ndlS = fmaxf(Nv.x*L.x+Nv.y*L.y+Nv.z*L.z, 0.f);
+                        float ndv  = fmaxf(Nv.x*Vv.x+Nv.y*Vv.y+Nv.z*Vv.z, 0.f);
+                        float3 Hh = make_float3(Vv.x+L.x, Vv.y+L.y, Vv.z+L.z);
+                        float hlen = sqrtf(Hh.x*Hh.x+Hh.y*Hh.y+Hh.z*Hh.z);
+                        if (hlen > 1e-6f && ndlS > 0.f) {
+                            Hh.x/=hlen; Hh.y/=hlen; Hh.z/=hlen;
+                            float aP = roughP*roughP, a2P = aP*aP;
+                            float ndh = fmaxf(Nv.x*Hh.x+Nv.y*Hh.y+Nv.z*Hh.z, 0.f);
+                            float dd = ndh*ndh*(a2P-1.f)+1.f;
+                            float D = a2P / fmaxf(3.14159265f*dd*dd, 1e-7f);
+                            float kk = (roughP+1.f)*(roughP+1.f)/8.f;
+                            float G = (ndv/(ndv*(1.f-kk)+kk)) * (ndlS/(ndlS*(1.f-kk)+kk));
+                            float hv = fmaxf(Hh.x*Vv.x+Hh.y*Vv.y+Hh.z*Vv.z, 0.f);
+                            float om = fminf(1.f, fmaxf(0.f, 1.f-hv));
+                            float fr5 = om*om*om*om*om;
+                            float sBase = D*G / fmaxf(4.f*ndv*ndlS, 1e-4f);
+                            float FR = F0r + (1.f-F0r)*fr5;
+                            float FG = F0g + (1.f-F0g)*fr5;
+                            float FB = F0b + (1.f-F0b)*fr5;
+                            spR = FR*sBase; spG = FG*sBase; spB = FB*sBase;
+                            kdR = (1.f-FR)*(1.f-metalP);
+                            kdG = (1.f-FG)*(1.f-metalP);
+                            kdB = (1.f-FB)*(1.f-metalP);
+                        }
+                        float lite = atten*intensity*visibility;
+                        float invPi = 0.31830988618f;
+                        rgb.x += (kdR*baseCol.x*invPi*NdotL + spR*ndlS)*params.lights[li].color.x*lite;
+                        rgb.y += (kdG*baseCol.y*invPi*NdotL + spG*ndlS)*params.lights[li].color.y*lite;
+                        rgb.z += (kdB*baseCol.z*invPi*NdotL + spB*ndlS)*params.lights[li].color.z*lite;
+                    }
+                    // Constant hemispherical ambient fill -- see the first compat
+                    // block; kept in sync (Fred Render3D "Ambient", viewport parity).
+                    if (params.ambient > 0.f) {
+                        float aw = params.ambient * (0.5f + 0.5f * N.y);
+                        rgb.x += baseCol.x * aw;
+                        rgb.y += baseCol.y * aw;
+                        rgb.z += baseCol.z * aw;
                     }
                 }
                 rgb.x += mat.emissiveColor.x; rgb.y += mat.emissiveColor.y; rgb.z += mat.emissiveColor.z;
-                rAcc += rgb.x * mat.opacity;
-                gAcc += rgb.y * mat.opacity;
-                bAcc += rgb.z * mat.opacity;
-                alphaAccum += mat.opacity;
+                // Premultiply, then composite any volume between the camera and
+                // the hit OVER the surface (CPU compat-branch parity; depth is
+                // in this ray's dir units -- marchSingleVolume converts).
+                float3 srgb = make_float3(rgb.x * mat.opacity,
+                                          rgb.y * mat.opacity,
+                                          rgb.z * mat.opacity);
+                float sampleA = mat.opacity;
+                if (params.numGpuVolumes > 0) {
+                    float3 volRGB; float volTrans; float volLamC = 0.f;
+                    marchVolume(origin, dir, depth, 550.f, seed + 200u, volRGB, volTrans,
+                                /*spectralOn=*/0, volLamC);
+                    srgb.x = volRGB.x + volTrans * srgb.x;
+                    srgb.y = volRGB.y + volTrans * srgb.y;
+                    srgb.z = volRGB.z + volTrans * srgb.z;
+                    sampleA = 1.f - volTrans * (1.f - sampleA);
+                }
+                rAcc += srgb.x;
+                gAcc += srgb.y;
+                bAcc += srgb.z;
+                alphaAccum += sampleA;
             }
             float inv = 1.f/float(spp);
             params.framebuffer[pixIdx] = make_float4(fmaxf(0.f,rAcc*inv),fmaxf(0.f,gAcc*inv),fmaxf(0.f,bAcc*inv),
@@ -2453,6 +2706,10 @@ extern "C" __global__ void __raygen__spectral()
             float radiance = 0.f;
             // Moved up so DIR-VIZ BYPASS (below) can write to them from miss.
             float vx=0.f, vy=0.f, vz=0.f;
+            // [DBGSTAGE] crash-bisect ladder (env FRED_GPU_DEBUG_STAGE):
+            // 1 = primary trace only, 2 = +shading no bounces/volumes,
+            // 3 = +bounces no volumes, 0/absent = full path.
+            if (params.debugStage == 1) { X += isHit ? 1.f : 0.f; Y += 0.5f; continue; }
 
             if (isHit) {
                 int matId = int(p4)-1;
@@ -2471,6 +2728,16 @@ extern "C" __global__ void __raygen__spectral()
                     // Texture alpha → opacity (for images with transparency)
                     float texAlpha = sampleTextureAlphaGPU(mat.baseColorTexId, hitUV);
                     mat.opacity *= texAlpha;
+                }
+                // Roughness / metallic maps (CPU parity, SpectralIntegrator
+                // resolveMaterial: GREEN channel scales roughness, BLUE metallic).
+                // Previously GPU-only renders silently dropped these maps.
+                if (mat.roughnessTexId >= 0 || mat.metallicTexId >= 0) {
+                    float2 rmUV = make_float2(__uint_as_float(p5), __uint_as_float(p6));
+                    if (mat.roughnessTexId >= 0)
+                        mat.roughness = sampleTextureGPU(mat.roughnessTexId, rmUV).y;
+                    if (mat.metallicTexId >= 0)
+                        mat.metallic  = sampleTextureGPU(mat.metallicTexId, rmUV).z;
                 }
 
                 // Alpha cutout: skip shading for fully transparent pixels
@@ -2549,7 +2816,9 @@ extern "C" __global__ void __raygen__spectral()
 
                 // Direct lighting at primary hit (scaled by opacity for premultiplied alpha)
                 unsigned int shadowSeed = seed + 50u;
-                radiance = shadeHit(mat, N, V, hitPos, lambda, shadowSeed, matId) * mat.opacity;
+                radiance = (params.debugStage == 21)
+                    ? 0.2f * mat.opacity   // [DBGSTAGE] 21: skip shadeHit
+                    : shadeHit(mat, N, V, hitPos, lambda, shadowSeed, matId) * mat.opacity;
 
                 // Bounce rays with refraction support
                 float throughput = 1.f;
@@ -2562,6 +2831,7 @@ extern "C" __global__ void __raygen__spectral()
                 GPUMaterial volumeMat;
                 float pathMinRough = 0.f;  // path regularization
 
+                if (params.debugStage != 2 && params.debugStage != 21)
                 for (int bounce = 0; bounce < maxBounces; ++bounce) {
                     if (bounce >= 1) {
                         float rrProb = fminf(0.95f, throughput);
@@ -2601,12 +2871,15 @@ extern "C" __global__ void __raygen__spectral()
                     if (bp4 == 0u) {
                         // Bounce miss — march through volumes before adding dome
                         if (params.numGpuVolumes > 0) {
-                            float3 volRGB; float volTrans;
-                            marchVolume(bOrig, bounceDir, 1e30f, lambda, bSeed + bounce*97u, volRGB, volTrans);
-                            // Convert RGB to spectral: weight by wavelength
-                            float volSpec = (lambda < 500.f) ? volRGB.z :
-                                           (lambda < 580.f) ? volRGB.y : volRGB.x;
-                            radiance += throughput * volSpec;
+                            float3 volRGB; float volTrans; float volLamB = 0.f;
+                            marchVolume(bOrig, bounceDir, 1e30f, lambda, bSeed + bounce*97u,
+                                        volRGB, volTrans, /*spectralOn=*/1, volLamB);
+                            // Non-spectral volumes: RGB composite (smooth-basis
+                            // per-lambda for spectral ones rides radiance below).
+                            vx += throughput * (0.4124f*volRGB.x + 0.3576f*volRGB.y + 0.1805f*volRGB.z);
+                            vy += throughput * (0.2126f*volRGB.x + 0.7152f*volRGB.y + 0.0722f*volRGB.z);
+                            vz += throughput * (0.0193f*volRGB.x + 0.1192f*volRGB.y + 0.9505f*volRGB.z);
+                            radiance += throughput * volLamB;
                             throughput *= volTrans;
                         }
                         // Dome contribution (BSDF IS strategy). Mirrors CPU
@@ -2658,11 +2931,13 @@ extern "C" __global__ void __raygen__spectral()
                     // Bounce hit — march through volumes between origin and hit
                     float bDepth = __uint_as_float(bp3);
                     if (params.numGpuVolumes > 0) {
-                        float3 volRGB; float volTrans;
-                        marchVolume(bOrig, bounceDir, bDepth, lambda, bSeed + bounce*97u, volRGB, volTrans);
-                        float volSpec = (lambda < 500.f) ? volRGB.z :
-                                       (lambda < 580.f) ? volRGB.y : volRGB.x;
-                        radiance += throughput * volSpec;
+                        float3 volRGB; float volTrans; float volLamB = 0.f;
+                        marchVolume(bOrig, bounceDir, bDepth, lambda, bSeed + bounce*97u,
+                                    volRGB, volTrans, /*spectralOn=*/1, volLamB);
+                        vx += throughput * (0.4124f*volRGB.x + 0.3576f*volRGB.y + 0.1805f*volRGB.z);
+                        vy += throughput * (0.2126f*volRGB.x + 0.7152f*volRGB.y + 0.0722f*volRGB.z);
+                        vz += throughput * (0.0193f*volRGB.x + 0.1192f*volRGB.y + 0.9505f*volRGB.z);
+                        radiance += throughput * volLamB;
                         throughput *= volTrans;
                     }
                     int bMatId = int(bp4)-1;
@@ -2717,7 +2992,11 @@ extern "C" __global__ void __raygen__spectral()
                 // Volumes suppress the BG (matches CPU: volume scenes use
                 // transparent BG so they can be comped over another plate).
                 radiance = 0.f;
-                if (params.envVisibleBg && params.numGpuVolumes == 0) {
+                if (params.envVisibleBg && params.numGpuVolumes == 0 &&
+                    params.envTexId >= 0 && params.envTexId < (int)params.textureCount) {
+                    // envTexId guard: a visible-in-background dome WITHOUT an
+                    // HDRI texture indexed params.textures[-1] here -- illegal
+                    // memory access (every other envTexId site was guarded).
                     // INLINE BYPASS: HDRI sampler expanded here, no lambda.
                     // If this shows the HDRI and sampleEnvHDRI doesn't,
                     // the lambda inside sampleEnvHDRI is the bug.
@@ -2771,10 +3050,13 @@ extern "C" __global__ void __raygen__spectral()
 
             // GPU volume ray marching — gated by volumeSpp
             float sampleAlpha = isHit ? hitOpacity : 0.f;
+            if (params.debugStage == 2 || params.debugStage == 3 || params.debugStage == 21) { alphaAccum += isHit ? 1.f : 0.f; goto dbg_skip_vol; }
             if (params.numGpuVolumes > 0 && s < params.volumeSpp) {
                 float surfT = isHit ? depth : 1e30f;
                 float3 volRGB = make_float3(0.f,0.f,0.f); float volTrans = 1.f;
-                marchVolume(origin, dir, surfT, lambda, seed + 200u, volRGB, volTrans);
+                float volLam = 0.f;
+                marchVolume(origin, dir, surfT, lambda, seed + 200u, volRGB, volTrans,
+                            /*spectralOn=*/1, volLam);
                 // Scale volume contribution to compensate for fewer samples
                 float volScale = float(spp) / float(params.volumeSpp);
                 // Volume RGB → XYZ directly (sRGB D65 matrix)
@@ -2782,9 +3064,13 @@ extern "C" __global__ void __raygen__spectral()
                 vy = (0.2126f*volRGB.x + 0.7152f*volRGB.y + 0.0722f*volRGB.z) * volScale;
                 vz = (0.0193f*volRGB.x + 0.1192f*volRGB.y + 0.9505f*volRGB.z) * volScale;
                 radiance *= volTrans;
+                // Spectral volumes: per-lambda in-scatter joins the surface
+                // radiance (already carries internal transmittance weighting).
+                radiance += volLam * volScale;
                 sampleAlpha = 1.f - volTrans * (1.f - sampleAlpha);
             }
             alphaAccum += sampleAlpha;
+            dbg_skip_vol: ;
 
             float cx,cy,cz; cieXYZ(lambda,cx,cy,cz);
             float scale = 400.f/106.856895f;

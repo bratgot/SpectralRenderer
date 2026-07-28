@@ -69,6 +69,10 @@ struct SpectralCamera {
     bool   neutralBalance    = true;  // Correct spectral white balance shift
     int    projectionMode    = 0;     // 0=perspective, 1=UV, 2=spherical
     int    edgeSamples       = 0;     // Edge AA supersamples (0=disabled)
+    // Progressive viewport: after each adaptive pass the CURRENT running
+    // averages (RGB + alpha) are written into `pixels` and this fires with
+    // (samplesDone, sppTotal). Return false to cancel the render. Null = off.
+    std::function<bool(int, int)> progressCb;
 
     // Wireframe overlay
     bool   wireframeEnable   = false;
@@ -101,6 +105,10 @@ struct SpectralCamera {
     float  fStop             = 0.f;  // 0 = pinhole (no DOF)
     float  focusDistance     = 100.f; // world units
     int    volumeSpp         = 0;    // 0 = use main spp, else separate vol samples
+    // Constant hemispherical ambient fill (Fred Render3D "Ambient"; 0 = off).
+    // Applied in the compat shader as ambient * albedo * (0.5 + 0.5*N.y) to
+    // match Fred's viewport ambient term.
+    float  ambient           = 0.f;
 };
 
 // ---------------------------------------------------------------------------
@@ -156,6 +164,12 @@ public:
         float* diffuseIndirect = nullptr;
         float* specularIndirect = nullptr;
         float* transmission    = nullptr;
+        // First-hit deterministic pass (normals/uv/position/ids): skip ALL
+        // light transport per sample -- depth, ids, the geometry buffers
+        // above and alpha coverage still fill, radiance stays zero. The
+        // caller should also drop spp to 1 (the buffers are written once at
+        // the first hit, never averaged, so extra samples add nothing).
+        bool geometryOnly = false;
     };
 
     static void RenderFrame(

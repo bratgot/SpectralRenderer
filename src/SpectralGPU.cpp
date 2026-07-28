@@ -416,12 +416,21 @@ bool SpectralGPU::buildPipeline(bool motion)
         stackSizes.cssCH = std::max(stackSizes.cssCH, ss.cssCH);
     }
 
+    // Continuation stack per the OptiX sizing formula: the RAYGEN's own
+    // continuation state (cssRG -- the megakernel's live locals across every
+    // optixTrace, by far the largest term) plus maxTraceDepth levels of the
+    // deepest child program. The old call passed cssMS+cssCH here -- NO cssRG
+    // and no depth multiplier -- so any raygen path keeping substantial state
+    // live across a trace (the full-integrator loop; compat fitted by luck)
+    // overflowed the stack: "illegal memory access" at the launch sync.
+    const unsigned int cssChild = std::max(stackSizes.cssCH, stackSizes.cssMS);
+    const unsigned int contStack = stackSizes.cssRG + linkOptions.maxTraceDepth * cssChild;
     OPTIX_CHECK(optixPipelineSetStackSize(
         _pipeline,
-        stackSizes.cssRG + stackSizes.cssCH,  // direct callable
-        stackSizes.cssRG + stackSizes.cssCH,  // continuation callable
-        stackSizes.cssMS + stackSizes.cssCH,  // miss + CH
-        1));  // max traversal depth
+        0,           // direct callables from IS/AH: none used
+        0,           // direct callables from RG/MS/CH: none used
+        contStack,   // continuation stack (see above)
+        1));  // max traversal depth (single-level GAS)
 
     fprintf(stderr, "SpectralGPU: pipeline created\n");
     if (motion) MBLog("optixPipelineCreate + stack DONE");
@@ -527,14 +536,29 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
 
         const auto& lights = scene.GetLights();
 
-        // Checksum lights to skip re-upload when unchanged
+        // Checksum lights to skip re-upload when unchanged. Must cover EVERY
+        // field the upload below copies: the original hash missed the spot
+        // cone cosines, direction, y/z position, g/b colour and rect extent,
+        // so tweaking cone/softness/aim re-rendered on CPU but the GPU kept
+        // shading with the stale first-upload light ("GPU ignores the cone").
         unsigned int lightCheck = static_cast<unsigned int>(lights.size()) * 2654435761u;
         for (size_t i = 0; i < lights.size(); ++i) {
             union { float f; unsigned int u; } p;
             p.f = lights[i].EffectiveIntensity(); lightCheck ^= p.u * (unsigned(i)*73856093u+1u);
             p.f = lights[i].position[0]; lightCheck ^= p.u;
+            p.f = lights[i].position[1]; lightCheck ^= p.u * 84631u;
+            p.f = lights[i].position[2]; lightCheck ^= p.u * 12923u;
+            p.f = lights[i].direction[0]; lightCheck ^= p.u * 28411u;
+            p.f = lights[i].direction[1]; lightCheck ^= p.u * 54503u;
+            p.f = lights[i].direction[2]; lightCheck ^= p.u * 71993u;
             p.f = lights[i].color[0]; lightCheck ^= p.u * 19349663u;
+            p.f = lights[i].color[1]; lightCheck ^= p.u * 39916801u;
+            p.f = lights[i].color[2]; lightCheck ^= p.u * 68996399u;
             p.f = lights[i].radius; lightCheck ^= p.u * 83492791u;
+            p.f = lights[i].width;  lightCheck ^= p.u * 22193u;
+            p.f = lights[i].height; lightCheck ^= p.u * 37633u;
+            p.f = lights[i]._cosConeAngle; lightCheck ^= p.u * 65537u;
+            p.f = lights[i]._cosPenumbra;  lightCheck ^= p.u * 92821u;
         }
         // Also checksum virtual light / SH state from dome lights
         for (const auto& L : lights) {
@@ -585,6 +609,8 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
             p.f = mats[i].textureBlend;     matCheck ^= p.u * 17401u;
             matCheck ^= static_cast<unsigned int>(mats[i].bumpMapTexId + 1) * 20149u;
             p.f = mats[i].bumpStrength;     matCheck ^= p.u * 23071u;
+            matCheck ^= static_cast<unsigned int>(mats[i].roughnessTexId + 1) * 37409u;
+            matCheck ^= static_cast<unsigned int>(mats[i].metallicTexId + 1) * 42061u;
             p.f = mats[i].absorptionColor[0]; matCheck ^= p.u * 26153u;
             p.f = mats[i].absorptionColor[1]; matCheck ^= p.u * 29339u;
             p.f = mats[i].absorptionColor[2]; matCheck ^= p.u * 32687u;
@@ -669,6 +695,8 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
                 gpuMats[i].textureBlend      = mats[i].textureBlend;
                 gpuMats[i].bumpMapTexId      = mats[i].bumpMapTexId;
                 gpuMats[i].bumpStrength      = mats[i].bumpStrength;
+                gpuMats[i].roughnessTexId    = mats[i].roughnessTexId;
+                gpuMats[i].metallicTexId     = mats[i].metallicTexId;
                 gpuMats[i].absorptionColor   = make_float3(mats[i].absorptionColor[0], mats[i].absorptionColor[1], mats[i].absorptionColor[2]);
                 gpuMats[i].absorptionDensity = mats[i].absorptionDensity;
                 gpuMats[i].gratingSpacing  = mats[i].gratingSpacing;
@@ -953,6 +981,8 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
             gpuMats[i].textureBlend      = mats[i].textureBlend;
             gpuMats[i].bumpMapTexId      = mats[i].bumpMapTexId;
             gpuMats[i].bumpStrength      = mats[i].bumpStrength;
+            gpuMats[i].roughnessTexId    = mats[i].roughnessTexId;
+            gpuMats[i].metallicTexId     = mats[i].metallicTexId;
             gpuMats[i].absorptionColor   = make_float3(mats[i].absorptionColor[0], mats[i].absorptionColor[1], mats[i].absorptionColor[2]);
             gpuMats[i].absorptionDensity = mats[i].absorptionDensity;
             // Phase 14: diffraction + fluorescence
@@ -1335,6 +1365,8 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     launchParams.width       = width;
     launchParams.height      = height;
     launchParams.traversable = _gasHandle;
+    launchParams.debugStage  = [](){ const char* e = std::getenv("FRED_GPU_DEBUG_STAGE");
+                                     return e ? std::atoi(e) : 0; }();   // crash bisect
     launchParams.spp         = spp;
     launchParams.volumeSpp   = camera.volumeSpp > 0 ? camera.volumeSpp : spp;
     launchParams.maxBounces  = maxBounces;
@@ -1354,6 +1386,10 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
     launchParams.textureCount = _textureCount;
     launchParams.blueNoise    = camera.blueNoise ? 1 : 0;
     launchParams.scanlineCompat = camera.scanlineCompat ? 1 : 0;
+    launchParams.ambient        = camera.ambient;
+    // aoRadius was only filled by the dedicated AO pass; the main render's
+    // compat dome-AO (domeAmbientOcclusion) needs it too.
+    launchParams.aoRadius       = camera.aoRadius;
     launchParams.projectionMode = camera.projectionMode;
     launchParams.edgeSamples    = camera.edgeSamples;
     // With a motion GAS the base-pose vertex normals no longer match the moved
@@ -1461,6 +1497,8 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
         gv.tempMax = volume->tempMax;
         gv.powder = volume->powderStrength;
         gv.scatterColor = make_float3(volume->scatterColor[0], volume->scatterColor[1], volume->scatterColor[2]);
+        gv.envIntensity = volume->envIntensity;
+        gv.envDiffuse = volume->envDiffuse;
         gv.stepSize = volume->stepSize;
         gv.jitter = volume->jitter ? 1 : 0;
         gv.phaseMode = volume->phaseMode;
@@ -1488,6 +1526,7 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
         gv.sigmaR = volume->sigmaR;
         gv.sigmaG = volume->sigmaG;
         gv.sigmaB = volume->sigmaB;
+        gv.spectralVolumes = volume->spectralVolumes ? 1 : 0;
         gv.msApprox = volume->msApprox ? 1 : 0;
         gv.msTint = make_float3(volume->msTint[0], volume->msTint[1], volume->msTint[2]);
         // Phase 17: fire & explosions

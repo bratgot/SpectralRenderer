@@ -9,6 +9,11 @@
 #include <pxr/imaging/hd/aov.h>
 #include <pxr/base/vt/dictionary.h>
 #include <pxr/base/tf/staticTokens.h>
+#include <pxr/base/gf/vec2f.h>
+#include <pxr/base/gf/vec3f.h>
+
+#include <set>
+#include <string>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -105,26 +110,36 @@ HdSpectralRenderDelegate::GetRenderParam() const { return _renderParam.get(); }
 HdAovDescriptor
 HdSpectralRenderDelegate::GetDefaultAovDescriptor(TfToken const& aovName) const
 {
+    // Beauty (RGBA) and single-channel ID/depth AOVs.
     if (aovName == HdAovTokens->color) {
-        return HdAovDescriptor(
-            HdFormatFloat32Vec4,  // RGBA float
-            false,                // not multisampled
-            VtValue(GfVec4f(0.0f, 0.0f, 0.0f, 1.0f))  // clear to opaque black
-        );
+        return HdAovDescriptor(HdFormatFloat32Vec4, false,
+                               VtValue(GfVec4f(0.0f, 0.0f, 0.0f, 1.0f)));
     }
-    if (aovName == HdAovTokens->depth) {
-        return HdAovDescriptor(
-            HdFormatFloat32,
-            false,
-            VtValue(1.0f)
-        );
+    if (aovName == HdAovTokens->depth || aovName == HdAovTokens->cameraDepth) {
+        return HdAovDescriptor(HdFormatFloat32, false, VtValue(1.0f));
     }
-    if (aovName == HdAovTokens->normal) {
-        return HdAovDescriptor(
-            HdFormatFloat32Vec3,
-            false,
-            VtValue(GfVec3f(0.0f))
-        );
+    if (aovName == HdAovTokens->primId || aovName == HdAovTokens->instanceId ||
+        aovName == HdAovTokens->elementId) {
+        return HdAovDescriptor(HdFormatFloat32, false, VtValue(0.0f));
+    }
+    // Data AOVs the integrator produces: all vec3 except uv (vec2). Matched by
+    // the RenderVar's source name so DCC hosts (Solaris/usdview/Katana) can bind
+    // them. The full set mirrors SpectralIntegrator::AOVBuffers.
+    static const std::set<std::string> kVec3 = {
+        "normal", "N", "Neye", "position", "P", "Peye", "pRef", "albedo",
+        "direct", "indirect", "emission", "diffuseDirect", "specularDirect",
+        "diffuseIndirect", "specularIndirect", "transmission", "ao"
+    };
+    const std::string n = aovName.GetString();
+    if (aovName == HdAovTokens->normal || aovName == HdAovTokens->Neye ||
+        kVec3.count(n)) {
+        return HdAovDescriptor(HdFormatFloat32Vec3, false, VtValue(GfVec3f(0.0f)));
+    }
+    if (n == "uv" || n == "st") {
+        return HdAovDescriptor(HdFormatFloat32Vec2, false, VtValue(GfVec2f(0.0f)));
+    }
+    if (n == "materialId") {
+        return HdAovDescriptor(HdFormatFloat32, false, VtValue(0.0f));
     }
     // Unknown AOV — return an empty descriptor (Hydra will skip it)
     return HdAovDescriptor();

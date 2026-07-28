@@ -9,6 +9,10 @@
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/tf/diagnostic.h>
 
+#include <cstring>
+#include <string>
+#include <vector>
+
 PXR_NAMESPACE_OPEN_SCOPE
 
 HdSpectralRenderPass::HdSpectralRenderPass(
@@ -56,16 +60,61 @@ void HdSpectralRenderPass::_Execute(
     cam.viewToWorld = camera->GetTransform().GetInverse();
     cam.projInverse = renderPassState->GetProjectionMatrix().GetInverse();
 
-    // Allocate a temporary frame buffer, render into it, blit to beauty AOV
-    std::vector<float> frameBuf(static_cast<size_t>(W) * H * 4, 0.f);
-    SpectralIntegrator::RenderFrame(*_scene, cam, frameBuf.data(), /*spp=*/1);
+    // The integrator can fill a full AOV set in a single trace (see
+    // SpectralIntegrator::AOVBuffers). Point each requested AOV at temp storage
+    // sized to its channel count, render once, then blit each into its buffer.
+    const size_t px = static_cast<size_t>(W) * H;
+    std::vector<float> beautyBuf(px * 4, 0.f);
 
-    // Copy into the HdRenderBuffer row by row
-    void* mapped = beauty->Map();
-    if (mapped) {
-        std::memcpy(mapped, frameBuf.data(),
-                    static_cast<size_t>(W) * H * 4 * sizeof(float));
-        beauty->Unmap();
+    SpectralIntegrator::AOVBuffers aov{};
+    std::vector<float> depthT, objIdT, matIdT, aoT;
+    std::vector<std::vector<float>> hold;   // storage for the vec2/vec3 AOVs
+    hold.reserve(24);                       // reserve so data() pointers stay valid
+    auto alloc = [&](int ch) -> float* { hold.emplace_back(px * ch, 0.f); return hold.back().data(); };
+
+    struct AovOut { HdSpectralRenderBuffer* buf; const float* src; int ch; };
+    std::vector<AovOut> outs;
+
+    for (const HdRenderPassAovBinding& b : renderPassState->GetAovBindings()) {
+        auto* rb = dynamic_cast<HdSpectralRenderBuffer*>(b.renderBuffer);
+        if (!rb) continue;
+        const TfToken& t = b.aovName;
+        const std::string n = t.GetString();
+        if      (t == HdAovTokens->color)  outs.push_back({rb, beautyBuf.data(), 4});
+        else if (t == HdAovTokens->depth || t == HdAovTokens->cameraDepth) { depthT.assign(px, 0.f); outs.push_back({rb, depthT.data(), 1}); }
+        else if (t == HdAovTokens->primId) { objIdT.assign(px, 0.f); outs.push_back({rb, objIdT.data(), 1}); }
+        else if (n == "materialId")        { matIdT.assign(px, 0.f); outs.push_back({rb, matIdT.data(), 1}); }
+        else if (n == "ao")                { aoT.assign(px, 0.f);    outs.push_back({rb, aoT.data(),    1}); }
+        else if (t == HdAovTokens->normal || t == HdAovTokens->Neye || n == "normal" || n == "N") { aov.normal = alloc(3); outs.push_back({rb, aov.normal, 3}); }
+        else if (n == "position" || n == "P" || n == "Peye") { aov.position = alloc(3); outs.push_back({rb, aov.position, 3}); }
+        else if (n == "pRef")              { aov.pRef = alloc(3);              outs.push_back({rb, aov.pRef, 3}); }
+        else if (n == "albedo")            { aov.albedo = alloc(3);           outs.push_back({rb, aov.albedo, 3}); }
+        else if (n == "direct")            { aov.direct = alloc(3);           outs.push_back({rb, aov.direct, 3}); }
+        else if (n == "indirect")          { aov.indirect = alloc(3);         outs.push_back({rb, aov.indirect, 3}); }
+        else if (n == "emission")          { aov.emission = alloc(3);         outs.push_back({rb, aov.emission, 3}); }
+        else if (n == "diffuseDirect")     { aov.diffuseDirect = alloc(3);    outs.push_back({rb, aov.diffuseDirect, 3}); }
+        else if (n == "specularDirect")    { aov.specularDirect = alloc(3);   outs.push_back({rb, aov.specularDirect, 3}); }
+        else if (n == "diffuseIndirect")   { aov.diffuseIndirect = alloc(3);  outs.push_back({rb, aov.diffuseIndirect, 3}); }
+        else if (n == "specularIndirect")  { aov.specularIndirect = alloc(3); outs.push_back({rb, aov.specularIndirect, 3}); }
+        else if (n == "transmission")      { aov.transmission = alloc(3);     outs.push_back({rb, aov.transmission, 3}); }
+        else if (n == "uv" || n == "st")   { aov.uv = alloc(2);               outs.push_back({rb, aov.uv, 2}); }
+    }
+    if (outs.empty()) outs.push_back({beauty, beautyBuf.data(), 4});   // color always
+
+    SpectralIntegrator::RenderFrame(
+        *_scene, cam, beautyBuf.data(), /*spp=*/1,
+        depthT.empty() ? nullptr : depthT.data(), /*maxBounces=*/4,
+        objIdT.empty() ? nullptr : objIdT.data(),
+        matIdT.empty() ? nullptr : matIdT.data(),
+        &aov,
+        aoT.empty() ? nullptr : aoT.data());
+
+    for (const AovOut& o : outs) {
+        if (void* mapped = o.buf->Map()) {
+            std::memcpy(mapped, o.src, px * o.ch * sizeof(float));
+            o.buf->Unmap();
+        }
+        o.buf->SetConverged(true);
     }
 
     _converged = true;

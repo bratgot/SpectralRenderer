@@ -34,6 +34,8 @@ struct GPUMaterial {
     float  textureBlend;     // 0=base color, 1=full texture
     int    bumpMapTexId;     // -1 = no bump map
     float  bumpStrength;     // bump intensity
+    int    roughnessTexId;   // -1 = none; GREEN channel scales roughness (CPU parity)
+    int    metallicTexId;    // -1 = none; BLUE channel scales metallic (CPU parity)
     float3 absorptionColor;  // volume color (white=clear)
     float  absorptionDensity; // 0=clear, higher=darker
     // Phase 14: diffraction grating
@@ -129,6 +131,8 @@ struct GPUVolume {
     float   tempMin, tempMax;
     float   powder;
     float3  scatterColor;
+    float   envIntensity;   // volume's dome-light response scale (CPU parity)
+    float   envDiffuse;     // volume's dome ambient diffuse weight (CPU parity)
     float   stepSize;
     int     jitter;
     int     phaseMode;
@@ -156,6 +160,7 @@ struct GPUVolume {
     // Phase 14: chromatic extinction
     int     chromaticExtinction;
     float   sigmaR, sigmaG, sigmaB;
+    int     spectralVolumes;   // per-lambda in-scatter (CPU mode-2 parity)
     // Phase 14: multiple scattering approximation
     int     msApprox;
     float3  msTint;
@@ -184,6 +189,7 @@ struct LaunchParams {
     CameraParams       camera;
     OptixTraversableHandle traversable;
 
+    int                debugStage;   // 0=off; crash-bisect ladder (env FRED_GPU_DEBUG_STAGE)
     int                spp;
     int                volumeSpp;     // 0 = use spp, else separate vol samples
     int                maxBounces;
@@ -329,6 +335,10 @@ struct LaunchParams {
     float*             aoBuffer;
     int                aoSamples;
     float              aoRadius;
+
+    // Constant hemispherical ambient fill (Fred Render3D "Ambient"; 0 = off).
+    // Compat shader adds ambient * albedo * (0.5 + 0.5*N.y) -- viewport parity.
+    float              ambient;
 };
 
 // Per-ray payload — carried through the trace
