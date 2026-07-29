@@ -212,14 +212,20 @@ loaded.
 
 Diagnostic steps when "my patch didn't work":
 1. Check Task Manager: is `Nuke17.exe` or `Nuke15.exe` (etc.) actually gone?
-2. Check the DLL's filesystem timestamp (`Get-Item
-   build\SpectralRender\SpectralRender.dll | Select LastWriteTime`). Compare
-   to when you ran build.ps1.
-3. **The `SpectralRender: DLL build ...` log line is not reliable** --
-   it's a cached string literal that can lag the actual binary by one
-   or more builds (seen 2026-04-23: DLL mtime was today 06:24, log
-   still reported the previous day's build). Trust the filesystem
-   mtime from step 2, not the log string.
+2. Check the DLL's filesystem timestamp. Lists the 5 most-recent
+   DLLs anywhere under build/, so any plugin's freshness is visible
+   in one go:
+   ```powershell
+   Get-ChildItem -Recurse -Filter *.dll build | Sort-Object LastWriteTime -Descending | Select-Object -First 5 FullName, LastWriteTime
+   ```
+   Compare with when you ran build.ps1.
+3. **Build-timestamp log lines are not reliable** -- they're cached
+   string literals that can lag the actual binary by one or more
+   builds. Affects every plugin that logs one: `SpectralRender: DLL
+   build ...`, `SpectralVDBRead: build ...`, and any future sibling
+   plugin with the same idiom. Seen 2026-04-23: DLL mtime was today
+   06:24 but both log lines still reported the previous day's
+   build. Trust the filesystem mtime from step 2, not the log strings.
 
 Mitigation: always fully close Nuke (not just the file) before rebuilding.
 Rebuild may need to be run from a fresh PowerShell if VS/MSBuild caches

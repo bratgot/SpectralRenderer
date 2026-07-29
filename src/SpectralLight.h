@@ -61,6 +61,13 @@ struct SpectralLight
     float       radius = 0.5f;          // sphere
     float       width  = 1.f, height = 1.f;  // rect
 
+    // Distance-falloff shaping for local lights (sphere/spot/rect).
+    //   0 none/constant, 1 linear fade to zero at falloffRange,
+    //   2 inverse-square (physical, default -- matches legacy behaviour),
+    //   3 inverse-square windowed smoothly to zero at falloffRange.
+    int         falloffMode  = 2;
+    float       falloffRange = 20.f;
+
     // Spot light cone
     float       coneAngle    = 90.f;    // full cone angle in degrees
     float       coneSoftness = 0.f;     // 0 = hard edge, 1 = fully soft
@@ -616,7 +623,25 @@ struct SpectralLight
         float dist2 = d[0]*d[0] + d[1]*d[1] + d[2]*d[2];
         // Sphere lights far from scene (>100 units) are "distant with soft shadow" — no falloff
         if (type == Type::Sphere && dist2 > 10000.f) return 1.f;
-        float atten = 1.f / std::max(dist2, 0.001f);
+        float atten;
+        switch (falloffMode) {
+            case 0:                     // constant: no distance falloff
+                atten = 1.f;
+                break;
+            case 1: {                   // linear fade to zero at falloffRange
+                const float dist = std::sqrt(dist2);
+                atten = std::max(0.f, 1.f - dist / std::max(falloffRange, 1e-3f));
+                break; }
+            case 3: {                   // inverse-square windowed to falloffRange
+                atten = 1.f / std::max(dist2, 0.001f);
+                const float t = std::sqrt(dist2) / std::max(falloffRange, 1e-3f);
+                const float w = std::max(0.f, 1.f - t * t);   // UE-style (1-t^2)^2 window
+                atten *= w * w;
+                break; }
+            default:                    // 2: physical inverse-square (legacy)
+                atten = 1.f / std::max(dist2, 0.001f);
+                break;
+        }
         if (type == Type::Spot) atten *= SpotAttenuation(surfacePos);
         return atten;
     }

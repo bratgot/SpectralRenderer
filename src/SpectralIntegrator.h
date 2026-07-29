@@ -105,6 +105,10 @@ struct SpectralCamera {
     float  fStop             = 0.f;  // 0 = pinhole (no DOF)
     float  focusDistance     = 100.f; // world units
     int    volumeSpp         = 0;    // 0 = use main spp, else separate vol samples
+    // GPU volume shading quality: -1 = auto (legacy: preview when spp <= 8),
+    // 0 = force full shading (self-shadow/geo-shadow/noise/fine march),
+    // 1 = force preview shading. CPU path ignores this (always full).
+    int    previewMode       = -1;
     // Constant hemispherical ambient fill (Fred Render3D "Ambient"; 0 = off).
     // Applied in the compat shader as ambient * albedo * (0.5 + 0.5*N.y) to
     // match Fred's viewport ambient term.

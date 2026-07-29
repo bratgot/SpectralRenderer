@@ -320,6 +320,27 @@ static __forceinline__ __device__ float spotAttenuation(const GPULight& light, f
     return t * t * (3.f - 2.f * t);
 }
 
+// Distance-falloff switch shared by lightAttenuation and the inline compat
+// blocks (CPU parity: SpectralLight::Attenuation). 0 none, 1 linear-to-range,
+// 2 inverse-square (default), 3 inverse-square windowed to range.
+static __forceinline__ __device__ float falloffAtten(const GPULight& light, float dist2)
+{
+    switch (light.falloffMode) {
+        case 0: return 1.f;
+        case 1: {
+            const float dist = sqrtf(dist2);
+            return fmaxf(0.f, 1.f - dist / fmaxf(light.falloffRange, 1e-3f));
+        }
+        case 3: {
+            const float atten = 1.f / fmaxf(dist2, 0.001f);
+            const float t = sqrtf(dist2) / fmaxf(light.falloffRange, 1e-3f);
+            const float w = fmaxf(0.f, 1.f - t * t);   // UE-style (1-t^2)^2 window
+            return atten * w * w;
+        }
+        default: return 1.f / fmaxf(dist2, 0.001f);
+    }
+}
+
 static __forceinline__ __device__ float lightAttenuation(const GPULight& light, float3 hitPos)
 {
     if (light.type == 0 || light.type == 3) return 1.f;
@@ -327,7 +348,7 @@ static __forceinline__ __device__ float lightAttenuation(const GPULight& light, 
     float dist2 = d.x*d.x + d.y*d.y + d.z*d.z;
     // Sphere lights far from scene (>100 units) are "distant with soft shadow" — no falloff
     if (light.type == 1 && dist2 > 10000.f) return 1.f;
-    float atten = 1.f / fmaxf(dist2, 0.001f);
+    float atten = falloffAtten(light, dist2);
     if (light.type == 4) atten *= spotAttenuation(light, hitPos);
     return atten;
 }
@@ -2254,7 +2275,7 @@ extern "C" __global__ void __raygen__spectral()
                             if (ltype == 1 && dist > 100.f) {
                                 atten = 1.f;  // distant soft-shadow sun
                             } else {
-                                atten = 1.f/(dist*dist);
+                                atten = falloffAtten(params.lights[li], dist*dist);
                             }
                             // Spot cone + penumbra: this inline compat block never
                             // called spotAttenuation (unlike lightAttenuation users),
@@ -2379,8 +2400,9 @@ extern "C" __global__ void __raygen__spectral()
 
             float X=0.f, Y=0.f, Z=0.f;
             for (int s = 0; s < spp; ++s) {
-                unsigned int seed = pixIdx*1031u + s*6571u;
-                float wu = (float(s)+hashRNG(seed+2u))/float(spp);
+                const int sg = s + params.sampleOffset;   // global sample index (progressive split)
+                unsigned int seed = pixIdx*1031u + unsigned(sg)*6571u;
+                float wu = (float(sg)+hashRNG(seed+2u))/float(params.sampleTotal);
                 float lambda = 380.f + wu*400.f;
 
                 float radiance;
@@ -2416,12 +2438,13 @@ extern "C" __global__ void __raygen__spectral()
             float rAcc=0.f, gAcc=0.f, bAcc=0.f;
 
             for (int s = 0; s < spp; ++s) {
-                unsigned int seed = pixIdx*1031u + s*6571u;
+                const int sg = s + params.sampleOffset;   // global sample index (progressive split)
+                unsigned int seed = pixIdx*1031u + unsigned(sg)*6571u;
                 float jx = hashRNG(seed); float jy = hashRNG(seed+1u);
                 if (params.blueNoise) {
                     unsigned int pixSeed = py * dim.x + px;
-                    jx = fmodf(hashRNG(pixSeed*2u) + float(s)*0.7548776662f, 1.f);
-                    jy = fmodf(hashRNG(pixSeed*2u+1u) + float(s)*0.5698402909f, 1.f);
+                    jx = fmodf(hashRNG(pixSeed*2u) + float(sg)*0.7548776662f, 1.f);
+                    jy = fmodf(hashRNG(pixSeed*2u+1u) + float(sg)*0.5698402909f, 1.f);
                 }
 
                 float3 origin, dir; float rt = 0.f;
@@ -2563,7 +2586,7 @@ extern "C" __global__ void __raygen__spectral()
                             if (ltype == 1 && dist > 100.f) {
                                 atten = 1.f;
                             } else {
-                                atten = 1.f/(dist*dist);
+                                atten = falloffAtten(params.lights[li], dist*dist);
                             }
                             // Spot cone + penumbra: this inline compat block never
                             // called spotAttenuation (unlike lightAttenuation users),
@@ -2755,18 +2778,19 @@ extern "C" __global__ void __raygen__spectral()
         const int maxBounces = params.maxBounces;
 
         for (int s = 0; s < spp; ++s) {
-            unsigned int seed = pixIdx*1031u + s*6571u;
+            const int sg = s + params.sampleOffset;   // global sample index (progressive split)
+            unsigned int seed = pixIdx*1031u + unsigned(sg)*6571u;
             float jx = hashRNG(seed); float jy = hashRNG(seed+1u);
-            float wu = (float(s)+hashRNG(seed+2u))/float(spp);
+            float wu = (float(sg)+hashRNG(seed+2u))/float(params.sampleTotal);
 
             // R2 quasi-random override
             if (params.blueNoise) {
                 unsigned int pixSeed = py * dim.x + px;
                 float r2off1 = hashRNG(pixSeed * 2u);
                 float r2off2 = hashRNG(pixSeed * 2u + 1u);
-                jx = fmodf(r2off1 + float(s) * 0.7548776662f, 1.f);
-                jy = fmodf(r2off2 + float(s) * 0.5698402909f, 1.f);
-                wu = fmodf(hashRNG(pixSeed * 3u) + float(s) * 0.7548776662f, 1.f);
+                jx = fmodf(r2off1 + float(sg) * 0.7548776662f, 1.f);
+                jy = fmodf(r2off2 + float(sg) * 0.5698402909f, 1.f);
+                wu = fmodf(hashRNG(pixSeed * 3u) + float(sg) * 0.7548776662f, 1.f);
             }
             float lambda = 380.f + wu*400.f;
 
@@ -3131,14 +3155,21 @@ extern "C" __global__ void __raygen__spectral()
             // GPU volume ray marching — gated by volumeSpp
             float sampleAlpha = isHit ? hitOpacity : 0.f;
             if (params.debugStage == 2 || params.debugStage == 3 || params.debugStage == 21) { alphaAccum += isHit ? 1.f : 0.f; goto dbg_skip_vol; }
-            if (params.numGpuVolumes > 0 && s < params.volumeSpp) {
+            if (params.numGpuVolumes > 0 && sg < params.volumeSpp) {
                 float surfT = isHit ? depth : 1e30f;
                 float3 volRGB = make_float3(0.f,0.f,0.f); float volTrans = 1.f;
                 float volLam = 0.f;
                 marchVolume(origin, dir, surfT, lambda, seed + 200u, volRGB, volTrans,
                             /*spectralOn=*/1, volLam);
-                // Scale volume contribution to compensate for fewer samples
-                float volScale = float(spp) / float(params.volumeSpp);
+                // Scale volume contribution to compensate for fewer samples.
+                // GLOBAL boost sampleTotal/volumeSpp: under progressive
+                // sample-splitting the host blends pass averages by pass
+                // sample count, so a constant global boost reconstructs the
+                // exact single-shot estimator sum(vol)/volumeSpp (a per-pass
+                // marched-count boost would under-weight gated passes and dim
+                // the volume). Legacy single-shot (offset 0, total==spp)
+                // reduces to the original spp/volumeSpp bit-for-bit.
+                float volScale = float(params.sampleTotal) / float(params.volumeSpp);
                 // Volume RGB → XYZ directly (sRGB D65 matrix)
                 vx = (0.4124f*volRGB.x + 0.3576f*volRGB.y + 0.1805f*volRGB.z) * volScale;
                 vy = (0.2126f*volRGB.x + 0.7152f*volRGB.y + 0.0722f*volRGB.z) * volScale;

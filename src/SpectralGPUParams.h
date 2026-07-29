@@ -92,6 +92,8 @@ struct GPULight {
     float  cosConeAngle;  // cos(halfAngle) for spot
     float  cosPenumbra;   // cos(innerHalfAngle) for spot
     int    useD65;        // 1 = D65 daylight spectrum instead of RGB Gaussians
+    int    falloffMode;   // 0 none, 1 linear, 2 inverse-square (default), 3 windowed
+    float  falloffRange;  // fade distance for modes 1/3
 };
 
 struct CameraParams {
@@ -192,6 +194,13 @@ struct LaunchParams {
     int                debugStage;   // 0=off; crash-bisect ladder (env FRED_GPU_DEBUG_STAGE)
     int                spp;
     int                volumeSpp;     // 0 = use spp, else separate vol samples
+    // Progressive sample-split: this launch renders spp samples starting at
+    // global sample index sampleOffset out of sampleTotal for the frame.
+    // Seeds/stratification use the GLOBAL index so split passes are
+    // decorrelated and unbiased. Legacy single-shot: offset 0, total == spp
+    // (bit-identical to the pre-progressive kernel).
+    int                sampleOffset;
+    int                sampleTotal;
     int                maxBounces;
     int                colorSpace;   // 0=sRGB, 1=ACEScg, 2=ACES2065
     // Neutral white-balance correction (CPU RenderFrame wbCorrection parity):

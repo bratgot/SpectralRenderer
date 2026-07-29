@@ -562,6 +562,10 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
             p.f = lights[i].height; lightCheck ^= p.u * 37633u;
             p.f = lights[i]._cosConeAngle; lightCheck ^= p.u * 65537u;
             p.f = lights[i]._cosPenumbra;  lightCheck ^= p.u * 92821u;
+            // Falloff shaping must invalidate the upload or a falloff-only
+            // edit keeps rendering with the stale mode/range.
+            lightCheck ^= static_cast<unsigned int>(lights[i].falloffMode + 1) * 29123u;
+            p.f = lights[i].falloffRange;  lightCheck ^= p.u * 47279u;
         }
         // Also checksum virtual light / SH state from dome lights
         for (const auto& L : lights) {
@@ -745,6 +749,8 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
                     gpuLights[i].height    = lights[i].height;
                     gpuLights[i].cosConeAngle = lights[i]._cosConeAngle;
                     gpuLights[i].cosPenumbra  = lights[i]._cosPenumbra;
+                    gpuLights[i].falloffMode  = lights[i].falloffMode;
+                    gpuLights[i].falloffRange = lights[i].falloffRange;
                 }
                 size_t lightBytes = gpuLights.size() * sizeof(spectral_gpu::GPULight);
                 CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_lights), lightBytes));
@@ -1033,6 +1039,13 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
                 gpuLights[i].height    = lights[i].height;
                 gpuLights[i].cosConeAngle = lights[i]._cosConeAngle;
                 gpuLights[i].cosPenumbra  = lights[i]._cosPenumbra;
+                // Keep in sync with the incremental fast-path upload above --
+                // this full-rebuild copy runs on the FIRST render and on every
+                // geometry rebuild; a field missing here uploads value-init 0
+                // (falloffMode 0 = no falloff -> flat over-bright lights).
+                gpuLights[i].falloffMode  = lights[i].falloffMode;
+                gpuLights[i].falloffRange = lights[i].falloffRange;
+                gpuLights[i].useD65 = (lights[i].illuminant == pxr::SpectralLight::Illuminant::D65 && !lights[i].enableColorTemperature) ? 1 : 0;
             }
             size_t lightBytes = gpuLights.size() * sizeof(spectral_gpu::GPULight);
             CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_lights), lightBytes));
@@ -1372,6 +1385,8 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
                                      return e ? std::atoi(e) : 0; }();   // crash bisect
     launchParams.spp         = spp;
     launchParams.volumeSpp   = camera.volumeSpp > 0 ? camera.volumeSpp : spp;
+    launchParams.sampleOffset = 0;      // single-shot default (bit-identical legacy)
+    launchParams.sampleTotal  = spp;
     launchParams.maxBounces  = maxBounces;
     launchParams.colorSpace  = colorSpace;
     // Neutral white-balance correction -- EXACT copy of the CPU RenderFrame
@@ -1402,7 +1417,9 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
         if (wbRGB[1] > 0.01f) launchParams.wbCorrection.y = 1.f / wbRGB[1];
         if (wbRGB[2] > 0.01f) launchParams.wbCorrection.z = 1.f / wbRGB[2];
     }
-    launchParams.previewMode = (spp <= 8) ? 1 : 0;  // shadows only at high spp
+    launchParams.previewMode = (camera.previewMode >= 0)
+        ? (camera.previewMode ? 1 : 0)
+        : ((spp <= 8) ? 1 : 0);  // auto: shadows only at high spp (legacy)
     launchParams.normals     = reinterpret_cast<float3*>(_d_normals);
     launchParams.materialIds = reinterpret_cast<int*>(_d_materialIds);
     launchParams.triCount    = _triCount;
@@ -1912,6 +1929,66 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
 
     // Launch — strip-based for progressive viewer streaming
     auto tLaunchStart = std::chrono::high_resolution_clock::now();
+
+    // Progressive sample-split: when the host installed camera.progressCb,
+    // render the frame as doubling sample batches (1,2,4,...) that the host
+    // blends into a running average, invoking the callback between passes so
+    // the viewer can stream noise refinement. Each launch renders n samples
+    // at global offset 'done' (kernel folds the offset into seeds and
+    // wavelength stratification, so split passes are decorrelated and the
+    // converged result matches a single-shot render up to out-of-gamut
+    // clamping). Mutually exclusive with spatial strips; strips win if both
+    // were requested. Callback contract mirrors the CPU adaptive loop:
+    // intermediate passes only, return false = cancel.
+    if (camera.progressCb && !(stripCallback && numStrips > 1)) {
+        launchParams.yOffset = 0;
+        const size_t fbFloats = size_t(width) * height * 4;
+        std::vector<float> passBuf(fbFloats);
+        int done = 0, passSize = 1, passes = 0;
+        while (done < spp) {
+            const int n = (passSize < spp - done) ? passSize : (spp - done);
+            launchParams.spp          = n;
+            launchParams.sampleOffset = done;
+            launchParams.sampleTotal  = spp;
+            CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(_d_params), &launchParams,
+                                  sizeof(spectral_gpu::LaunchParams), cudaMemcpyHostToDevice));
+            OPTIX_CHECK(optixLaunch(
+                _pipeline, _stream,
+                _d_params, sizeof(spectral_gpu::LaunchParams),
+                &_sbt,
+                width, height, 1));
+            CUDA_CHECK(cudaStreamSynchronize(_stream));
+            CUDA_CHECK(cudaMemcpy(passBuf.data(), reinterpret_cast<void*>(_d_framebuffer),
+                                  fbFloats * sizeof(float), cudaMemcpyDeviceToHost));
+            if (done == 0) {
+                std::memcpy(pixels, passBuf.data(), fbFloats * sizeof(float));
+            } else {
+                // Running average weighted by sample counts (kernel writes the
+                // pass average, so blend, don't sum).
+                const float w2 = float(n) / float(done + n);
+                const float w1 = 1.f - w2;
+                for (size_t i = 0; i < fbFloats; ++i)
+                    pixels[i] = pixels[i] * w1 + passBuf[i] * w2;
+            }
+            done += n;
+            passSize *= 2;
+            ++passes;
+            if (done < spp && !camera.progressCb(done, spp))
+                break;   // host cancelled; pixels holds the last blended state
+        }
+        if (depth) {
+            CUDA_CHECK(cudaMemcpy(depth,
+                                  reinterpret_cast<void*>(_d_depthbuffer),
+                                  size_t(width) * height * sizeof(float),
+                                  cudaMemcpyDeviceToHost));
+        }
+        auto tProgEnd = std::chrono::high_resolution_clock::now();
+        auto msLaunch = std::chrono::duration_cast<std::chrono::milliseconds>(tProgEnd - tLaunchStart).count();
+        fprintf(stderr, "SpectralGPU: timing -- progressive %d passes %d/%d spp launch=%lldms (%dx%d %d vol%s)\n",
+                passes, done, spp, msLaunch, width, height, launchParams.numGpuVolumes,
+                launchParams.previewMode ? " PREVIEW" : "");
+        return true;
+    }
 
     int effectiveStrips = (stripCallback && numStrips > 1) ? numStrips : 1;
     unsigned int stripHeight = (height + effectiveStrips - 1) / effectiveStrips;
