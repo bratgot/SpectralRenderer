@@ -2978,11 +2978,12 @@ extern "C" __global__ void __raygen__spectral()
                             float3 volRGB; float volTrans; float volLamB = 0.f;
                             marchVolume(bOrig, bounceDir, 1e30f, lambda, bSeed + bounce*97u,
                                         volRGB, volTrans, /*spectralOn=*/1, volLamB);
-                            // Non-spectral volumes: RGB composite (smooth-basis
-                            // per-lambda for spectral ones rides radiance below).
-                            vx += throughput * (0.4124f*volRGB.x + 0.3576f*volRGB.y + 0.1805f*volRGB.z);
-                            vy += throughput * (0.2126f*volRGB.x + 0.7152f*volRGB.y + 0.0722f*volRGB.z);
-                            vz += throughput * (0.0193f*volRGB.x + 0.1192f*volRGB.y + 0.9505f*volRGB.z);
+                            // Bounce-ray volume in-scatter rides radiance in BOTH
+                            // modes (CPU parity, SpectralIntegrator RgbAtLambda):
+                            // the vx/vy/vz XYZ accumulators are ASSIGNED (not
+                            // accumulated) by the primary-segment volume march,
+                            // which erased reflected volumes to black in RGB mode.
+                            radiance += throughput * rgbAtLambdaGPU(volRGB, lambda);
                             radiance += throughput * volLamB;
                             throughput *= volTrans;
                         }
@@ -3038,9 +3039,9 @@ extern "C" __global__ void __raygen__spectral()
                         float3 volRGB; float volTrans; float volLamB = 0.f;
                         marchVolume(bOrig, bounceDir, bDepth, lambda, bSeed + bounce*97u,
                                     volRGB, volTrans, /*spectralOn=*/1, volLamB);
-                        vx += throughput * (0.4124f*volRGB.x + 0.3576f*volRGB.y + 0.1805f*volRGB.z);
-                        vy += throughput * (0.2126f*volRGB.x + 0.7152f*volRGB.y + 0.0722f*volRGB.z);
-                        vz += throughput * (0.0193f*volRGB.x + 0.1192f*volRGB.y + 0.9505f*volRGB.z);
+                        // Rides radiance, not vx/vy/vz -- see the bounce-miss
+                        // volume march above (primary segment assigns those).
+                        radiance += throughput * rgbAtLambdaGPU(volRGB, lambda);
                         radiance += throughput * volLamB;
                         throughput *= volTrans;
                     }

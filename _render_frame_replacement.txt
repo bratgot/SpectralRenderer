@@ -1,0 +1,85 @@
+                            // Volume ray marching: helper-based path for non-spectral
+                            // volumes; inline path for spectralVolumes-true volumes which
+                            // composite directly into per-wavelength radiance. Stage 1b
+                            // refactor of an originally ~390-line inline block.
+                            float finalVolTrans = 1.f;
+                            float vx = 0.f, vy = 0.f, vz = 0.f;
+                            float volFirstDenseT = 1e30f;
+
+                            // Detect whether any volume in the list is in spectralVolumes
+                            // mode. If yes, route the whole block through the inline path
+                            // (preserves exact ordering / arithmetic for mixed scenes,
+                            // which is rare). Otherwise, use the helper.
+                            bool anySpectralVolume = false;
+                            for (int vi = 0; vi < numVolumes; ++vi) {
+                                if (volumes[vi] && volumes[vi]->IsValid() &&
+                                    volumes[vi]->spectralVolumes) {
+                                    anySpectralVolume = true;
+                                    break;
+                                }
+                            }
+
+                            if (anySpectralVolume) {
+                                // ---- Inline path (preserved verbatim) ----
+                                for (int vi = 0; vi < numVolumes; ++vi) {
+                                    const SpectralVolume* volume = volumes[vi];
+                                    if (!volume || !volume->IsValid()) continue;
+                                    GfVec3f volRGB(0.f);
+                                    GfVec3f ro(ray.GetStartPoint());
+                                    GfVec3f rd(ray.GetDirection());
+                                    float rdLen = rd.GetLength();
+                                    if (rdLen > 1e-8f) rd /= rdLen;
+                                    GfVec3f invDir(1.f/(std::abs(rd[0])>1e-8f?rd[0]:1e-8f),
+                                                   1.f/(std::abs(rd[1])>1e-8f?rd[1]:1e-8f),
+                                                   1.f/(std::abs(rd[2])>1e-8f?rd[2]:1e-8f));
+                                    GfVec3f t0v = GfVec3f(
+                                        (volume->GetBboxMin()[0]-ro[0])*invDir[0],
+                                        (volume->GetBboxMin()[1]-ro[1])*invDir[1],
+                                        (volume->GetBboxMin()[2]-ro[2])*invDir[2]);
+                                    GfVec3f t1v = GfVec3f(
+                                        (volume->GetBboxMax()[0]-ro[0])*invDir[0],
+                                        (volume->GetBboxMax()[1]-ro[1])*invDir[1],
+                                        (volume->GetBboxMax()[2]-ro[2])*invDir[2]);
+                                    float tNear = std::max({std::min(t0v[0],t1v[0]),
+                                                            std::min(t0v[1],t1v[1]),
+                                                            std::min(t0v[2],t1v[2])});
+                                    float tFar  = std::min({std::max(t0v[0],t1v[0]),
+                                                            std::max(t0v[1],t1v[1]),
+                                                            std::max(t0v[2],t1v[2])});
+                                    tNear = std::max(tNear, 0.f);
+                                    float surfaceT = hit.valid() ? float(hit.t) : 1e30f;
+                                    tFar = std::min(tFar, surfaceT);
+                                    if (tNear < tFar) {
+                                        // Single-volume helper call gives us this volume's
+                                        // (rgb, transmittance) without the inter-volume
+                                        // accumulation logic. We then apply per-volume
+                                        // spectral composite directly into radiance.
+                                        auto sub = _MarchVolumesAlongSegment(
+                                            ro, rd, tFar, lambda, seed, pixIdx,
+                                            &volume, 1, scene, bvh, camera);
+                                        if (sub.firstDenseT < volFirstDenseT)
+                                            volFirstDenseT = sub.firstDenseT;
+                                        // Per-wavelength composite (spectralVolumes mode)
+                                        int sc = (lambda < 500.f) ? 2 : (lambda < 580.f) ? 1 : 0;
+                                        float volSpec = sub.rgb[sc];
+                                        radiance = volSpec + sub.transmittance * radiance;
+                                        finalVolTrans *= sub.transmittance;
+                                    }
+                                }
+                            } else {
+                                // ---- Helper path (single call, all volumes) ----
+                                GfVec3f ro(ray.GetStartPoint());
+                                GfVec3f rd(ray.GetDirection());
+                                float rdLen = rd.GetLength();
+                                if (rdLen > 1e-8f) rd /= rdLen;
+                                float surfaceT = hit.valid() ? float(hit.t) : 1e30f;
+                                auto vr = _MarchVolumesAlongSegment(
+                                    ro, rd, surfaceT, lambda, seed, pixIdx,
+                                    volumes, numVolumes, scene, bvh, camera);
+                                volFirstDenseT = vr.firstDenseT;
+                                vx += (0.4124f*vr.rgb[0] + 0.3576f*vr.rgb[1] + 0.1805f*vr.rgb[2]);
+                                vy += (0.2126f*vr.rgb[0] + 0.7152f*vr.rgb[1] + 0.0722f*vr.rgb[2]);
+                                vz += (0.0193f*vr.rgb[0] + 0.1192f*vr.rgb[1] + 0.9505f*vr.rgb[2]);
+                                radiance *= vr.transmittance;
+                                finalVolTrans = vr.transmittance;
+                            }
