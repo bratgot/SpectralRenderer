@@ -91,6 +91,25 @@ static inline float VolChromaW(const SpectralVolume* v, float lambda) {
     return RgbAtLambda(GfVec3f(v->sigmaR, v->sigmaG, v->sigmaB), lambda);
 }
 
+// Wireframe shader: world-space distance from the barycentric hit point to
+// the nearest triangle edge. Used by both the compat and full-spectral
+// primary shading paths; the GPU __closesthit__spectral mirrors this math --
+// keep the three in sync. Bary convention matches the normal interpolation:
+// v0 weighted by (1-u-v), v1 by u, v2 by v.
+static inline float _WireEdgeDistance(const SpectralTriangle& tri, float u, float v) {
+    const float w = 1.f - u - v;
+    const GfVec3f p = tri.v0 * w + tri.v1 * u + tri.v2 * v;
+    auto segDist = [&p](const GfVec3f& a, const GfVec3f& b) -> float {
+        const GfVec3f ab = b - a;
+        const float len2 = GfDot(ab, ab);
+        float t = (len2 > 1e-12f) ? GfDot(p - a, ab) / len2 : 0.f;
+        t = std::min(1.f, std::max(0.f, t));
+        return (p - (a + ab * t)).GetLength();
+    };
+    return std::min(segDist(tri.v0, tri.v1),
+           std::min(segDist(tri.v1, tri.v2), segDist(tri.v2, tri.v0)));
+}
+
 // File-scoped flag set by RenderFrame, read by _ShadeSpectral
 static bool s_scanlineCompat = false;
 // Pointer to the current render's no-shadow-cast material set. Owned by
@@ -474,6 +493,29 @@ void SpectralIntegrator::RenderFrame(
                                                     mat.opacity, mat.baseColorTexId, mat.textureBlend, hitUV[0], hitUV[1]);
                                         }
                                         continue;
+                                    }
+
+                                    // Wireframe shader: on the wire band draw the flat
+                                    // unlit wire colour; off it, mode 2 makes the face
+                                    // transparent (same skip as opacity<0.01 above).
+                                    if (mat.wireframeMode != 0) {
+                                        const float wd = _WireEdgeDistance(*hit.tri, float(hit.u), float(hit.v));
+                                        if (wd <= mat.wireThickness) {
+                                            accX[pixIdx] += mat.wireColor[0];
+                                            accY[pixIdx] += mat.wireColor[1];
+                                            accZ[pixIdx] += mat.wireColor[2];
+                                            accCount[pixIdx]++;
+                                            accAlpha[pixIdx] += 1.f;
+                                            GfVec3d viewHitW = worldToView.Transform(worldHit);
+                                            float camZW = static_cast<float>(-viewHitW[2]);
+                                            if (camZW < depthBuf[pixIdx]) depthBuf[pixIdx] = camZW;
+                                            if (objIdBuf[pixIdx] == 0) {
+                                                objIdBuf[pixIdx] = hit.tri->objectId;
+                                                matIdBuf[pixIdx] = hit.tri->materialId;
+                                            }
+                                            continue;
+                                        }
+                                        if (mat.wireframeMode == 2) continue;
                                     }
 
                                     // Normal
@@ -871,16 +913,36 @@ void SpectralIntegrator::RenderFrame(
                                     }
                                 }
 
+                                // Wireframe shader (spectral path): wire band = flat
+                                // unlit wire colour (smooth-basis spectral so the CMF
+                                // combine reproduces the RGB, same as volume/dome RGB
+                                // deposits); mode 2 face interior = transparent
+                                // (alpha 0, background composites through).
+                                bool wireFlat = false;
+                                if (mat.wireframeMode != 0) {
+                                    const float wd = _WireEdgeDistance(*hit.tri, float(hit.u), float(hit.v));
+                                    if (wd <= mat.wireThickness) {
+                                        wireFlat = true;
+                                        hitOpacity = 1.f;
+                                    } else if (mat.wireframeMode == 2) {
+                                        hitOpacity = 0.f;
+                                    }
+                                }
+
                                 if (!(aovs && aovs->geometryOnly)) {
-                                    radiance = _ShadeSpectral(
-                                        *hit.tri,
-                                        static_cast<double>(hit.u),
-                                        static_cast<double>(hit.v),
-                                        lambda, mat, scene, hitPos, rayDir,
-                                        shadeBounces, bounceSeed, bvh, rayTime, &comps,
-                                        photonMap, gatherRadius, volumes, numVolumes,
-                                        int(pixIdx), &camera);
-                                    radiance *= hitOpacity;
+                                    if (wireFlat) {
+                                        radiance = RgbAtLambda(mat.wireColor, lambda);
+                                    } else {
+                                        radiance = _ShadeSpectral(
+                                            *hit.tri,
+                                            static_cast<double>(hit.u),
+                                            static_cast<double>(hit.v),
+                                            lambda, mat, scene, hitPos, rayDir,
+                                            shadeBounces, bounceSeed, bvh, rayTime, &comps,
+                                            photonMap, gatherRadius, volumes, numVolumes,
+                                            int(pixIdx), &camera);
+                                        radiance *= hitOpacity;
+                                    }
                                 }
 
                                 GfVec3d viewHit = worldToView.Transform(worldHit);
@@ -1104,6 +1166,14 @@ void SpectralIntegrator::RenderFrame(
                                             if (aIdx < aTex->_pixels.size())
                                                 sampleAlpha *= aTex->_pixels[aIdx];
                                         }
+                                    }
+                                    // Wireframe: the band is opaque, mode-2 face
+                                    // interiors are clear (parity with the shading
+                                    // block above, which cannot reach this alpha).
+                                    if (aMat.wireframeMode != 0) {
+                                        const float wd = _WireEdgeDistance(*hit.tri, float(hit.u), float(hit.v));
+                                        if (wd <= aMat.wireThickness) sampleAlpha = 1.f;
+                                        else if (aMat.wireframeMode == 2) sampleAlpha = 0.f;
                                     }
                                 }
                                 sampleAlpha = 1.f - finalVolTrans * (1.f - sampleAlpha);
@@ -2272,6 +2342,13 @@ float SpectralIntegrator::_ShadeSpectral(
             if (!scene.GetLights().empty()) {
                 for (const SpectralLight& light : scene.GetLights()) {
                     if (light.type != SpectralLight::Type::Dome) continue;
+                    // "Visible in reflections" off: skip the dome for
+                    // specular-classified bounces only (same thresholds as the
+                    // LPE firstBounceType classification above) so diffuse GI
+                    // keeps its dome share. GPU kernel gate must stay in sync.
+                    if (!light.visibleInReflections &&
+                        (regularizedMat.metallic > 0.5f || regularizedMat.roughness < 0.3f))
+                        continue;
                     float domeRad = light.EnvironmentEmission(bounceDir, lambda);
                     if (domeRad > 0.f) {
                         float pdfBsdf  = SpectralBSDF::Pdf(*bounceMat, bounceN, bounceV, bounceDir);

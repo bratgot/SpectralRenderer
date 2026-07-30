@@ -577,6 +577,9 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
             // Hdri-as-background flag must invalidate the GPU params so
             // toggling the knob triggers a re-upload + launch.
             lightCheck ^= (L.visibleInPrimary ? 1u : 0u) * 2654435761u;
+            // Seen-by-reflections toggle must invalidate too, or flipping the
+            // checkbox alone never re-uploads and the GPU keeps the stale flag.
+            lightCheck ^= (L.visibleInReflections ? 1u : 0u) * 75503u;
             p.f = L.envRotation;       lightCheck ^= p.u * 40503u;
             p.f = L.EffectiveIntensity(); lightCheck ^= p.u * 50993u;
             lightCheck ^= static_cast<unsigned int>(L.envTexId + 1) * 15299u;
@@ -631,6 +634,13 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
             p.f = mats[i].sssRadius;        matCheck ^= p.u * 805306457u;
             p.f = mats[i].clearcoat;          matCheck ^= p.u * 1610612741u;
             p.f = mats[i].clearcoatRoughness; matCheck ^= p.u * 46051u;
+            // Wireframe shader knobs -- without these a wire-param change
+            // never re-uploads and the GPU renders stale (audit rule above).
+            matCheck ^= static_cast<unsigned int>(mats[i].wireframeMode + 1) * 53087u;
+            p.f = mats[i].wireThickness;    matCheck ^= p.u * 57241u;
+            p.f = mats[i].wireColor[0];     matCheck ^= p.u * 60913u;
+            p.f = mats[i].wireColor[1];     matCheck ^= p.u * 65963u;
+            p.f = mats[i].wireColor[2];     matCheck ^= p.u * 70919u;
         }
 
         bool lightsChanged = (lightCheck != _cachedLightChecksum);
@@ -720,6 +730,11 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
                 gpuMats[i].clearcoat          = mats[i].clearcoat;
                 gpuMats[i].clearcoatRoughness = mats[i].clearcoatRoughness;
                 gpuMats[i].doubleSided     = mats[i].doubleSided ? 1 : 0;
+                gpuMats[i].wireframeMode   = mats[i].wireframeMode;
+                gpuMats[i].wireThickness   = mats[i].wireThickness;
+                gpuMats[i].wireColor       = make_float3(mats[i].wireColor[0],
+                                                         mats[i].wireColor[1],
+                                                         mats[i].wireColor[2]);
             }
             const size_t matBytes = gpuMats.size() * sizeof(spectral_gpu::GPUMaterial);
             CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_materials), matBytes));
@@ -751,6 +766,7 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
                     gpuLights[i].cosPenumbra  = lights[i]._cosPenumbra;
                     gpuLights[i].falloffMode  = lights[i].falloffMode;
                     gpuLights[i].falloffRange = lights[i].falloffRange;
+                    gpuLights[i].visibleInReflections = lights[i].visibleInReflections ? 1 : 0;
                 }
                 size_t lightBytes = gpuLights.size() * sizeof(spectral_gpu::GPULight);
                 CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_lights), lightBytes));
@@ -1009,6 +1025,11 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
             gpuMats[i].clearcoat          = mats[i].clearcoat;
             gpuMats[i].clearcoatRoughness = mats[i].clearcoatRoughness;
             gpuMats[i].doubleSided     = mats[i].doubleSided ? 1 : 0;
+            gpuMats[i].wireframeMode   = mats[i].wireframeMode;
+            gpuMats[i].wireThickness   = mats[i].wireThickness;
+            gpuMats[i].wireColor       = make_float3(mats[i].wireColor[0],
+                                                     mats[i].wireColor[1],
+                                                     mats[i].wireColor[2]);
         }
         const size_t matBytes = gpuMats.size() * sizeof(spectral_gpu::GPUMaterial);
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&_d_materials), matBytes));
@@ -1045,6 +1066,7 @@ bool SpectralGPU::BuildAccel(const SpectralScene& scene)
                 // (falloffMode 0 = no falloff -> flat over-bright lights).
                 gpuLights[i].falloffMode  = lights[i].falloffMode;
                 gpuLights[i].falloffRange = lights[i].falloffRange;
+                gpuLights[i].visibleInReflections = lights[i].visibleInReflections ? 1 : 0;
                 gpuLights[i].useD65 = (lights[i].illuminant == pxr::SpectralLight::Illuminant::D65 && !lights[i].enableColorTemperature) ? 1 : 0;
             }
             size_t lightBytes = gpuLights.size() * sizeof(spectral_gpu::GPULight);

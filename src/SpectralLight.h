@@ -82,6 +82,7 @@ struct SpectralLight
     float       envRotation = 0.f;         // HDRI rotation in degrees
     float       envShadowSoftness = 0.5f;  // virtual light shadow softness (0=hard, 1=soft)
     bool        visibleInPrimary = false;   // dome shows as BG behind geometry
+    bool        visibleInReflections = true; // dome shows in specular reflections (bounce-miss BSDF-IS)
 
     // CDF importance sampling for HDRI
     std::vector<float> envConditionalCDF;  // per-row CDF (width entries per row)

@@ -67,6 +67,11 @@ struct GPUMaterial {
     // Double-sided flag. When 0, back-facing primary hits are treated
     // as misses (ray passes through). Matches CPU and USD doubleSided.
     int    doubleSided;
+    // Wireframe shader (CPU parity: SpectralMaterial wireframeMode):
+    // 0 off, 1 wire over surface, 2 wire only (faces transparent).
+    int    wireframeMode;
+    float  wireThickness;   // world units
+    float3 wireColor;
 };
 
 // GPU-side texture (header only — pixel data is a separate device buffer)
@@ -94,6 +99,7 @@ struct GPULight {
     int    useD65;        // 1 = D65 daylight spectrum instead of RGB Gaussians
     int    falloffMode;   // 0 none, 1 linear, 2 inverse-square (default), 3 windowed
     float  falloffRange;  // fade distance for modes 1/3
+    int    visibleInReflections; // dome: 1 = seen by specular bounces (default), 0 = hidden
 };
 
 struct CameraParams {

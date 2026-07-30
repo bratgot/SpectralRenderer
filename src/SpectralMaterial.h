@@ -77,6 +77,15 @@ struct SpectralMaterial
     // shared across meshes with different doubleSided settings.
     bool    doubleSided = true;
 
+    // Wireframe shader: 0 off, 1 wire over the shaded surface, 2 wire
+    // only (face interiors transparent to the background). The wire band
+    // is a world-space distance from the barycentric hit point to the
+    // nearest triangle edge (<= wireThickness). Wire pixels shade as a
+    // flat unlit wireColor (predictable for comp use).
+    int     wireframeMode  = 0;
+    float   wireThickness  = 0.02f;  // world units
+    GfVec3f wireColor      = GfVec3f(1.f, 1.f, 1.f);
+
     // Identifier
     std::string name = "default";
 

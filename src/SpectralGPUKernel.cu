@@ -241,6 +241,17 @@ static __forceinline__ __device__ float3 shadeNormal(float3 n)
 }
 
 // ---------------------------------------------------------------------------
+// Wireframe payload flags: __closesthit__spectral computes the barycentric
+// edge distance (raygen has no bary/vertex access) and packs the verdict
+// into the matId payload's spare high bits. EVERY consumer deriving a
+// matId from a hit payload MUST mask with WIRE_MATID_MASK. CPU parity:
+// SpectralIntegrator _WireEdgeDistance.
+// ---------------------------------------------------------------------------
+#define WIRE_BAND_BIT   0x40000000u
+#define WIRE_CLEAR_BIT  0x20000000u
+#define WIRE_MATID_MASK 0x1FFFFFFFu
+
+// ---------------------------------------------------------------------------
 // Light emission
 // ---------------------------------------------------------------------------
 // Smooth RGB -> single-wavelength response (raised-cosine bands): the hard
@@ -1195,7 +1206,7 @@ static __forceinline__ __device__ float shadeHit(
                 if (sp4 == 0u) break;  // no hit — reached light
 
                 // Check if hit is glass or flagged castsShadows=false
-                int sMatId = int(sp4) - 1;
+                int sMatId = int(sp4 & WIRE_MATID_MASK) - 1;
                 // No-shadow-cast: matId was registered via SpectralMeshProperties
                 // with castsShadows=false. Step ray past and keep going as if
                 // the hit weren't there. Same geometry as glass passthrough.
@@ -1758,14 +1769,14 @@ static __forceinline__ __device__ void marchSingleVolume(
                     // through cleanly. Simplest form -- zero the hit-id so
                     // the blocker logic below does nothing.
                     if (gp4 != 0u) {
-                        int nscMatId = int(gp4) - 1;
+                        int nscMatId = int(gp4 & WIRE_MATID_MASK) - 1;
                         if (nscMatId >= 0 && nscMatId < 32 &&
                             (params.noShadowCastMask & (1u << nscMatId))) {
                             gp4 = 0u;
                         }
                     }
                     if (gp4 != 0u) {
-                        int gMatId = int(gp4) - 1;
+                        int gMatId = int(gp4 & WIRE_MATID_MASK) - 1;
                         if (gMatId >= 0 && gMatId < int(params.materialCount)) {
                             const GPUMaterial& gMat = params.materials[gMatId];
                             if (gMat.opacity > 0.99f || gMat.metallic > 0.5f)
@@ -1902,14 +1913,14 @@ static __forceinline__ __device__ void marchSingleVolume(
                                0, 1, 0, gp0,gp1,gp2,gp3,gp4,gp5,gp6);
                     // castsShadows=false: zero the hit-id so blocker logic skips.
                     if (gp4 != 0u) {
-                        int nscMatId = int(gp4) - 1;
+                        int nscMatId = int(gp4 & WIRE_MATID_MASK) - 1;
                         if (nscMatId >= 0 && nscMatId < 32 &&
                             (params.noShadowCastMask & (1u << nscMatId))) {
                             gp4 = 0u;
                         }
                     }
                     if (gp4 != 0u) {
-                        int gMatId = int(gp4) - 1;
+                        int gMatId = int(gp4 & WIRE_MATID_MASK) - 1;
                         if (gMatId >= 0 && gMatId < int(params.materialCount)) {
                             const GPUMaterial& gMat = params.materials[gMatId];
                             if (gMat.opacity > 0.99f || gMat.metallic > 0.5f)
@@ -2367,7 +2378,7 @@ extern "C" __global__ void __raygen__spectral()
                                        OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
                                        0,1,0, sp0,sp1,sp2,sp3,sp4,sp5,sp6);
                             if (sp4 > 0u) {
-                                int blockerMatId = int(sp4) - 1;
+                                int blockerMatId = int(sp4 & WIRE_MATID_MASK) - 1;
                                 if (blockerMatId >= 0 && blockerMatId < 32 &&
                                     (params.noShadowCastMask & (1u << blockerMatId))) {
                                     sp4 = 0u;
@@ -2473,7 +2484,7 @@ extern "C" __global__ void __raygen__spectral()
                     continue;
                 }
 
-                int matId = int(p4)-1;
+                int matId = int(p4 & WIRE_MATID_MASK)-1;
                 if (matId<0||matId>=int(params.materialCount)) matId=0;
                 GPUMaterial mat = params.materials[matId];
 
@@ -2490,6 +2501,29 @@ extern "C" __global__ void __raygen__spectral()
                     mat.opacity *= sampleTextureAlphaGPU(mat.baseColorTexId, hitUV);
                 }
                 if (mat.opacity < 0.01f) continue;
+                // Wireframe shader: flat unlit wire colour on the band; mode-2
+                // face interiors transparent (same skip as the opacity cutout).
+                // Volumes in front still composite over the wire (parity with
+                // the surface accumulation below). CPU parity: integrator
+                // compat wire block.
+                if (p4 & WIRE_CLEAR_BIT) continue;
+                if (p4 & WIRE_BAND_BIT) {
+                    if (depth < minDepth) minDepth = depth;
+                    float3 wrgb = mat.wireColor;
+                    float wA = 1.f;
+                    if (params.numGpuVolumes > 0) {
+                        float3 volRGB; float volTrans; float volLamC = 0.f;
+                        marchVolume(origin, dir, depth, 550.f, seed + 200u, volRGB, volTrans,
+                                    /*spectralOn=*/0, volLamC);
+                        wrgb.x = volRGB.x + volTrans * wrgb.x;
+                        wrgb.y = volRGB.y + volTrans * wrgb.y;
+                        wrgb.z = volRGB.z + volTrans * wrgb.z;
+                        wA = 1.f - volTrans * (1.f - wA);
+                    }
+                    rAcc += wrgb.x; gAcc += wrgb.y; bAcc += wrgb.z;
+                    alphaAccum += wA;
+                    continue;
+                }
                 // Roughness / metallic maps (CPU parity: G scales rough, B metal)
                 // -- feeds the compat GGX specular below.
                 if (mat.roughnessTexId >= 0) mat.roughness = sampleTextureGPU(mat.roughnessTexId, hitUV).y;
@@ -2537,7 +2571,7 @@ extern "C" __global__ void __raygen__spectral()
                                    0,1,0, sp0,sp1,sp2,sp3,sp4,sp5,sp6);
                         // castsShadows=false: don't count as shadow.
                         if (sp4 > 0u) {
-                            int nscMatId = int(sp4) - 1;
+                            int nscMatId = int(sp4 & WIRE_MATID_MASK) - 1;
                             if (nscMatId >= 0 && nscMatId < 32 &&
                                 (params.noShadowCastMask & (1u << nscMatId))) {
                                 sp4 = 0u;
@@ -2676,7 +2710,7 @@ extern "C" __global__ void __raygen__spectral()
                                        OptixVisibilityMask(0xFF), OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
                                        0,1,0, sp0,sp1,sp2,sp3,sp4,sp5,sp6);
                             if (sp4 > 0u) {
-                                int blockerMatId = int(sp4) - 1;
+                                int blockerMatId = int(sp4 & WIRE_MATID_MASK) - 1;
                                 if (blockerMatId >= 0 && blockerMatId < 32 &&
                                     (params.noShadowCastMask & (1u << blockerMatId))) {
                                     sp4 = 0u;
@@ -2816,7 +2850,7 @@ extern "C" __global__ void __raygen__spectral()
             if (params.debugStage == 1) { X += isHit ? 1.f : 0.f; Y += 0.5f; continue; }
 
             if (isHit) {
-                int matId = int(p4)-1;
+                int matId = int(p4 & WIRE_MATID_MASK)-1;
                 if (matId<0||matId>=int(params.materialCount)) matId=0;
                 GPUMaterial mat = params.materials[matId];
 
@@ -2886,6 +2920,18 @@ extern "C" __global__ void __raygen__spectral()
                 float3 hitPos = make_float3(origin.x+depth*dir.x, origin.y+depth*dir.y, origin.z+depth*dir.z);
                 if (depth < minDepth) minDepth = depth;
 
+                // Wireframe shader: clear faces behave like the alpha cutout
+                // (transparent to the background); the wire band is a flat
+                // unlit colour (smooth-basis spectral, CPU parity) that skips
+                // surface shading + bounces -- the shared tail still applies
+                // the primary-segment volume march and alpha (forced to 1 for
+                // the band in the alpha block below).
+                if (p4 & WIRE_CLEAR_BIT) { isHit = false; goto spectral_miss; }
+                if (p4 & WIRE_BAND_BIT) {
+                    radiance = rgbAtLambdaGPU(mat.wireColor, lambda);
+                    goto wire_done;
+                }
+
                 // Shadow catcher: shadow-only alpha, no radiance
                 bool isSC = (matId < 32) && (params.shadowCatcherMask & (1u << matId));
                 if (isSC) {
@@ -2905,7 +2951,7 @@ extern "C" __global__ void __raygen__spectral()
                                    0,1,0, sp0,sp1,sp2,sp3,sp4,sp5,sp6);
                         // castsShadows=false: don't count as shadow.
                         if (sp4 > 0u) {
-                            int nscMatId = int(sp4) - 1;
+                            int nscMatId = int(sp4 & WIRE_MATID_MASK) - 1;
                             if (nscMatId >= 0 && nscMatId < 32 &&
                                 (params.noShadowCastMask & (1u << nscMatId))) {
                                 sp4 = 0u;
@@ -2994,6 +3040,14 @@ extern "C" __global__ void __raygen__spectral()
                         for (unsigned int li = 0; li < params.lightCount; ++li) {
                             const GPULight& domeL = params.lights[li];
                             if (domeL.type != 3) continue;
+                            // "Visible in reflections" off: skip for
+                            // specular-classified bounces only (CPU parity --
+                            // SpectralIntegrator dome-miss gate; same
+                            // metallic/roughness thresholds on the
+                            // path-regularized material).
+                            if (!domeL.visibleInReflections &&
+                                (regMat.metallic > 0.5f || regMat.roughness < 0.3f))
+                                continue;
 
                             // Sample HDRI along bounceDir. This is the key
                             // fix: previously we used lightEmission() which
@@ -3045,7 +3099,7 @@ extern "C" __global__ void __raygen__spectral()
                         radiance += throughput * volLamB;
                         throughput *= volTrans;
                     }
-                    int bMatId = int(bp4)-1;
+                    int bMatId = int(bp4 & WIRE_MATID_MASK)-1;
                     if (bMatId<0||bMatId>=int(params.materialCount)) bMatId=0;
                     resolvedMat = params.materials[bMatId];  // copy for texture resolution
                     if (resolvedMat.baseColorTexId >= 0 && resolvedMat.textureBlend > 0.f) {
@@ -3139,10 +3193,11 @@ extern "C" __global__ void __raygen__spectral()
                 }
             }
 
+            wire_done: ;
             // Alpha from material opacity (texture alpha modulates this)
             float hitOpacity = 1.f;
             if (isHit) {
-                int aMatId = int(p4)-1;
+                int aMatId = int(p4 & WIRE_MATID_MASK)-1;
                 if (aMatId>=0 && aMatId<int(params.materialCount)) {
                     hitOpacity = params.materials[aMatId].opacity;
                     // Apply texture alpha if texture is present
@@ -3152,6 +3207,10 @@ extern "C" __global__ void __raygen__spectral()
                     }
                 }
             }
+
+            // Wireframe band: the wire is opaque regardless of the base
+            // material's opacity.
+            if (isHit && (p4 & WIRE_BAND_BIT)) hitOpacity = 1.f;
 
             // GPU volume ray marching — gated by volumeSpp
             float sampleAlpha = isHit ? hitOpacity : 0.f;
@@ -3236,11 +3295,51 @@ extern "C" __global__ void __closesthit__spectral()
     int matId = getHitMaterialId();
     float2 hitUV = getHitUV();
 
+    // Wireframe: only hit programs can reach barycentrics + vertex
+    // positions, so the edge distance is computed HERE and the verdict is
+    // packed into the matId payload's spare high bits (WIRE_* defines).
+    // CPU parity: SpectralIntegrator _WireEdgeDistance (world-space
+    // point-to-edge distance vs wireThickness).
+    unsigned int matPayload = static_cast<unsigned int>(matId+1);
+    if (matId >= 0 && matId < int(params.materialCount)) {
+        const GPUMaterial& wm = params.materials[matId];
+        if (wm.wireframeMode != 0) {
+            float2 bc = optixGetTriangleBarycentrics();
+            float3 tv[3];
+            optixGetTriangleVertexData(optixGetGASTraversableHandle(),
+                                       optixGetPrimitiveIndex(),
+                                       optixGetSbtGASIndex(),
+                                       optixGetRayTime(), tv);
+            const float bw = 1.f - bc.x - bc.y;
+            const float3 p = make_float3(
+                tv[0].x*bw + tv[1].x*bc.x + tv[2].x*bc.y,
+                tv[0].y*bw + tv[1].y*bc.x + tv[2].y*bc.y,
+                tv[0].z*bw + tv[1].z*bc.x + tv[2].z*bc.y);
+            float dmin = 1e30f;
+            for (int e = 0; e < 3; ++e) {
+                const float3 a = tv[e];
+                const float3 b = tv[(e+1)%3];
+                const float3 ab = make_float3(b.x-a.x, b.y-a.y, b.z-a.z);
+                const float len2 = ab.x*ab.x + ab.y*ab.y + ab.z*ab.z;
+                float t = (len2 > 1e-12f)
+                    ? ((p.x-a.x)*ab.x + (p.y-a.y)*ab.y + (p.z-a.z)*ab.z) / len2
+                    : 0.f;
+                t = fminf(1.f, fmaxf(0.f, t));
+                const float3 q = make_float3(a.x+ab.x*t - p.x,
+                                             a.y+ab.y*t - p.y,
+                                             a.z+ab.z*t - p.z);
+                dmin = fminf(dmin, sqrtf(q.x*q.x + q.y*q.y + q.z*q.z));
+            }
+            if (dmin <= wm.wireThickness)   matPayload |= WIRE_BAND_BIT;
+            else if (wm.wireframeMode == 2) matPayload |= WIRE_CLEAR_BIT;
+        }
+    }
+
     optixSetPayload_0(__float_as_uint(normal.x));
     optixSetPayload_1(__float_as_uint(normal.y));
     optixSetPayload_2(__float_as_uint(normal.z));
     optixSetPayload_3(__float_as_uint(tHit));
-    optixSetPayload_4(static_cast<unsigned int>(matId+1));
+    optixSetPayload_4(matPayload);
     optixSetPayload_5(__float_as_uint(hitUV.x));
     optixSetPayload_6(__float_as_uint(hitUV.y));
 }
