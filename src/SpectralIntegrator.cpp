@@ -7,9 +7,11 @@
 #include <pxr/base/gf/vec4d.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <limits>
 #include <numeric>
+#include <thread>
 #include <vector>
 #include <execution>
 
@@ -110,6 +112,46 @@ static inline float _WireEdgeDistance(const SpectralTriangle& tri, float u, floa
            std::min(segDist(tri.v1, tri.v2), segDist(tri.v2, tri.v0)));
 }
 
+// CPU worker-thread budget (SpectralIntegrator::SetCpuThreadLimit). 0 =
+// default std::execution pool (hardware concurrency). Interactive hosts cap
+// this to cores-2 so all-core render bursts stop starving their UI thread.
+static std::atomic<int> s_cpuThreadLimit{0};
+
+void SpectralIntegrator::SetCpuThreadLimit(int maxThreads) {
+    s_cpuThreadLimit.store(maxThreads);
+}
+
+// Row-parallel dispatch honouring the thread budget. With no budget this is
+// exactly the old std::for_each(par_unseq) over the row list; with one it
+// runs a small work-stealing crew (atomic row index -> load-balanced like
+// the pool, minus the oversubscription).
+template <typename Fn>
+static void _ParallelRows(std::vector<unsigned int>& rows, Fn&& fn) {
+    const int lim = s_cpuThreadLimit.load();
+    if (lim <= 0) {
+        std::for_each(std::execution::par_unseq, rows.begin(), rows.end(), fn);
+        return;
+    }
+    const int nT = std::max(1, std::min<int>(lim, int(rows.size())));
+    if (nT == 1) {
+        for (unsigned int r : rows) fn(r);
+        return;
+    }
+    std::atomic<size_t> next{0};
+    std::vector<std::thread> crew;
+    crew.reserve(size_t(nT));
+    for (int t = 0; t < nT; ++t) {
+        crew.emplace_back([&]() {
+            for (;;) {
+                const size_t i = next.fetch_add(1);
+                if (i >= rows.size()) return;
+                fn(rows[i]);
+            }
+        });
+    }
+    for (std::thread& t : crew) t.join();
+}
+
 // File-scoped flag set by RenderFrame, read by _ShadeSpectral
 static bool s_scanlineCompat = false;
 // Pointer to the current render's no-shadow-cast material set. Owned by
@@ -207,9 +249,7 @@ void SpectralIntegrator::RenderFrame(
     std::vector<unsigned int> rows(H);
     std::iota(rows.begin(), rows.end(), 0u);
 
-    std::for_each(
-        std::execution::par_unseq,
-        rows.begin(), rows.end(),
+    _ParallelRows(rows,
         [&](unsigned int imageY)
         {
             for (unsigned int imageX = 0; imageX < W; ++imageX) {
@@ -308,9 +348,7 @@ void SpectralIntegrator::RenderFrame(
             const int passEnd = std::min(passStart + batchSize, spp);
             const int passSpp = passEnd - passStart;
 
-            std::for_each(
-                std::execution::par_unseq,
-                rows.begin(), rows.end(),
+            _ParallelRows(rows,
                 [&](unsigned int imageY)
                 {
                     for (unsigned int imageX = 0; imageX < W; ++imageX) {
@@ -1372,9 +1410,7 @@ void SpectralIntegrator::RenderFrame(
             const int aoSpp = camera.aoSamples;
             const float aoRadius = camera.aoRadius;
 
-            std::for_each(
-                std::execution::par_unseq,
-                rows.begin(), rows.end(),
+            _ParallelRows(rows,
                 [&](unsigned int imageY)
                 {
                     for (unsigned int imageX = 0; imageX < W; ++imageX) {
@@ -1513,9 +1549,7 @@ void SpectralIntegrator::RenderTile(
     std::vector<unsigned int> rows(tileH);
     std::iota(rows.begin(), rows.end(), 0u);
 
-    std::for_each(
-        std::execution::par_unseq,
-        rows.begin(), rows.end(),
+    _ParallelRows(rows,
         [&](unsigned int localY)
         {
             unsigned int imageY = tileY + localY;
@@ -3004,9 +3038,7 @@ void SpectralIntegrator::ComputeAO(
     std::vector<unsigned int> rows(H);
     std::iota(rows.begin(), rows.end(), 0u);
 
-    std::for_each(
-        std::execution::par_unseq,
-        rows.begin(), rows.end(),
+    _ParallelRows(rows,
         [&](unsigned int imageY)
         {
             for (unsigned int imageX = 0; imageX < W; ++imageX) {
@@ -3129,9 +3161,7 @@ void SpectralIntegrator::ComputeGeometryAOVs(
     std::vector<unsigned int> rows(H);
     std::iota(rows.begin(), rows.end(), 0u);
 
-    std::for_each(
-        std::execution::par_unseq,
-        rows.begin(), rows.end(),
+    _ParallelRows(rows,
         [&](unsigned int imageY)
         {
             for (unsigned int imageX = 0; imageX < W; ++imageX) {

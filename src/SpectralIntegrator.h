@@ -121,6 +121,17 @@ struct SpectralCamera {
 class SpectralIntegrator {
 public:
     // -----------------------------------------------------------------------
+    // SetCpuThreadLimit
+    //
+    //   Caps the CPU render's worker-thread count (0 = default: the full
+    //   std::execution pool at hardware concurrency). Interactive hosts set
+    //   cores-2 so all-core render bursts stop starving their UI thread;
+    //   the ~15% render slowdown is the trade. Thread-safe, takes effect on
+    //   the next RenderFrame/RenderTile.
+    // -----------------------------------------------------------------------
+    static void SetCpuThreadLimit(int maxThreads);
+
+    // -----------------------------------------------------------------------
     // RenderTile
     //
     //   Renders a rectangular tile of pixels into `pixels` (pre-allocated,
