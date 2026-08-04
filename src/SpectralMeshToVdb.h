@@ -25,11 +25,18 @@ public:
     /// world units; halfBandVoxels = narrow-band half width in voxels
     /// (>= 1, typical 3). The density grid is named "density" (Fog/Shell)
     /// or "surface" (LevelSet) so the Volume node's default grid pick works.
+    ///
+    /// colors (optional): per-vertex linear RGB triples (numVerts * 3). When
+    /// present a Vec3f "Cd" grid is written beside the density grid: vertex
+    /// colours splat into their voxels, band voxels take the nearest splat
+    /// (expanding-shell search), and voxels far from any vertex (deep fog
+    /// interior) take the mesh's average colour.
     /// Returns false + error on failure.
     static bool Convert(const float* positions, size_t numVerts,
                         const uint32_t* indices, size_t numIndices,
                         float voxelSize, float halfBandVoxels,
-                        int mode, const char* outPath, std::string& error);
+                        int mode, const char* outPath, std::string& error,
+                        const float* colors = nullptr);
 };
 
 PXR_NAMESPACE_CLOSE_SCOPE
