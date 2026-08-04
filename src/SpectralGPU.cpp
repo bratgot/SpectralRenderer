@@ -1825,10 +1825,45 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
             }
         }
 
+        // Per-voxel colour ("Cd") -- three scalar planes staged from the
+        // interleaved GfVec3f grid, gated by the host's useColorGrid switch.
+        {
+            const bool hasCol = volume->useColorGrid && !volume->color.empty() &&
+                                volume->color.size() >=
+                                    size_t(volume->resX) * volume->resY * volume->resZ;
+            bool colResChanged = hasCol && (volume->resX != dv.cachedColResX ||
+                                            volume->resY != dv.cachedColResY ||
+                                            volume->resZ != dv.cachedColResZ);
+            if (!hasCol || colResChanged) {
+                _DestroyVolumeTex3D(dv.arr_colR, dv.tex_colR);
+                _DestroyVolumeTex3D(dv.arr_colG, dv.tex_colG);
+                _DestroyVolumeTex3D(dv.arr_colB, dv.tex_colB);
+                dv.cachedColResX = dv.cachedColResY = dv.cachedColResZ = 0;
+            }
+            if (hasCol && !dv.tex_colR) {
+                const size_t n = size_t(volume->resX) * volume->resY * volume->resZ;
+                std::vector<float> plane(n);
+                for (int c = 0; c < 3; ++c) {
+                    for (size_t i = 0; i < n; ++i) plane[i] = volume->color[i][c];
+                    cudaArray_t* arrs[3] = {&dv.arr_colR, &dv.arr_colG, &dv.arr_colB};
+                    cudaTextureObject_t* texs[3] = {&dv.tex_colR, &dv.tex_colG, &dv.tex_colB};
+                    _CreateVolumeTex3D(plane.data(), volume->resX, volume->resY,
+                                       volume->resZ, *arrs[c], *texs[c]);
+                }
+                dv.cachedColResX = volume->resX;
+                dv.cachedColResY = volume->resY;
+                dv.cachedColResZ = volume->resZ;
+            }
+        }
+
             gv.densityTex = dv.tex_density;
             gv.temperatureTex = dv.tex_temp;
             gv.flameTex = dv.tex_flame;
         } // end dense 3D texture path
+        gv.colorTexR = dv.tex_colR;
+        gv.colorTexG = dv.tex_colG;
+        gv.colorTexB = dv.tex_colB;
+        gv.hasColorGrid = (dv.tex_colR && volume->useColorGrid) ? 1 : 0;
 
         // Also populate legacy single-volume fields for volume[0]
         if (gi == 0) {
@@ -1867,6 +1902,9 @@ bool SpectralGPU::Render(const SpectralCamera& camera,
         _DestroyVolumeTex3D(_d_volumes[vi].arr_density, _d_volumes[vi].tex_density);
         _DestroyVolumeTex3D(_d_volumes[vi].arr_temp, _d_volumes[vi].tex_temp);
         _DestroyVolumeTex3D(_d_volumes[vi].arr_flame, _d_volumes[vi].tex_flame);
+        _DestroyVolumeTex3D(_d_volumes[vi].arr_colR, _d_volumes[vi].tex_colR);
+        _DestroyVolumeTex3D(_d_volumes[vi].arr_colG, _d_volumes[vi].tex_colG);
+        _DestroyVolumeTex3D(_d_volumes[vi].arr_colB, _d_volumes[vi].tex_colB);
         _d_volumes[vi].cachedResX = _d_volumes[vi].cachedResY = _d_volumes[vi].cachedResZ = 0;
         _d_volumes[vi].cachedTempResX = _d_volumes[vi].cachedTempResY = _d_volumes[vi].cachedTempResZ = 0;
         _d_volumes[vi].cachedFlameResX = _d_volumes[vi].cachedFlameResY = _d_volumes[vi].cachedFlameResZ = 0;

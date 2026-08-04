@@ -153,9 +153,15 @@ private:
         cudaArray_t           arr_density  = nullptr;
         cudaArray_t           arr_temp     = nullptr;
         cudaArray_t           arr_flame    = nullptr;
+        cudaArray_t           arr_colR     = nullptr;   // per-voxel colour ("Cd")
+        cudaArray_t           arr_colG     = nullptr;
+        cudaArray_t           arr_colB     = nullptr;
         cudaTextureObject_t   tex_density  = 0;
         cudaTextureObject_t   tex_temp     = 0;
         cudaTextureObject_t   tex_flame    = 0;
+        cudaTextureObject_t   tex_colR     = 0;
+        cudaTextureObject_t   tex_colG     = 0;
+        cudaTextureObject_t   tex_colB     = 0;
         // NanoVDB device buffers
         CUdeviceptr           nano_density = 0;
         CUdeviceptr           nano_temp    = 0;
@@ -166,6 +172,7 @@ private:
         int                   cachedResX = 0, cachedResY = 0, cachedResZ = 0;
         int                   cachedTempResX = 0, cachedTempResY = 0, cachedTempResZ = 0;
         int                   cachedFlameResX = 0, cachedFlameResY = 0, cachedFlameResZ = 0;
+        int                   cachedColResX = 0, cachedColResY = 0, cachedColResZ = 0;
         uint64_t              dataHash   = 0;
     };
     DeviceVolume           _d_volumes[SPECTRAL_MAX_GPU_VOLUMES];

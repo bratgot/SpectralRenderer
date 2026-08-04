@@ -2961,6 +2961,12 @@ SpectralIntegrator::_MarchVolumesAlongSegment(
                         float albedo = volume->scattering/std::max(volume->extinction,0.01f);
                         float msB = albedo/std::max(1.f-albedo*volume->gForward*volume->lobeMix,0.01f);
                         scatRGB += volume->msTint*(density*volume->scattering*msB*0.3f); }
+                    // Per-voxel colour grid (VDB "Cd"): tint ALL in-scatter at
+                    // this sample (direct + dome + MS) by the local albedo.
+                    if (volume->useColorGrid && !volume->color.empty()) {
+                        const GfVec3f vc = volume->SampleColor(uv[0], uv[1], uv[2]);
+                        scatRGB = GfVec3f(scatRGB[0]*vc[0], scatRGB[1]*vc[1], scatRGB[2]*vc[2]);
+                    }
                     stepRGB = scatRGB * volume->intensity;
                 }
 

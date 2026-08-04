@@ -139,6 +139,12 @@ struct GPUVolume {
     float   tempMin, tempMax;
     float   powder;
     float3  scatterColor;
+    // Per-voxel colour grid (VDB "Cd") as three scalar 3D textures (0 when
+    // absent); hasColorGrid gates the kernel tint (host opt-out).
+    cudaTextureObject_t colorTexR;
+    cudaTextureObject_t colorTexG;
+    cudaTextureObject_t colorTexB;
+    int     hasColorGrid;
     float   envIntensity;   // volume's dome-light response scale (CPU parity)
     float   envDiffuse;     // volume's dome ambient diffuse weight (CPU parity)
     float   stepSize;

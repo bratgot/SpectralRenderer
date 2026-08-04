@@ -141,6 +141,11 @@ struct SpectralVolume {
 
     // Scatter colour
     GfVec3f scatterColor = GfVec3f(1.f);
+    // Per-voxel colour grid gate: when true AND `color` is non-empty, the
+    // march tints in-scatter by SampleColor (VDB "Cd", e.g. a GeoToVolume
+    // bake of projected vertex colours). Hosts can disable per render
+    // without touching the loaded grid.
+    bool useColorGrid = true;
 
     // CIE blackbody emission (Phase 12)
     bool  useBlackbody   = true;

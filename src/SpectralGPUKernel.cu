@@ -1461,6 +1461,16 @@ static __forceinline__ __device__ float sampleDensity(const spectral_gpu::GPUVol
     return tex3D<float>(vol.densityTex, cornerU(u, vol.resX), cornerU(v, vol.resY), cornerU(w, vol.resZ)) * vol.densityMult;
 }
 
+// Per-voxel colour ("Cd") -- three scalar 3D textures, same corner mapping as
+// density. Callers gate on vol.hasColorGrid.
+static __forceinline__ __device__ float3 sampleColorGrid(const spectral_gpu::GPUVolume& vol, float u, float v, float w)
+{
+    const float cu = cornerU(u, vol.resX), cv = cornerU(v, vol.resY), cw = cornerU(w, vol.resZ);
+    return make_float3(tex3D<float>(vol.colorTexR, cu, cv, cw),
+                       tex3D<float>(vol.colorTexG, cu, cv, cw),
+                       tex3D<float>(vol.colorTexB, cu, cv, cw));
+}
+
 static __forceinline__ __device__ float sampleTemp(const spectral_gpu::GPUVolume& vol, float u, float v, float w)
 {
 #ifdef SPECTRAL_USE_NANOVDB
@@ -1983,6 +1993,13 @@ static __forceinline__ __device__ void marchSingleVolume(
                 stepRGB.x += vol.msTint.x * density * vol.scattering * msB * 0.3f;
                 stepRGB.y += vol.msTint.y * density * vol.scattering * msB * 0.3f;
                 stepRGB.z += vol.msTint.z * density * vol.scattering * msB * 0.3f;
+            }
+            // Per-voxel colour grid (VDB "Cd"): tint ALL in-scatter at this
+            // sample (direct + virtual + dome + MS) -- CPU-integrator parity
+            // (emission below stays untinted, as on CPU).
+            if (vol.hasColorGrid) {
+                const float3 vc = sampleColorGrid(vol, u, v, w);
+                stepRGB.x *= vc.x; stepRGB.y *= vc.y; stepRGB.z *= vc.z;
             }
             stepRGB.x*=vol.intensity; stepRGB.y*=vol.intensity; stepRGB.z*=vol.intensity;
         }

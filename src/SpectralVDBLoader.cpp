@@ -180,6 +180,7 @@ struct GridCacheEntry {
     openvdb::FloatGrid::Ptr density;
     openvdb::FloatGrid::Ptr temp;
     openvdb::FloatGrid::Ptr flame;
+    openvdb::Vec3SGrid::Ptr color;   // "Cd"/albedo grid (optional)
     openvdb::CoordBBox bbox;
     std::string filepath;
 };
@@ -212,6 +213,7 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::_LoadFromDisk(const char* fil
         openvdb::FloatGrid::Ptr densityGrid;
         openvdb::FloatGrid::Ptr tempGrid;
         openvdb::FloatGrid::Ptr flameGrid;
+        openvdb::Vec3SGrid::Ptr colorGrid;
         std::string wantDensity = (densityGridName && strlen(densityGridName) > 0) ? densityGridName : "";
         std::string wantTemp = (tempGridName && strlen(tempGridName) > 0) ? tempGridName : "";
         if (wantDensity == "(none)") wantDensity = "";
@@ -228,6 +230,7 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::_LoadFromDisk(const char* fil
                 if (!densityOnly) {
                     tempGrid = it->second.temp;
                     flameGrid = it->second.flame;
+                    colorGrid = it->second.color;
                 }
                 cachedBbox = it->second.bbox;
                 // Only count as full cache hit if we have all grids we need
@@ -261,6 +264,14 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::_LoadFromDisk(const char* fil
                     else if (wantTemp.empty() && _matchName(name, kTempNames)) isTemp = true;
                 }
                 if (!flameGrid && _matchName(name, kFlameNames)) isFlame = true;
+                // Colour ("Cd") grids are Vec3f, not float: read on their own
+                // branch (the FloatGrid cast below would reject them).
+                if (!colorGrid && _matchName(name, kColorNames)) {
+                    auto base = file.readGrid(name);
+                    if (auto cg = openvdb::gridPtrCast<openvdb::Vec3SGrid>(base))
+                        colorGrid = cg;
+                    continue;
+                }
             }
 
             if (isDensity || isTemp || isFlame || (!densityGrid && wantDensity.empty())) {
@@ -287,6 +298,7 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::_LoadFromDisk(const char* fil
                 entry.density = densityGrid;
                 entry.temp = tempGrid;
                 entry.flame = flameGrid;
+                entry.color = colorGrid;
                 entry.bbox = densityGrid->evalActiveVoxelBoundingBox();
                 entry.filepath = filepath;
                 s_gridCache[cacheKey] = entry;
@@ -504,6 +516,27 @@ std::shared_ptr<SpectralVolume> SpectralVDBLoader::_LoadFromDisk(const char* fil
                                 for(int ix=0;ix<rX;++ix){int sx=std::min(int(ix*sX),nX-1);
                                     vol->flame[iz*rY*rX+iy*rX+ix]=nb[sz*nY*nX+sy*nX+sx];}}}
                     }
+                }
+                // Resample colour ("Cd"): Vec3f grid -> vol->color. copyToDense
+                // fills inactive voxels with the grid BACKGROUND, which the
+                // mesh-bake converter sets to the mesh-average colour -- deep
+                // interiors come out neutral by design. Always via a native
+                // staging buffer (Dense is Vec3s; vol->color is GfVec3f).
+                if (colorGrid) {
+                    int nX=int(dim.x()),nY=int(dim.y()),nZ=int(dim.z());
+                    std::vector<openvdb::Vec3s> nb(size_t(nX)*nY*nZ,
+                                                   colorGrid->background());
+                    openvdb::tools::Dense<openvdb::Vec3s,openvdb::tools::LayoutXYZ> dn(bbox,nb.data());
+                    openvdb::tools::copyToDense(*colorGrid,dn);
+                    vol->color.resize(totalVoxels, GfVec3f(1.f));
+                    float sX=float(nX)/rX,sY=float(nY)/rY,sZ=float(nZ)/rZ;
+                    #pragma omp parallel for schedule(dynamic) if(totalVoxels>10000)
+                    for(int iz=0;iz<rZ;++iz){int sz=std::min(int(iz*sZ),nZ-1);
+                        for(int iy=0;iy<rY;++iy){int sy=std::min(int(iy*sY),nY-1);
+                            for(int ix=0;ix<rX;++ix){int sx=std::min(int(ix*sX),nX-1);
+                                const openvdb::Vec3s& c=nb[sz*nY*nX+sy*nX+sx];
+                                vol->color[size_t(iz)*rY*rX+size_t(iy)*rX+ix]=
+                                    GfVec3f(c.x(),c.y(),c.z());}}}
                 }
             }
         }
