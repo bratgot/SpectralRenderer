@@ -1303,7 +1303,15 @@ void SpectralIntegrator::RenderFrame(
                     float mean = accLumSum[i] / float(n);
                     float var = accLumSqSum[i] / float(n) - mean * mean;
                     float stddev = std::sqrt(std::max(0.f, var));
-                    if (stddev < adaptThreshold * std::max(mean, 0.001f)) {
+                    // Converge on the standard error of the MEAN, not the raw
+                    // per-sample stddev: hero-wavelength sampling has a large
+                    // intrinsic per-sample variance that never shrinks with n,
+                    // so comparing stddev froze the converged set after the
+                    // first check (the 32% -> 32% pass-to-pass stall). The
+                    // mean's error falls as 1/sqrt(n), which is what extra
+                    // passes actually buy.
+                    float sem = stddev / std::sqrt(float(n));
+                    if (sem < adaptThreshold * std::max(mean, 0.001f)) {
                         converged[i] = true;
                         convergedCount++;
                     }
